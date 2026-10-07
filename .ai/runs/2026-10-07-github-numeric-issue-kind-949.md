@@ -29,8 +29,8 @@ GitHub's `search issues` endpoint includes pull requests. The discriminator is r
 
 ### Phase 1: Regression and fix
 
-- [ ] 1.1 Add wrong-kind numeric-search regression
-- [ ] 1.2 Filter pull requests from issue search fallback
+- [x] 1.1 Add wrong-kind numeric-search regression — e38ac1a4
+- [x] 1.2 Filter pull requests from issue search fallback — e38ac1a4
 
 ### Phase 2: Verification
 
