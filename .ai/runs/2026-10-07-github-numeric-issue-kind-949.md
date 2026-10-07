@@ -2,7 +2,7 @@
 
 ## Goal
 
-Ensure a numeric search on the Issues tab cannot render a pull request as an issue when GitHub's issue search fallback returns both kinds.
+Ensure a numeric search on the Issues tab cannot render a pull request as an issue when `gh issue view` resolves a pull request number.
 
 ## Scope
 
@@ -12,8 +12,8 @@ Ensure a numeric search on the Issues tab cannot render a pull request as an iss
 
 ### Phase 1: Regression and fix
 
-1. Add a regression fixture proving an issue search result marked as a pull request is excluded after a wrong-kind numeric lookup.
-2. Filter GitHub issue-search hits by the CLI's `isPullRequest` discriminator while preserving genuine issue hits.
+1. Add a regression fixture proving an issue lookup whose canonical URL is a pull request falls through to text search, while genuine issue and PR paths remain intact.
+2. Validate the canonical URL kind returned by the numeric lookup before flattening it for the tab.
 
 ### Phase 2: Verification
 
@@ -21,7 +21,7 @@ Ensure a numeric search on the Issues tab cannot render a pull request as an iss
 
 ## Risks
 
-GitHub's `search issues` endpoint includes pull requests. The discriminator is requested only for the issue-search path and defaults safely for older/mock-shaped fixtures; PR search behavior remains unchanged.
+GitHub's `issue view` endpoint accepts pull request numbers because pull requests are issues too. The canonical URL is the stable kind discriminator; malformed or wrong-kind numeric results fall through to the existing text-search path.
 
 ## Progress
 
@@ -29,8 +29,8 @@ GitHub's `search issues` endpoint includes pull requests. The discriminator is r
 
 ### Phase 1: Regression and fix
 
-- [x] 1.1 Add wrong-kind numeric-search regression — e38ac1a4
-- [x] 1.2 Filter pull requests from issue search fallback — e38ac1a4
+- [x] 1.1 Add wrong-kind numeric-search regression — pending correction
+- [x] 1.2 Validate numeric lookup URL kind — pending correction
 
 ### Phase 2: Verification
 

@@ -537,7 +537,7 @@ const SEARCH_FIELDS = 'number,title,author,createdAt,labels,body,url';
 function searchJsonFields(kind: 'issue' | 'pr'): string {
   return kind === 'pr'
     ? `${SEARCH_FIELDS},isDraft,commentsCount`
-    : `${SEARCH_FIELDS},commentsCount,isPullRequest`;
+    : `${SEARCH_FIELDS},commentsCount`;
 }
 
 /** `gh search issues|prs` returns `commentsCount` where the list tier gets its counts from a
@@ -545,10 +545,6 @@ function searchJsonFields(kind: 'issue' | 'pr'): string {
 const ghSearchHitSchema = ghIssueSchema.extend({
   isDraft: z.boolean().default(false),
   commentsCount: z.number().default(0),
-  // `gh search issues` includes pull requests because GitHub models them as issues. Keep the
-  // discriminator long enough to reject a PR from an Issues-tab search (notably after a numeric
-  // issue lookup falls through when that number belongs to a PR).
-  isPullRequest: z.boolean().default(false),
 });
 
 /** `gh {issue,pr} view <n> --json …` — the exact-number path. Shares `ghIssueSchema`'s core;
@@ -558,6 +554,12 @@ const ghViewHitSchema = ghIssueSchema.extend({
   additions: z.number().default(0),
   deletions: z.number().default(0),
 });
+
+function urlKind(url: string): 'issue' | 'pr' | null {
+  if (/\/issues\/\d+(?:[/?#]|$)/.test(url)) return 'issue';
+  if (/\/pull\/\d+(?:[/?#]|$)/.test(url)) return 'pr';
+  return null;
+}
 
 /** Flatten one validated hit into the `ForgeItem` the tab's rows already render. `checks: null`
  *  is what the list tier ships too since #664 — the glyph hydrates lazily via `/api/github/checks`
@@ -649,6 +651,13 @@ export async function searchGithubItems(
           kind === 'pr' ? `${SEARCH_FIELDS},isDraft,additions,deletions` : SEARCH_FIELDS,
         ]);
         const hit = ghViewHitSchema.parse(JSON.parse(out));
+        // GitHub's `issue view` endpoint accepts a PR number because PRs are issues too. The
+        // requested tab kind is still part of the search contract, so verify the canonical URL
+        // before flattening; a wrong-kind hit falls through to the normal text search.
+        const actualKind = urlKind(hit.url);
+        if (actualKind !== kind) {
+          throw new Error(`GitHub returned a ${actualKind ?? 'unknown'} for an ${kind} lookup`);
+        }
         return { available: true, items: [toSearchItem(kind, hit, labelColors)], labelColors };
       } catch {
         // Not a number in this repo (or not this kind) — fall through to the text search below.
@@ -683,13 +692,9 @@ export async function searchGithubItems(
       trimmed,
     ]);
     const hits = z.array(ghSearchHitSchema).parse(JSON.parse(out));
-    // GitHub's issue search is a union of issues and pull requests. The tab's requested kind is
-    // part of its contract, so a PR returned by the issue fallback must not be relabeled as an
-    // issue. Keep the ordinary text-search path unchanged for PRs and retain genuine issues.
-    const matchingHits = kind === 'issue' ? hits.filter((hit) => !hit.isPullRequest) : hits;
     return {
       available: true,
-      items: matchingHits.map((hit) => toSearchItem(kind, hit, labelColors)),
+      items: hits.map((hit) => toSearchItem(kind, hit, labelColors)),
       truncated: hits.length >= capped,
       labelColors,
     };
