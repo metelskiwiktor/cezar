@@ -29,8 +29,8 @@ GitHub's `issue view` endpoint accepts pull request numbers because pull request
 
 ### Phase 1: Regression and fix
 
-- [x] 1.1 Add wrong-kind numeric-search regression — pending correction
-- [x] 1.2 Validate numeric lookup URL kind — pending correction
+- [x] 1.1 Add wrong-kind numeric-search regression — 871b3be9
+- [x] 1.2 Validate numeric lookup URL kind — 871b3be9
 
 ### Phase 2: Verification
 
