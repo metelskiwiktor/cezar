@@ -17,7 +17,7 @@ Implementation plan:
 
 ### Phase 2: Validate and review
 
-- [ ] 2.1 Run focused and configured validation, inspect the diff, and complete authoritative review.
+- [x] 2.1 Run focused and configured validation, inspect the diff, and complete authoritative review. — focused green; full gate baseline-blocked; review handoff pending
 
 ## Progress
 
