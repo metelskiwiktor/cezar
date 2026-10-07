@@ -164,6 +164,24 @@ describe('AutomationStore.acquireLease — a lock nobody is holding any more (#9
     expect(store.acquireLease(0)).toBeDefined();
   });
 
+  it('retries when stale-guard cleanup loses the path race', async () => {
+    const dir = await lockedDirectory(JSON.stringify({ pid: UNREACHABLE_PID, startedAt: new Date().toISOString() }));
+    let attempts = 0;
+    const store = AutomationStore.open(dir, {
+      beforeLeaseMetadataWrite: () => {
+        if (attempts++ === 0) {
+          const error = new Error('guard was replaced during stale recovery') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        }
+      },
+    });
+    const lease = store.acquireLease();
+    expect(lease).toBeDefined();
+    expect(attempts).toBe(2);
+    lease?.release();
+  });
+
   it('probes real pids when nothing is injected', async () => {
     const live = await lockedDirectory(JSON.stringify({ pid: process.ppid, startedAt: new Date().toISOString() }));
     expect(AutomationStore.open(live).acquireLease()).toBeUndefined();
