@@ -23,7 +23,7 @@ Prevent concurrent task worktree creation from failing on a transient shared `.g
 
 ### Phase 2: Verification and delivery
 
-- [ ] 2.1 Run targeted tests and prove the regression is red against the parent implementation and green with the fix.
+- [x] 2.1 Run targeted tests and prove the regression is red against the parent implementation and green with the fix. — a343a6c4
 - [ ] 2.2 Run the configured validation gate, review the PR, and report the verified branch and PR.
 
 ## Risks
