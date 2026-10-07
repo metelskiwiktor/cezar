@@ -1782,6 +1782,23 @@ describe('searchGithubItems (#730)', () => {
     expect(argvs.some((a) => a[0] === 'search')).toBe(true);
   });
 
+  it('does not misidentify a pull request returned by the issue fallback', async () => {
+    const argvs = ghSpy((argv) => {
+      if (argv[0] === 'repo') return 'owner/n\n';
+      if (argv[0] === 'issue' && argv[1] === 'view') return new Error('issue not found');
+      if (argv[0] === 'search') {
+        return JSON.stringify([searchHit({ isPullRequest: true, url: 'https://github.com/owner/n/pull/4507' })]);
+      }
+      return '';
+    });
+
+    const res = await searchGithubItems('/repo/search-issue-kind', 'issue', '4507');
+
+    expect(res.available).toBe(true);
+    expect(res.items).toEqual([]);
+    expect(argvs.some((a) => a[0] === 'search' && a[1] === 'issues')).toBe(true);
+  });
+
   it('marks the hit list truncated when it fills the cap', async () => {
     ghSpy((argv) => {
       if (argv[0] === 'repo') return 'owner/n\n';
