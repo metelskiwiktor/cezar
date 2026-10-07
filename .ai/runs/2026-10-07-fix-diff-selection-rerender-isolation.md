@@ -21,7 +21,7 @@ Non-goals: server/API changes, attachment/composer flow, or changes to saved com
 
 ### Phase 2: Regression coverage and verification
 
-- [x] 2.1 Add a render-count regression covering an unrelated file during drag selection. — 23be7f5c
+- [x] 2.1 Add a render-count regression covering an unrelated file during drag selection. — b66ecbf0
 - [x] 2.2 Run targeted and configured validation, review the PR, and capture UI evidence where available. — b905d314
 
 ## Risks
@@ -39,5 +39,5 @@ The selection provider must remain mounted with each file body so virtualization
 
 ### Phase 2: Regression coverage and verification
 
-- [x] 2.1 Add a render-count regression covering an unrelated file during drag selection. — 23be7f5c
+- [x] 2.1 Add a render-count regression covering an unrelated file during drag selection. — b66ecbf0
 - [x] 2.2 Run targeted and configured validation, review the PR, and capture UI evidence where available. — b905d314
