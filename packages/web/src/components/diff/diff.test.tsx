@@ -2,6 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { Diff, DiffFallback } from './diff'
+import { DiffView } from './diff-view'
+import { DiffRenderObserverContext } from './line-comments'
 import type { DiffFileChange } from './types'
 
 // Explicit rather than relying on RTL's auto-cleanup, which only runs when vitest `globals` is on.
@@ -151,6 +153,30 @@ describe('Diff facade', () => {
 
     expect(screen.getByText('Binary file — no text diff.')).not.toBeNull()
     expect(screen.getByText('No content changes (metadata only).')).not.toBeNull()
+  })
+})
+
+describe('Diff selection render isolation', () => {
+  it('does not rerender the unrelated DiffFileBody while dragging in another file', async () => {
+    const renders = new Map<string, number>()
+    const observe = (path: string) => renders.set(path, (renders.get(path) ?? 0) + 1)
+    render(
+      <DiffRenderObserverContext.Provider value={observe}>
+        <DiffView files={[MODIFIED, ADDED]} onAddComment={vi.fn()} />
+      </DiffRenderObserverContext.Provider>,
+    )
+    await screen.findByText('README.md')
+
+    // Ignore initial parsing/highlighting and count only the drag updates.
+    renders.clear()
+    const file = document.querySelector<HTMLElement>('[data-slot="diff-file"][data-path="src/a.ts"]')!
+    const rows = [...file.querySelectorAll<HTMLElement>('[data-slot="diff-line"]')]
+    const plusOf = (row: HTMLElement) => row.querySelector<HTMLButtonElement>('[data-slot="diff-add-comment"]')!
+    fireEvent.mouseDown(plusOf(rows[0]!), { button: 0 })
+    fireEvent.mouseEnter(rows[2]!)
+
+    expect(renders.get('src/a.ts') ?? 0).toBeGreaterThan(0)
+    expect(renders.get('README.md') ?? 0).toBe(0)
   })
 })
 

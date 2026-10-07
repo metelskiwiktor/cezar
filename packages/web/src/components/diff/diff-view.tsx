@@ -21,6 +21,7 @@ import {
   anchorForLine,
   anchorKey,
   LineCommentsContext,
+  DiffRenderObserverContext,
   LineSelectionProvider,
   FileLinesContext,
   LineCommentThread,
@@ -612,6 +613,8 @@ function DiffFileBody({
   imageSrc?: (path: string) => string
   onOpenInApp?: (path: string) => void
 }) {
+  const renderObserver = useContext(DiffRenderObserverContext)
+  renderObserver?.(file.path)
   const parsed = useMemo(() => parsePatch(file.patch), [file.patch])
   // The trailing (after-last-hunk) region has an unknown length — only offer it when a
   // loader can actually materialize it, and never for fully-new or deleted files.

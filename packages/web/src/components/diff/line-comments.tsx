@@ -157,6 +157,9 @@ export interface LineCommentsApi {
 
 export const LineCommentsContext = createContext<LineCommentsApi | null>(null)
 
+/** Test-only render probe; the default is inert and has no production observer. */
+export const DiffRenderObserverContext = createContext<((path: string) => void) | null>(null)
+
 export interface LineSelectionApi {
   selection: LineSelection | null
   /** Press on a "+": start a range at that row. Releasing anywhere opens the editor for it. */
