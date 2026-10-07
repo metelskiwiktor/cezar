@@ -12,8 +12,8 @@ Implementation plan:
 
 ### Phase 1: Reproduce and fix
 
-- [ ] 1.1 Add a deterministic regression harness for the stale-guard churn and record the old-code zero-winner failure.
-- [ ] 1.2 Retry the bounded transient stale-guard race without weakening exclusivity, with focused assertions.
+- [x] 1.1 Add a deterministic regression harness for the stale-guard churn and record the old-code zero-winner failure. — controlled ENOENT hook: old code red, new code green
+- [x] 1.2 Retry the bounded transient stale-guard race without weakening exclusivity, with focused assertions. — 7048494c
 
 ### Phase 2: Validate and review
 
