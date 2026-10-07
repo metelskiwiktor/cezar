@@ -16,8 +16,8 @@ Non-goals: server/API changes, attachment/composer flow, or changes to saved com
 
 ### Phase 1: Diagnose and isolate live selection state
 
-- [ ] 1.1 Add a per-file selection context and move drag state/handlers out of the shared comments context.
-- [ ] 1.2 Update unified and split row consumers to use scoped selection state without changing range semantics.
+- [x] 1.1 Add a per-file selection context and move drag state/handlers out of the shared comments context. — 23be7f5c
+- [x] 1.2 Update unified and split row consumers to use scoped selection state without changing range semantics. — 23be7f5c
 
 ### Phase 2: Regression coverage and verification
 
@@ -34,8 +34,8 @@ The selection provider must remain mounted with each file body so virtualization
 
 ### Phase 1: Diagnose and isolate live selection state
 
-- [ ] 1.1 Add a per-file selection context and move drag state/handlers out of the shared comments context.
-- [ ] 1.2 Update unified and split row consumers to use scoped selection state without changing range semantics.
+- [x] 1.1 Add a per-file selection context and move drag state/handlers out of the shared comments context. — 23be7f5c
+- [x] 1.2 Update unified and split row consumers to use scoped selection state without changing range semantics. — 23be7f5c
 
 ### Phase 2: Regression coverage and verification
 
