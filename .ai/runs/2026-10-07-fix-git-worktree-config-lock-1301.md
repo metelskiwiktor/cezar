@@ -18,8 +18,8 @@ Prevent concurrent task worktree creation from failing on a transient shared `.g
 
 ### Phase 1: Fix and regression coverage
 
-- [ ] 1.1 Add `--no-track` to fresh worktree creation and document why.
-- [ ] 1.2 Add a deterministic regression test that holds `.git/config.lock`, proves fresh creation still succeeds, and verifies no upstream metadata is required.
+- [x] 1.1 Add `--no-track` to fresh worktree creation and document why. — a343a6c4
+- [x] 1.2 Add a deterministic regression test that holds `.git/config.lock`, proves fresh creation still succeeds, and verifies no upstream metadata is required. — a343a6c4
 
 ### Phase 2: Verification and delivery
 
