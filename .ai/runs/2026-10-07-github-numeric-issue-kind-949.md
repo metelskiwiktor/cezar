@@ -34,4 +34,4 @@ GitHub's `search issues` endpoint includes pull requests. The discriminator is r
 
 ### Phase 2: Verification
 
-- [ ] 2.1 Run focused tests, typecheck and configured gate
+- [x] 2.1 Run focused tests, typecheck and configured gate — focused forge suite passes; full gate has unrelated baseline failures (see PR report)
