@@ -20,7 +20,11 @@ Audited all 136 open issues and 116 open PRs using GitHub CLI. Existing high-pri
 ## Non-goals
 Features, base-branch merges, duplicate PRs, deployment, new settings, and changes outside assigned scopes.
 
-## Dispatch blocker
+## Dispatch recovery
+
+Recovered through read-only discovery: loopback port belongs to an unrelated dry-run test cockpit. http://172.17.0.1:4321 recognizes project cezar and exact parent run ID cd06c54e-64d4-46b8-b8e8-bbce52120800; task list succeeds with command-local CEZ_API_URL override. Neither server changed.
+
+## Initial dispatch blocker
 
 The first `node "$CEZ_BIN" task create` failed with `dispatch refused — unknown project: cezar`. `node "$CEZ_BIN" task list` independently failed with `could not list runs — unknown project: cezar`. No child was created; model availability was not tested. No implementation, PR, tests or final review completed. The cockpit-injected project identifier must resolve on the cockpit API before resuming. Preserve the requested model and final-review requirement.
 
