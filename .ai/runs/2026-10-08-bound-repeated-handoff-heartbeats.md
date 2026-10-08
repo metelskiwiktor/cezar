@@ -21,8 +21,8 @@ Implement issue #1215 by coalescing adjacent eligible same-note engine heartbeat
 
 - [x] 1.1 Add regression tests that reproduce unbounded growth and pin coalescing, count accumulation, eligibility, boundaries, header-less behavior, and silent failures. — 4e33f4c9
 - [x] 1.2 Implement eligible heartbeat parsing, adjacent same-note coalescing, and the exported 100-entry cap in the existing read-modify-write path. — 4e33f4c9
-- [ ] 1.3 Run targeted tests, inspect the scoped diff, and run the configured validation gate.
-- [ ] 1.4 Review the final diff locally and publish the tested branch as a PR.
+- [x] 1.3 Run targeted tests, inspect the scoped diff, and run the configured validation gate. — 5b437032; targeted 12/12 and unit 42/42 pass; repository gate has unrelated baseline failures
+- [x] 1.4 Review the final diff locally and publish the tested branch as a PR. — 5b437032; draft PR #1332
 
 ## Risks
 
@@ -34,7 +34,7 @@ Implement issue #1215 by coalescing adjacent eligible same-note engine heartbeat
 
 ### Phase 1: Implement and verify bounded handoff journals
 
-- [ ] 1.1 Add regression tests that reproduce unbounded growth and pin coalescing, count accumulation, eligibility, boundaries, header-less behavior, and silent failures.
-- [ ] 1.2 Implement eligible heartbeat parsing, adjacent same-note coalescing, and the exported 100-entry cap in the existing read-modify-write path.
-- [ ] 1.3 Run targeted tests, inspect the scoped diff, and run the configured validation gate.
-- [ ] 1.4 Review the final diff locally and publish the tested branch as a PR.
+- [x] 1.1 Add regression tests that reproduce unbounded growth and pin coalescing, count accumulation, eligibility, boundaries, header-less behavior, and silent failures. — 4e33f4c9
+- [x] 1.2 Implement eligible heartbeat parsing, adjacent same-note coalescing, and the exported 100-entry cap in the existing read-modify-write path. — 4e33f4c9
+- [x] 1.3 Run targeted tests, inspect the scoped diff, and run the configured validation gate. — 5b437032; targeted 12/12 and unit 42/42 pass; repository gate has unrelated baseline failures
+- [x] 1.4 Review the final diff locally and publish the tested branch as a PR. — 5b437032; draft PR #1332
