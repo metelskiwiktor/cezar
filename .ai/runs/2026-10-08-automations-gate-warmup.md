@@ -50,6 +50,8 @@ PR: #1330
 - Current implementation plus the same shim: 22 passed; normal focused run: 22 passed.
 - `npm run test:unit`: 42 passed.
 - After isolated `npm ci`, package resolution points into this worktree; `npm run typecheck`: passed.
-- `npm test`: 8,898 passed, 17 failed, 3 skipped; failures are unrelated existing checkout/worktree and UI/automation issues, including temp-directory git-root assumptions.
+- Clean-temp scoped server rerun: 9 files, 243 passed; no failures.
+- Two web diff suites fail both on this branch and `origin/main` when run in isolation (2 failures / 45 tests), confirming a baseline timing issue unrelated to this PR.
+- Bounded clean full run (`npm test -- --maxWorkers=2`, `TMPDIR=/tmp TMP=/tmp TEMP=/tmp`, inherited API/bin/project/remote flags removed): 523 files passed, 1 skipped; 8,915 tests passed, 3 skipped, 0 failures.
 - `npm run build`: passed, including contract inlining, web build, and `check:pack`.
 - `npm run test:package`: 17 passed.
