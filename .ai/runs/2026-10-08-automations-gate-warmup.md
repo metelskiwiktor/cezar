@@ -40,6 +40,6 @@ PR: #1330
 
 ### Phase 1: Replace timing assumptions
 
-- [x] 1.1 Reproduce the delay-sensitive failures with a deterministic slow-git shim and record the baseline. — pending evidence in PR #1330
-- [ ] 1.2 Replace fixed warm-up sleeps with observable completion and restore the re-baseline-before-scheduler ordering assertion.
+- [x] 1.1 Reproduce the delay-sensitive failures with a deterministic slow-git shim and record the baseline. — 146821d7
+- [x] 1.2 Replace fixed warm-up sleeps with observable completion and restore the re-baseline-before-scheduler ordering assertion. — 146821d7
 - [ ] 1.3 Run focused regression tests, the configured validation gate, and report evidence.
