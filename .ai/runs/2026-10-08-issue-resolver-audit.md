@@ -20,6 +20,10 @@ Audited all 136 open issues and 116 open PRs using GitHub CLI. Existing high-pri
 ## Non-goals
 Features, base-branch merges, duplicate PRs, deployment, new settings, and changes outside assigned scopes.
 
+## Dispatch blocker
+
+The first `node "$CEZ_BIN" task create` failed with `dispatch refused — unknown project: cezar`. `node "$CEZ_BIN" task list` independently failed with `could not list runs — unknown project: cezar`. No child was created; model availability was not tested. No implementation, PR, tests or final review completed. The cockpit-injected project identifier must resolve on the cockpit API before resuming. Preserve the requested model and final-review requirement.
+
 ## Risks
 #1307 references an unmerged dependency; child must establish whether a standalone safe fix exists. Old reports can already be fixed: reproduce before changing, report no-action evidence honestly. Model availability is not yet verified. Full gate failures must be disclosed, not hidden.
 
