@@ -15,7 +15,7 @@ Non-goals: changing task-diff callers, persisted run schemas, branch creation, o
 
 ### Phase 2: Verify and publish
 
-- [ ] 2.1 Run focused tests and the configured validation gate, review the final diff, and publish the fix PR with evidence.
+- [x] 2.1 Run focused tests and the configured validation gate, review the final diff, and publish the fix PR with evidence.
 
 Risks: a recorded SHA is also used for intentional in-place runs, so the fix must only replace it when Git can establish the corresponding branch/ref relationship; otherwise it must preserve the existing SHA fallback.
 
@@ -30,4 +30,4 @@ Risks: a recorded SHA is also used for intentional in-place runs, so the fix mus
 
 ### Phase 2: Verify and publish
 
-- [ ] 2.1 Run focused tests and the configured validation gate, review the final diff, and publish the fix PR with evidence.
+- [x] 2.1 Run focused tests and the configured validation gate, review the final diff, and publish the fix PR with evidence.
