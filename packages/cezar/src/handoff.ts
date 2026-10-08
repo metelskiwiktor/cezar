@@ -27,9 +27,11 @@ export interface HandoffSeed {
 export const MAX_HANDOFF_HEARTBEATS = 100;
 
 interface ParsedHeartbeat {
+  raw: string;
   timestamp: string;
   note: string;
   count: number;
+  coalesced: boolean;
 }
 
 const HEARTBEAT_RE = /^(?:- )?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{3})?)?Z) — ((?:turn complete|step "|picked from).*)$/;
@@ -45,9 +47,11 @@ function parseHeartbeat(line: string): ParsedHeartbeat | undefined {
   const count = countMatch ? Number(countMatch[1]) : 1;
   if (!Number.isSafeInteger(count) || count < 1) return undefined;
   return {
+    raw: line,
     timestamp,
     note: countMatch ? rawNote.slice(0, countMatch.index) : rawNote,
     count,
+    coalesced: false,
   };
 }
 
@@ -77,6 +81,7 @@ function boundProgressLog(text: string): string {
     }
     if (previousHeartbeat && previousHeartbeat.note === heartbeat.note) {
       previousHeartbeat.count += heartbeat.count;
+      previousHeartbeat.coalesced = true;
       coalesced[coalesced.length - 1] = previousHeartbeat;
     } else {
       coalesced.push(heartbeat);
@@ -91,7 +96,9 @@ function boundProgressLog(text: string): string {
   const overflow = new Set(eligible.slice(MAX_HANDOFF_HEARTBEATS));
   const bounded = coalesced
     .filter((_, index) => !overflow.has(index))
-    .map((entry) => (typeof entry === 'string' ? entry : formatHeartbeat(entry)))
+    .map((entry) =>
+      typeof entry === 'string' ? entry : entry.coalesced ? formatHeartbeat(entry) : entry.raw,
+    )
     .join('\n');
   return `${text.slice(0, sectionStart)}${bounded}${text.slice(sectionEnd)}`;
 }
