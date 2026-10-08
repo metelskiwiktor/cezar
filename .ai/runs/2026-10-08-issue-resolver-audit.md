@@ -60,3 +60,9 @@ The first `node "$CEZ_BIN" task create` failed with `dispatch refused — unknow
 ## Replacement work
 
 #1215 dispatched as bfda1ebd: bound/coalesce engine heartbeats, handoff.ts and tests only. Lower-priority but actionable uncovered bounded-growth issue. Six children used; at most one more implementation child and the required final review remain. #926 had no diff and existing landed fix verified; no duplicate PR.
+
+## First delivered PR
+
+#1325 child opened draft PR #1329 at 5e1170df; parent inspected source/test diff and reran focused tests (19 passed). Full gate failed per child, so this step remains pending and PR stays draft. Final reviewer must assess real-git coverage, detached HEAD/SHA semantics, missing origin/HEAD and inherited-failure evidence. No merge accepted yet.
+
+#1214 replacement dispatched as 51b0599b (process-usage module/tests only). Seven of eight children used; only final review slot remains.
