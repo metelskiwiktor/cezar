@@ -353,6 +353,18 @@ describe('the dispatch engine (spec 2026-09-10-dispatch)', () => {
       expect(store.getRun(child.id)?.awaitingAnswerSince).toBeUndefined();
     }, 60_000);
 
+    it('reports an unanswered child exactly once when Finish explicitly retires it', async () => {
+      const parent = await parkedRoot();
+      const child = start('mock:ask which library?', childOf(parent.id), { autonomous: true });
+      await waitFor(child.id, (r) => r?.status === 'waiting');
+      expect(manager.finish(child.id)).toBe(true);
+      await waitFor(child.id, (r) => r?.status === 'done' || r?.status === 'review');
+      await waitFor(parent.id, () => notes(parent.id).some((note) => note.includes('report received from task')), 40_000);
+      const reportNotes = notes(parent.id).filter((note) => note.includes('report received from task'));
+      expect(reportNotes).toHaveLength(1);
+      expect(store.getRun(child.id)?.awaitingAnswerSince).toBeUndefined();
+    }, 60_000);
+
     it('records a child’s own report and delivers it into the parent’s open session at settle', async () => {
       const stdinFile = join(repoRoot, 'mock-stdin.ndjson');
       savedEnv.CEZ_MOCK_STDIN_FILE = process.env.CEZ_MOCK_STDIN_FILE;

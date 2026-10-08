@@ -18,7 +18,7 @@ Non-goals: cross-task waits (#1289), changes to terminal statuses, or persisted 
 
 ### Phase 2: Validate and publish
 
-- [ ] 2.1 Run the configured validation gate, review the diff, and publish the fix PR. — clean gate green; archive notification remains outside assigned scope
+- [ ] 2.1 Run the configured validation gate, review the diff, and publish the fix PR. — configured commands except `npm test` pass; bounded full run was stopped after repeated unrelated failures/timeouts
 
 ## Progress
 
@@ -32,4 +32,4 @@ Non-goals: cross-task waits (#1289), changes to terminal statuses, or persisted 
 
 ### Phase 2: Validate and publish
 
-- [ ] 2.1 Run the configured validation gate, review the diff, and publish the fix PR.
+- [ ] 2.1 Run the configured validation gate, review the diff, and publish the fix PR. — PR remains draft pending independent review of unrelated full-suite failures

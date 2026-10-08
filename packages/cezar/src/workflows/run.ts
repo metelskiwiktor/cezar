@@ -2252,6 +2252,11 @@ export class RunManager {
     return { budgetUsd: maxCost ?? remaining };
   }
 
+  /** Notify the parent after an explicit user action retires an unanswered child question. */
+  notifyQuestionRetired(runId: string): void {
+    this.reportSettledChildToParent(runId);
+  }
+
   /**
    * A child settled — tell its parent. Nothing else fires this: there is no process-exit callback
    * and no sub-agent-completion event, so a parent parked on `monitoring` waiting for children

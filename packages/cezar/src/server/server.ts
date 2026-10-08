@@ -4059,7 +4059,7 @@ export function createApp(deps: ServerDeps) {
     .post('/runs/read-all', (c) => c.json({ read: c.get('project').store.markAllRead() }))
 
     .post('/runs/:id/archive', jsonZodValidator(archiveSchema, { absent: ({}) }), async (c) => {
-      const { store } = c.get('project');
+      const { store, manager } = c.get('project');
       const id = c.req.param('id');
       // An empty/absent body archives (the common case); a malformed body degrades
       // to `{}` just as before, but a wrong-typed `archived` is now a 400 (#429).
@@ -4067,7 +4067,9 @@ export function createApp(deps: ServerDeps) {
       // `setArchived` itself — the bulk sweep must obey it too (spec
       // 2026-08-03-auto-resume-after-usage-limit).
       const parsed = { data: c.req.valid('json') };
+      const retiresQuestion = parsed.data.archived !== false && store.getRun(id)?.awaitingAnswerSince !== undefined;
       const run = store.setArchived(id, parsed.data.archived !== false);
+      if (run && retiresQuestion) manager.notifyQuestionRetired?.(id);
       return run ? c.json(run) : c.json({ error: 'not found' }, 404);
     })
 
