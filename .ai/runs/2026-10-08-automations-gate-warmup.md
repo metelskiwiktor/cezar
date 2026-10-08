@@ -42,7 +42,7 @@ PR: #1330
 
 - [x] 1.1 Reproduce the delay-sensitive failures with a deterministic slow-git shim and record the baseline. — 146821d7
 - [x] 1.2 Replace fixed warm-up sleeps with observable completion and restore the re-baseline-before-scheduler ordering assertion. — 146821d7
-- [x] 1.3 Run focused regression tests, the configured validation gate, and report evidence. — pending PR review
+- [x] 1.3 Run focused regression tests, the configured validation gate, and report evidence. — 3e2f9e37; independent review approved
 
 ## Verification
 
@@ -55,3 +55,7 @@ PR: #1330
 - Bounded clean full run (`npm test -- --maxWorkers=2`, `TMPDIR=/tmp TMP=/tmp TEMP=/tmp`, inherited API/bin/project/remote flags removed): 523 files passed, 1 skipped; 8,915 tests passed, 3 skipped, 0 failures.
 - `npm run build`: passed, including contract inlining, web build, and `check:pack`.
 - `npm run test:package`: 17 passed.
+
+## Final orchestration verification
+
+All configured gates pass with isolated worktree dependencies and the bounded clean-temp full suite. Independent source review approved; final documentation-only orchestration update removes stale completion notes. No implementation merged.
