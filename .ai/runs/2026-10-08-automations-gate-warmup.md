@@ -34,12 +34,12 @@ completion and ordering checks.
 
 ## Progress
 
-PR: pending
+PR: #1330
 
 > Convention: `- [ ]` pending, `- [x]` done. Append — <commit sha> when a step lands. Do not rename step titles.
 
 ### Phase 1: Replace timing assumptions
 
-- [ ] 1.1 Reproduce the delay-sensitive failures with a deterministic slow-git shim and record the baseline.
+- [x] 1.1 Reproduce the delay-sensitive failures with a deterministic slow-git shim and record the baseline. — pending evidence in PR #1330
 - [ ] 1.2 Replace fixed warm-up sleeps with observable completion and restore the re-baseline-before-scheduler ordering assertion.
 - [ ] 1.3 Run focused regression tests, the configured validation gate, and report evidence.
