@@ -20,7 +20,7 @@ Non-goals: changing the `ps`/PowerShell snapshot, cadence, Windows CPU behavior,
 ### Phase 3: Verification and delivery
 
 - [x] 3.1 Run focused regression tests and the configured validation gate, inspect scope, and create the issue PR. — d295b1e6
-- [x] 3.2 Run local review and report the exact commit, PR URL, evidence, and validation limits. — d295b1e6
+- [x] 3.2 Run local review and report the exact commit, PR URL, evidence, and validation limits. — dcf021ec
 
 ## Risks
 
@@ -43,4 +43,4 @@ Non-goals: changing the `ps`/PowerShell snapshot, cadence, Windows CPU behavior,
 ### Phase 3: Verification and delivery
 
 - [x] 3.1 Run focused regression tests and the configured validation gate, inspect scope, and create the issue PR. — d295b1e6
-- [x] 3.2 Run local review and report the exact commit, PR URL, evidence, and validation limits. — d295b1e6
+- [x] 3.2 Run local review and report the exact commit, PR URL, evidence, and validation limits. — dcf021ec
