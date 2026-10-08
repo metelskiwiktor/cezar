@@ -25,6 +25,8 @@ Risks: a recorded SHA is also used for intentional in-place runs, so the fix mus
 
 ## Progress
 
+PR: #1329
+
 > Convention: `- [ ]` pending, `- [x]` done. Append — <commit sha> when a step lands. Do not rename step titles.
 
 ### Phase 1: Reproduce and fix
@@ -35,3 +37,7 @@ Risks: a recorded SHA is also used for intentional in-place runs, so the fix mus
 ### Phase 2: Verify and publish
 
 - [x] 2.1 Run focused tests and the configured validation gate, review the final diff, and publish the fix PR with evidence.
+
+## Final orchestration verification
+
+All configured gates pass with isolated worktree dependencies and the bounded clean-temp full suite. Independent source review approved; final documentation-only orchestration update removes stale completion notes. No implementation merged.
