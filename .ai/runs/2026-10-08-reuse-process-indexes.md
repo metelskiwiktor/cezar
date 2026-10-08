@@ -10,12 +10,12 @@ Non-goals: changing the `ps`/PowerShell snapshot, cadence, Windows CPU behavior,
 
 ### Phase 1: Regression coverage
 
-- [ ] 1.1 Add focused tests for one index per sample, equivalent ancestor/descendant roots, cycle termination, and missing-root clearing.
+- [x] 1.1 Add focused tests for one index per sample, equivalent ancestor/descendant roots, cycle termination, and missing-root clearing. — 2d8215b7
 
 ### Phase 2: Minimal implementation
 
-- [ ] 2.1 Split reusable snapshot indexing from per-root traversal while preserving `aggregateTreeUsage(procs, rootPid)`.
-- [ ] 2.2 Index once in `sample()` and retain per-root traversal state and existing cadence/peak behavior.
+- [x] 2.1 Split reusable snapshot indexing from per-root traversal while preserving `aggregateTreeUsage(procs, rootPid)`. — 2d8215b7
+- [x] 2.2 Index once in `sample()` and retain per-root traversal state and existing cadence/peak behavior. — 2d8215b7
 
 ### Phase 3: Verification and delivery
 
