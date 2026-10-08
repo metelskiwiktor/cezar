@@ -43,6 +43,22 @@ function parseHeartbeat(line: string): ParsedHeartbeat | undefined {
   const timestamp = match[1];
   const rawNote = match[2];
   if (!timestamp || !rawNote) return undefined;
+  const timestampParts = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{3})?)?Z$/.exec(
+    timestamp,
+  );
+  if (!timestampParts) return undefined;
+  const parsedDate = new Date(timestamp);
+  if (
+    !Number.isFinite(parsedDate.getTime()) ||
+    parsedDate.getUTCFullYear() !== Number(timestampParts[1]) ||
+    parsedDate.getUTCMonth() + 1 !== Number(timestampParts[2]) ||
+    parsedDate.getUTCDate() !== Number(timestampParts[3]) ||
+    parsedDate.getUTCHours() !== Number(timestampParts[4]) ||
+    parsedDate.getUTCMinutes() !== Number(timestampParts[5]) ||
+    parsedDate.getUTCSeconds() !== Number(timestampParts[6] ?? 0)
+  ) {
+    return undefined;
+  }
   const countMatch = COUNT_SUFFIX_RE.exec(rawNote);
   const count = countMatch ? Number(countMatch[1]) : 1;
   if (!Number.isSafeInteger(count) || count < 1) return undefined;
@@ -79,7 +95,11 @@ function boundProgressLog(text: string): string {
       previousHeartbeat = undefined;
       continue;
     }
-    if (previousHeartbeat && previousHeartbeat.note === heartbeat.note) {
+    if (
+      previousHeartbeat &&
+      previousHeartbeat.note === heartbeat.note &&
+      previousHeartbeat.count <= Number.MAX_SAFE_INTEGER - heartbeat.count
+    ) {
       previousHeartbeat.count += heartbeat.count;
       previousHeartbeat.coalesced = true;
       coalesced[coalesced.length - 1] = previousHeartbeat;

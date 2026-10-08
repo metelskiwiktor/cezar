@@ -103,6 +103,25 @@ describe('appendHandoffHeartbeat bounded progress log', () => {
     expect(text).toContain('- 2026-10-07T22:00:58Z — user milestone');
   });
 
+  it('preserves impossible timestamps and avoids unsafe count summation', () => {
+    journal(
+      dataDir,
+      '- 2026-99-08T00:00:00Z — turn complete — status=bad\n' +
+        '- 2026-10-08T00:00:00Z — turn complete — status=running (×9007199254740991)',
+    );
+    vi.setSystemTime(new Date('2026-10-08T01:00:00.000Z'));
+
+    appendHandoffHeartbeat(dataDir, RUN_ID, 'turn complete — status=running');
+
+    const text = readFileSync(handoffPath(dataDir, RUN_ID), 'utf8');
+    expect(text).toContain('- 2026-99-08T00:00:00Z — turn complete — status=bad');
+    expect(text).toContain(
+      '- 2026-10-08T00:00:00Z — turn complete — status=running (×9007199254740991)',
+    );
+    expect(text).toContain('- 2026-10-08T01:00:00.000Z — turn complete — status=running');
+    expect(text).not.toContain('(×9007199254740992)');
+  });
+
   it('keeps header-less append and missing-file no-op behavior', () => {
     const file = handoffPath(dataDir, RUN_ID);
     mkdirSync(join(dataDir, 'runs'), { recursive: true });
