@@ -27,6 +27,12 @@ Non-goals: changing the `ps`/PowerShell snapshot, cadence, Windows CPU behavior,
 - A shared traversal `seen` set would change totals for nested roots; each root must receive a fresh set.
 - Missing roots must clear both `last` and `sampledAt`; successful roots must preserve peak updates and timestamps.
 
+## Final validation
+
+- Clean worktree dependency resolution: `@open-mercato/cezar-contract` resolves under this worktree.
+- Focused process tests: 2 files, 13 passed; baseline test was red with four map constructions for two roots and fixed test is green with two.
+- Configured gate: typecheck passed; bounded full suite passed (523 files, 8919 passed, 3 skipped); unit passed (42); build passed; package tests passed (17).
+
 ## Progress
 
 > Convention: `- [ ]` pending, `- [x]` done. Append — <commit sha> when a step lands. Do not rename step titles.
