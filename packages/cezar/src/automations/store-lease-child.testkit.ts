@@ -35,19 +35,32 @@ if (barriers && role) {
         'rmdir:1': () => { signal('b2'); wait('a3'); },
         'mkdir:2': () => { signal('b3'); wait('a4'); },
       };
+  type GuardMethod = 'mkdir' | 'rmdir' | 'stat' | 'utimes';
+  type SyncCall = (...args: unknown[]) => unknown;
+  const originals: Record<GuardMethod, SyncCall> = {
+    mkdir: gfs.mkdirSync as unknown as SyncCall,
+    rmdir: gfs.rmdirSync as unknown as SyncCall,
+    stat: gfs.statSync as unknown as SyncCall,
+    utimes: gfs.utimesSync as unknown as SyncCall,
+  };
+  // graceful-fs exposes readonly overloaded declarations, while this test intentionally wraps
+  // its runtime methods to force the stale-guard interleave. Keep the mutable cast local to this
+  // adapter rather than weakening the compiler or changing production code.
+  const mutableFs = gfs as unknown as Record<`${GuardMethod}Sync`, SyncCall>;
   const counts: Record<string, number> = {};
-  for (const method of ['mkdir', 'rmdir', 'stat', 'utimes'] as const) {
-    const original = gfs[`${method}Sync`];
-    gfs[`${method}Sync`] = ((target: Parameters<typeof original>[0], ...rest: unknown[]) => {
-      if (typeof target !== 'string' || !target.endsWith('.guard')) return original(target, ...rest);
+  for (const method of ['mkdir', 'rmdir', 'stat', 'utimes'] as GuardMethod[]) {
+    const original = originals[method];
+    mutableFs[`${method}Sync`] = (...args: unknown[]) => {
+      const target = args[0];
+      if (typeof target !== 'string' || !target.endsWith('.guard')) return original(...args);
       const nth = (counts[method] = (counts[method] ?? 0) + 1);
       let thrown: unknown;
       let value: unknown;
-      try { value = original(target, ...rest); } catch (error) { thrown = error; }
+      try { value = original(...args); } catch (error) { thrown = error; }
       gates[`${method}:${nth}`]?.();
       if (thrown) throw thrown;
       return value;
-    }) as typeof original;
+    };
   }
 }
 
