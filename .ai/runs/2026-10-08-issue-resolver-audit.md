@@ -40,7 +40,7 @@ The first `node "$CEZ_BIN" task create` failed with `dispatch refused — unknow
 - [ ] 1.1 Fix #1325
 - [x] 1.2 Fix #1077 — already fixed by merged e0c372e2; parent independently confirmed ancestry and 38 passing tests; no duplicate PR
 - [ ] 1.3 Fix #1307
-- [ ] 1.4 Fix #926
+- [x] 1.4 Fix #926 — already fixed by merged 15a7dd1f / PR #1246; parent reran screenshot regression: 1 passed, 49 skipped
 - [ ] 1.5 Fix #930
 
 ### Phase 2: Verification
@@ -56,3 +56,7 @@ The first `node "$CEZ_BIN" task create` failed with `dispatch refused — unknow
 - #926: e9a92a6d (queued)
 - #930: cccad72d (dispatched)
 - 5 of 8 child slots used overall; final independent review reserved. Reassess replacement for already-fixed #1077 after current reports.
+
+## Replacement work
+
+#1215 dispatched as bfda1ebd: bound/coalesce engine heartbeats, handoff.ts and tests only. Lower-priority but actionable uncovered bounded-growth issue. Six children used; at most one more implementation child and the required final review remain. #926 had no diff and existing landed fix verified; no duplicate PR.
