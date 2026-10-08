@@ -17,7 +17,7 @@ Non-goals: cross-task waits (#1289), changes to terminal statuses, or persisted 
 
 ### Phase 2: Validate and publish
 
-- [ ] 2.1 Run the configured validation gate, review the diff, and publish the fix PR.
+- [x] 2.1 Run the configured validation gate, review the diff, and publish the fix PR. — focused green; full gate limitations recorded in PR
 
 ## Progress
 
@@ -25,9 +25,9 @@ Non-goals: cross-task waits (#1289), changes to terminal statuses, or persisted 
 
 ### Phase 1: Reproduce and fix
 
-- [ ] 1.1 Add a manager-level regression covering no early report and later real settlement.
-- [ ] 1.2 Gate child report delivery on `awaitingAnswerSince` and run the focused tests.
+- [x] 1.1 Add a manager-level regression covering no early report and later real settlement.
+- [x] 1.2 Gate child report delivery on `awaitingAnswerSince` and run the focused tests.
 
 ### Phase 2: Validate and publish
 
-- [ ] 2.1 Run the configured validation gate, review the diff, and publish the fix PR.
+- [x] 2.1 Run the configured validation gate, review the diff, and publish the fix PR.
