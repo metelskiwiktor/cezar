@@ -1134,3 +1134,78 @@ describe('global tasks page', () => {
     ).toBeTruthy()
   })
 })
+
+describe('global tasks page — who started a task', () => {
+  const AUTOMATED: RunIndexEntry[] = [
+    ...RUNS,
+    {
+      projectId: 'api',
+      id: 'a2',
+      title: 'Nightly dependency sweep',
+      status: 'done',
+      createdAt: '2026-07-14T07:00:00Z',
+      archived: false,
+      workflow: 'quick-task',
+      automationId: 'auto-nightly',
+    },
+    {
+      // Dispatched by the nightly run: no provenance of its own, filed with its root.
+      projectId: 'api',
+      id: 'a3',
+      title: 'Sweep: bump lodash',
+      status: 'done',
+      createdAt: '2026-07-14T07:05:00Z',
+      archived: false,
+      workflow: 'quick-task',
+      dispatch: { rootRunId: 'a2', parentRunId: 'a2' },
+    },
+  ]
+
+  afterEach(() => localStorage.clear())
+
+  it('hides automation tasks by default, and shows them on request', async () => {
+    stubFetch({ runs: AUTOMATED })
+    renderPage()
+    await screen.findByText('Add checkout endpoint')
+    expect(rowIds()).toEqual(['a1', 'w1', 'i1'])
+    const origin = document.querySelector('[data-slot="task-origin"]') as HTMLElement
+    expect(within(origin).getByRole('button', { name: /Regular/ }).getAttribute('aria-pressed')).toBe('true')
+
+    fireEvent.click(within(origin).getByRole('button', { name: /Automations/ }))
+    await waitFor(() => expect(rowIds()).toEqual(['a2']))
+    // The dispatched child rides with its root, folded under it like any subtask.
+    expect(document.querySelector('[data-run-id="a2"]')?.textContent).toMatch(/1 subtask/)
+
+    fireEvent.click(within(origin).getByRole('button', { name: /All/ }))
+    await waitFor(() => expect(rowIds()).toEqual(['a1', 'w1', 'i1', 'a2']))
+  })
+
+  it('remembers the choice across visits', async () => {
+    stubFetch({ runs: AUTOMATED })
+    const first = renderPage()
+    await screen.findByText('Add checkout endpoint')
+    fireEvent.click(
+      within(document.querySelector('[data-slot="task-origin"]') as HTMLElement).getByRole('button', {
+        name: /Automations/,
+      }),
+    )
+    await waitFor(() => expect(rowIds()).toEqual(['a2']))
+    first.unmount()
+
+    stubFetch({ runs: AUTOMATED })
+    renderPage()
+    await screen.findByText('Nightly dependency sweep')
+    expect(rowIds()).toEqual(['a2'])
+    // A preference, not a narrowing: it stays out of the shareable URL.
+    expect(search()).toBe('')
+  })
+
+  it('says why a view is empty when only the origin split hides its rows', async () => {
+    stubFetch({ runs: AUTOMATED.filter((run) => run.projectId === 'api' && run.id !== 'a1') })
+    renderPage()
+    await screen.findByText('No regular tasks here')
+    fireEvent.click(screen.getByRole('button', { name: 'Show all tasks' }))
+    await waitFor(() => expect(rowIds()).toEqual(['a2']))
+  })
+})
+

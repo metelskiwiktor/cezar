@@ -1311,3 +1311,91 @@ describe('dispatched subtasks nest under their parent', () => {
     expect(kindOf(card('p'))).toBeNull()
   })
 })
+
+describe('TasksOverview — origin and facet filters', () => {
+  // The facet popovers are `cmdk`, which measures its list; jsdom has no ResizeObserver.
+  const scrollIntoView = Element.prototype.scrollIntoView
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    Element.prototype.scrollIntoView = scrollIntoView
+  })
+  const trigger = {
+    automationId: 'auto-nightly',
+    automationRevision: 1,
+    receiptId: 'rc-1',
+    trigger: 'schedule' as const,
+    occurrenceAt: '2026-07-14T00:00:00.000Z',
+  }
+  const fixture = () => {
+    const mine = run({ id: 'mine', title: 'Fix the login bug', status: 'running' })
+    const theirs = run({ id: 'nightly', title: 'Nightly sweep', automationTrigger: trigger })
+    const ticket = run({
+      id: 'ticket',
+      title: 'JIRA-12 triage',
+      status: 'failed',
+      automationTracker: {
+        automationId: 'auto-jira',
+        automationRevision: 2,
+        receiptId: 'rc-2',
+        provider: 'jira',
+        key: 'JIRA-12',
+        url: 'https://acme.atlassian.net/browse/JIRA-12',
+      },
+    })
+    return [mine, theirs, ticket]
+  }
+  const shownIds = () =>
+    [...document.querySelectorAll('[data-slot="task-table-row"]')].map((row) => row.getAttribute('data-run-id'))
+  const originButton = (name: RegExp) =>
+    within(document.querySelector('[data-slot="task-origin"]') as HTMLElement).getByRole('button', { name })
+
+  it('shows only regular tasks under Regular, and counts every origin', () => {
+    const onOriginChange = vi.fn()
+    renderOverview({ runs: fixture(), origin: 'regular', onOriginChange })
+    expect(shownIds()).toEqual(['mine'])
+    expect(originButton(/Regular/).textContent).toBe('Regular1')
+    expect(originButton(/Automations/).textContent).toBe('Automations2')
+    // The Active tab counts the list the table actually shows.
+    expect(document.querySelector('[data-slot="overview-tab"][data-view="active"]')?.textContent).toBe('Active1')
+
+    fireEvent.click(originButton(/Automations/))
+    expect(onOriginChange).toHaveBeenCalledWith('automation')
+  })
+
+  it('narrows by status, and offers an Automation facet once automation tasks are shown', async () => {
+    renderOverview({
+      runs: fixture(),
+      origin: 'all',
+      automationNames: new Map([['auto-nightly', 'Nightly sweep job']]),
+    })
+    expect(shownIds()).toHaveLength(3)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by status' }))
+    fireEvent.click(await screen.findByRole('option', { name: /failed/ }))
+    expect(shownIds()).toEqual(['ticket'])
+    fireEvent.click(screen.getByRole('button', { name: /Clear \(1\)/ }))
+    expect(shownIds()).toHaveLength(3)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Filter by automation' }))
+    fireEvent.click(await screen.findByRole('option', { name: /Nightly sweep job/ }))
+    expect(shownIds()).toEqual(['nightly'])
+  })
+
+  it('hides the Automation facet under Regular, where it could only empty the table', () => {
+    renderOverview({ runs: fixture(), origin: 'regular' })
+    expect(screen.queryByRole('button', { name: 'Filter by automation' })).toBeNull()
+  })
+
+  it('says the origin split is why the list is empty, with the way out', () => {
+    const onOriginChange = vi.fn()
+    renderOverview({ runs: fixture().slice(1), origin: 'regular', onOriginChange })
+    expect(document.querySelector('[data-slot="tasks-empty"]')?.getAttribute('data-empty-kind')).toBe('origin-hidden')
+    fireEvent.click(screen.getByRole('button', { name: 'Show all tasks' }))
+    expect(onOriginChange).toHaveBeenCalledWith('all')
+  })
+})
+

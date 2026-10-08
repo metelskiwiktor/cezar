@@ -6270,6 +6270,8 @@ export function createApp(deps: ServerDeps) {
 
   const runIndexEntry = (projectId: string, run: RunRecord): RunIndexEntry => {
     const usage = currentUsage(run.id);
+    const automationId =
+      run.automation?.automationId ?? run.automationTrigger?.automationId ?? run.automationTracker?.automationId;
     return {
     projectId,
     id: run.id,
@@ -6295,6 +6297,7 @@ export function createApp(deps: ServerDeps) {
           },
         }
       : {}),
+    ...(automationId !== undefined ? { automationId } : {}),
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
     // The tracker-reference inputs, verbatim — the cockpit's `taskReference()` owns the rule
     // that picks between them (see the schema's note).
