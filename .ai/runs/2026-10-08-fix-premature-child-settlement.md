@@ -1,0 +1,33 @@
+# Fix premature child settlement reports
+
+Goal: prevent a dispatched child stopped on an unanswered `CEZ:ASK` from reporting a false
+terminal outcome to its parent, while preserving exactly-once reporting after the question is
+answered or explicitly retired.
+
+Scope: `packages/cezar/src/workflows/run.ts`, dispatch workflow tests, and this run plan.
+
+Non-goals: cross-task waits (#1289), changes to terminal statuses, or persisted schema changes.
+
+## Implementation Plan
+
+### Phase 1: Reproduce and fix
+
+- [x] 1.1 Add a manager-level regression covering no early report and later real settlement. — red without source fix; green with source fix
+- [x] 1.2 Gate child report delivery on `awaitingAnswerSince` and run the focused tests. — `npm exec vitest -- run packages/cezar/src/workflows/recover-dispatch.test.ts`
+
+### Phase 2: Validate and publish
+
+- [ ] 2.1 Run the configured validation gate, review the diff, and publish the fix PR.
+
+## Progress
+
+> Convention: `- [ ]` pending, `- [x]` done. Append — <commit sha> when a step lands.
+
+### Phase 1: Reproduce and fix
+
+- [ ] 1.1 Add a manager-level regression covering no early report and later real settlement.
+- [ ] 1.2 Gate child report delivery on `awaitingAnswerSince` and run the focused tests.
+
+### Phase 2: Validate and publish
+
+- [ ] 2.1 Run the configured validation gate, review the diff, and publish the fix PR.

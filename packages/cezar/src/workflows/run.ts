@@ -2269,6 +2269,12 @@ export class RunManager {
       if (!child || !parentId) return;
       if (!this.dispatchEnabled()) return;
       if (!isTerminalStatus(child.status)) return;
+      // A closed session can leave an unanswered CEZ:ASK as terminal `failed` while the
+      // question remains under the user's control (`awaitingAnswerSince`). That is a hold, not
+      // an outcome: reporting it now would make the parent plan around work that may still be
+      // resumed. The existing status transition that answers or explicitly retires the question
+      // clears this field and reaches this hook again with the real outcome.
+      if (child.awaitingAnswerSince !== undefined) return;
       const parent = this.store.getRun(parentId);
       if (!parent?.dispatch) return;
 
