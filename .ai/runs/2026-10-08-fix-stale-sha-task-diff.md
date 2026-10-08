@@ -10,8 +10,8 @@ Non-goals: changing task-diff callers, persisted run schemas, branch creation, o
 
 ### Phase 1: Reproduce and fix
 
-- [ ] 1.1 Add a regression fixture for a SHA-pinned base with an advanced `origin/main`, and prove the current implementation selects the stale SHA.
-- [ ] 1.2 Resolve SHA-pinned bases against the freshest corresponding base ref while preserving explicit commit semantics and add focused coverage.
+- [x] 1.1 Add a regression fixture for a SHA-pinned base with an advanced `origin/main`, and prove the current implementation selects the stale SHA. — 3d47224f
+- [x] 1.2 Resolve SHA-pinned bases against the freshest corresponding base ref while preserving explicit commit semantics and add focused coverage. — 3d47224f
 
 ### Phase 2: Verify and publish
 
@@ -25,8 +25,8 @@ Risks: a recorded SHA is also used for intentional in-place runs, so the fix mus
 
 ### Phase 1: Reproduce and fix
 
-- [ ] 1.1 Add a regression fixture for a SHA-pinned base with an advanced `origin/main`, and prove the current implementation selects the stale SHA.
-- [ ] 1.2 Resolve SHA-pinned bases against the freshest corresponding base ref while preserving explicit commit semantics and add focused coverage.
+- [x] 1.1 Add a regression fixture for a SHA-pinned base with an advanced `origin/main`, and prove the current implementation selects the stale SHA. — 3d47224f
+- [x] 1.2 Resolve SHA-pinned bases against the freshest corresponding base ref while preserving explicit commit semantics and add focused coverage. — 3d47224f
 
 ### Phase 2: Verify and publish
 
