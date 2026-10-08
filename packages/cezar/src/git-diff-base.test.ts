@@ -26,6 +26,7 @@ const MERGE_BASE = 'merge-base main HEAD';
 const MERGE_BASE_REMOTE = 'merge-base origin/main HEAD';
 const HAS_REMOTE = 'rev-parse --verify --quiet origin/main^{commit}';
 const LOCAL_CURRENT = 'merge-base --is-ancestor origin/main main';
+const ORIGIN_HEAD = 'symbolic-ref --quiet --short refs/remotes/origin/HEAD';
 const BASELINE = `rev-parse --verify --quiet review/pr-694@{${STARTED_AT}}^{commit}`;
 const NO_REMOTE = { [HAS_REMOTE]: { ok: false, stdout: '' } };
 
@@ -108,6 +109,22 @@ describe('resolveTaskDiffBase — the freshest base ref', () => {
     expect(await resolveTaskDiffBase(run, 'origin/develop')).toEqual({ base: 'abc123abc123' });
     // No `origin/origin/develop` probe — the ref is already the remote's answer.
     expect(calls).toEqual([['merge-base', 'origin/develop', 'HEAD']]);
+  });
+
+  it('refreshes a SHA-pinned base through origin/HEAD when the SHA is upstream', async () => {
+    // In-place runs persist their starting commit rather than a branch name. Once
+    // origin/main advances, treating that SHA as immutable re-attributes upstream
+    // work to the task (#1325).
+    const baseSha = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const { run, calls } = stubGit({
+      [ORIGIN_HEAD]: { ok: true, stdout: 'origin/main\n' },
+      [`merge-base --is-ancestor ${baseSha} origin/main`]: { ok: true, stdout: '' },
+      'merge-base origin/main HEAD': { ok: true, stdout: 'forkpointforkpoint\n' },
+    });
+
+    expect(await resolveTaskDiffBase(run, baseSha)).toEqual({ base: 'forkpointforkpoint' });
+    expect(calls).toContainEqual(['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD']);
+    expect(calls).toContainEqual(['merge-base', '--is-ancestor', baseSha, 'origin/main']);
   });
 
   it('falls back to the base branch name when the merge-base cannot be resolved', async () => {
