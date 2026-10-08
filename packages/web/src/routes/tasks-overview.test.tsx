@@ -1063,6 +1063,38 @@ describe('TasksOverviewRoute — wired to the app', () => {
     document.querySelector(`[data-slot="overview-tab"][data-view="${view}"]`) as HTMLElement
   const sidebarRow = (id: string) => document.querySelector(`[data-slot="task-row"][data-run-id="${id}"]`)
 
+  it('hides automation tasks from the table AND the sidebar by default, and remembers All', async () => {
+    const automated = run({
+      id: 'auto',
+      status: 'running',
+      automationTrigger: {
+        automationId: 'auto-nightly',
+        automationRevision: 1,
+        receiptId: 'rc',
+        trigger: 'schedule',
+        occurrenceAt: '2026-07-14T00:00:00.000Z',
+      },
+    })
+    try {
+      const first = renderApp([run({ id: 'mine', status: 'running' }), automated])
+      await waitFor(() => expect(tableRow('mine')).not.toBeNull())
+      expect(tableRow('auto')).toBeNull()
+      expect(sidebarRow('auto')).toBeNull()
+
+      fireEvent.click(
+        within(document.querySelector('[data-slot="task-origin"]') as HTMLElement).getByRole('button', { name: /All/ }),
+      )
+      await waitFor(() => expect(tableRow('auto')).not.toBeNull())
+      expect(sidebarRow('auto')).not.toBeNull()
+      first.unmount()
+
+      renderApp([run({ id: 'mine', status: 'running' }), automated])
+      await waitFor(() => expect(tableRow('auto')).not.toBeNull())
+    } finally {
+      localStorage.clear()
+    }
+  })
+
   it('shares the Active/Archived state with the sidebar — either set of tabs flips both', async () => {
     renderApp([run({ id: 'act', status: 'running' }), run({ id: 'arc', status: 'done', archived: true })])
     await waitFor(() => expect(tableRow('act')).not.toBeNull())

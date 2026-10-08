@@ -24,6 +24,8 @@ import {
   type QuickListBucket,
   type QuickListRow,
 } from '@/lib/task-groups'
+import { filterRunsByOrigin } from '@/lib/task-filters'
+import { useTaskOrigin } from '@/lib/task-origin'
 import { dispatchKindLabel, subtaskLabel, taskTreeRows } from '@/lib/task-tree'
 import { formatCost, taskReference, taskReferences } from '@/lib/tasks-table'
 import { usageMetricVisibility } from '@/lib/token-metrics'
@@ -592,6 +594,13 @@ export function TaskQuickListContainer() {
   const pinMutation = usePinRun()
   const visibility = usageMetricVisibility(health.data)
   const [view, setView] = useListView()
+  // The remembered Regular | Automations | All split the Tasks tables set — the sidebar shows the
+  // same list they do. Memoized so the chip-status request below keys off a stable list.
+  const [origin] = useTaskOrigin()
+  const shown = React.useMemo(
+    () => (runs.data ? filterRunsByOrigin(runs.data, origin) : undefined),
+    [runs.data, origin],
+  )
   // Project-prefix-agnostic matches (step 3.2): `/p/<id>/tasks/:id` must light its row too.
   const match = useProjectMatch('/tasks/:id/*')
   const exact = useProjectMatch('/tasks/:id')
@@ -611,24 +620,24 @@ export function TaskQuickListContainer() {
     () =>
       projectId === undefined
         ? []
-        : (runs.data ?? []).flatMap((run) =>
+        : (shown ?? []).flatMap((run) =>
             taskReferences(run).map((reference) => ({
               projectId,
               kind: reference.kind,
               number: reference.number,
             })),
           ),
-    [runs.data, projectId],
+    [shown, projectId],
   )
 
   // Nothing at all until the list has answered: a skeleton here would be inventing rows, and an
   // empty state would claim "No tasks yet" before we know whether there are any.
-  if (!runs.data) return null
+  if (!shown) return null
 
   return (
     <ReferenceStatusProvider projectId={projectId} requests={referenceRequests}>
       <TaskQuickList
-        runs={runs.data}
+        runs={shown}
         view={view}
         onViewChange={setView}
         // Both matches: `/tasks/:id` and its `/changes` and `/files` children all keep the row lit.
