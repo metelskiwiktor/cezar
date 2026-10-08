@@ -19,6 +19,10 @@ Non-goals: changing task-diff callers, persisted run schemas, branch creation, o
 
 Risks: a recorded SHA is also used for intentional in-place runs, so the fix must only replace it when Git can establish the corresponding branch/ref relationship; otherwise it must preserve the existing SHA fallback.
 
+## Final verification
+
+`npm test -- --maxWorkers=2` passed in the isolated worktree with `CEZ_API_URL`, `CEZ_BIN`, `CEZ_PROJECT_ID`, and `CEZ_REMOTE` unset and `TMPDIR=/tmp TMP=/tmp TEMP=/tmp`: 523 test files passed, 1 skipped; 8,919 tests passed, 3 skipped.
+
 ## Progress
 
 > Convention: `- [ ]` pending, `- [x]` done. Append — <commit sha> when a step lands. Do not rename step titles.
