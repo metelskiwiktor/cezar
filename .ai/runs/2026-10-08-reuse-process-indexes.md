@@ -19,8 +19,8 @@ Non-goals: changing the `ps`/PowerShell snapshot, cadence, Windows CPU behavior,
 
 ### Phase 3: Verification and delivery
 
-- [ ] 3.1 Run focused regression tests and the configured validation gate, inspect scope, and create the issue PR.
-- [ ] 3.2 Run local review and report the exact commit, PR URL, evidence, and validation limits.
+- [x] 3.1 Run focused regression tests and the configured validation gate, inspect scope, and create the issue PR. — d295b1e6
+- [x] 3.2 Run local review and report the exact commit, PR URL, evidence, and validation limits. — d295b1e6
 
 ## Risks
 
@@ -33,14 +33,14 @@ Non-goals: changing the `ps`/PowerShell snapshot, cadence, Windows CPU behavior,
 
 ### Phase 1: Regression coverage
 
-- [ ] 1.1 Add focused tests for one index per sample, equivalent ancestor/descendant roots, cycle termination, and missing-root clearing.
+- [x] 1.1 Add focused tests for one index per sample, equivalent ancestor/descendant roots, cycle termination, and missing-root clearing. — d295b1e6
 
 ### Phase 2: Minimal implementation
 
-- [ ] 2.1 Split reusable snapshot indexing from per-root traversal while preserving `aggregateTreeUsage(procs, rootPid)`.
-- [ ] 2.2 Index once in `sample()` and retain per-root traversal state and existing cadence/peak behavior.
+- [x] 2.1 Split reusable snapshot indexing from per-root traversal while preserving `aggregateTreeUsage(procs, rootPid)`. — d295b1e6
+- [x] 2.2 Index once in `sample()` and retain per-root traversal state and existing cadence/peak behavior. — d295b1e6
 
 ### Phase 3: Verification and delivery
 
-- [ ] 3.1 Run focused regression tests and the configured validation gate, inspect scope, and create the issue PR.
-- [ ] 3.2 Run local review and report the exact commit, PR URL, evidence, and validation limits.
+- [x] 3.1 Run focused regression tests and the configured validation gate, inspect scope, and create the issue PR. — d295b1e6
+- [x] 3.2 Run local review and report the exact commit, PR URL, evidence, and validation limits. — d295b1e6
