@@ -42,4 +42,14 @@ PR: #1330
 
 - [x] 1.1 Reproduce the delay-sensitive failures with a deterministic slow-git shim and record the baseline. — 146821d7
 - [x] 1.2 Replace fixed warm-up sleeps with observable completion and restore the re-baseline-before-scheduler ordering assertion. — 146821d7
-- [ ] 1.3 Run focused regression tests, the configured validation gate, and report evidence.
+- [x] 1.3 Run focused regression tests, the configured validation gate, and report evidence. — pending PR review
+
+## Verification
+
+- Historical fixed-sleep implementation plus a 1-second `git` shim: 2 failed, 20 passed (scheduler start and re-baseline state).
+- Current implementation plus the same shim: 22 passed; normal focused run: 22 passed.
+- `npm run test:unit`: 42 passed.
+- `npm run typecheck`: blocked by pre-existing contract/schema drift outside this scope.
+- `npm test`: 8,894 passed, 21 failed, 3 skipped; failures are outside this scope.
+- `npm run build`: blocked by the same typecheck failures.
+- `npm run test:package`: 15 passed, 2 failed because the blocked build did not produce expected contract/web artifacts.
