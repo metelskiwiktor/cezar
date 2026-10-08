@@ -22,6 +22,8 @@ Non-goals: cross-task waits (#1289), changes to terminal statuses, or persisted 
 
 ## Progress
 
+PR: #1331
+
 > Convention: `- [ ]` pending, `- [x]` done. Append — <commit sha> when a step lands.
 
 ### Phase 1: Reproduce and fix
@@ -32,4 +34,8 @@ Non-goals: cross-task waits (#1289), changes to terminal statuses, or persisted 
 
 ### Phase 2: Validate and publish
 
-- [x] 2.1 Run the configured validation gate, review the diff, and publish the fix PR. — clean isolated gate passes; PR remains draft for independent review
+- [x] 2.1 Run the configured validation gate, review the diff, and publish the fix PR. — clean isolated gate passes; independent review approved
+
+## Final orchestration verification
+
+All configured gates pass with isolated worktree dependencies and the bounded clean-temp full suite. Independent source review approved; final documentation-only orchestration update removes stale completion notes. No implementation merged.
