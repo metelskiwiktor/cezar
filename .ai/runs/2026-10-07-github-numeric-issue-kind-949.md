@@ -34,4 +34,4 @@ GitHub's `issue view` endpoint accepts pull request numbers because pull request
 
 ### Phase 2: Verification
 
-- [x] 2.1 Run focused tests, typecheck and configured gate — focused forge suite passes; full gate has unrelated baseline failures (see PR report)
+- [x] 2.1 Run focused tests, typecheck and configured gate — corrected code reviewed at `b37d3240`; CI full gate green; dedicated forge suite 200/200
