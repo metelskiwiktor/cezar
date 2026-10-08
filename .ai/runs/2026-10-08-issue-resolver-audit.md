@@ -38,7 +38,7 @@ The first `node "$CEZ_BIN" task create` failed with `dispatch refused — unknow
 ### Phase 1: Independent fixes
 
 - [ ] 1.1 Fix #1325
-- [ ] 1.2 Fix #1077
+- [x] 1.2 Fix #1077 — already fixed by merged e0c372e2; parent independently confirmed ancestry and 38 passing tests; no duplicate PR
 - [ ] 1.3 Fix #1307
 - [ ] 1.4 Fix #926
 - [ ] 1.5 Fix #930
@@ -47,3 +47,12 @@ The first `node "$CEZ_BIN" task create` failed with `dispatch refused — unknow
 
 - [ ] 2.1 Validate child evidence
 - [ ] 2.2 Obtain final independent review
+
+## Dispatch ledger
+
+- #1325: 38834c21 (running)
+- #1077: ea6daaa6 (done, no change: existing merged fix verified)
+- #1307: ef1481bd (running)
+- #926: e9a92a6d (queued)
+- #930: cccad72d (dispatched)
+- 5 of 8 child slots used overall; final independent review reserved. Reassess replacement for already-fixed #1077 after current reports.
