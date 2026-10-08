@@ -21,8 +21,8 @@ Implement issue #1215 by coalescing adjacent eligible same-note engine heartbeat
 
 - [x] 1.1 Add regression tests that reproduce unbounded growth and pin coalescing, count accumulation, eligibility, boundaries, header-less behavior, and silent failures. — 4e33f4c9
 - [x] 1.2 Implement eligible heartbeat parsing, adjacent same-note coalescing, and the exported 100-entry cap in the existing read-modify-write path. — 4e33f4c9
-- [x] 1.3 Run targeted tests, inspect the scoped diff, and run the configured validation gate. — 5b437032; targeted 12/12 and unit 42/42 pass; repository gate has unrelated baseline failures
-- [x] 1.4 Review the final diff locally and publish the tested branch as a PR. — 5b437032; draft PR #1332
+- [x] 1.3 Run targeted tests, inspect the scoped diff, and run the configured validation gate. — e686b4dc; targeted 13/13, typecheck, unit 42/42, build, and package 17/17 pass; full test has 15 unrelated failures
+- [x] 1.4 Review the final diff locally and publish the tested branch as a PR. — e686b4dc; draft PR #1332
 
 ## Risks
 
@@ -36,5 +36,5 @@ Implement issue #1215 by coalescing adjacent eligible same-note engine heartbeat
 
 - [x] 1.1 Add regression tests that reproduce unbounded growth and pin coalescing, count accumulation, eligibility, boundaries, header-less behavior, and silent failures. — 4e33f4c9
 - [x] 1.2 Implement eligible heartbeat parsing, adjacent same-note coalescing, and the exported 100-entry cap in the existing read-modify-write path. — 4e33f4c9
-- [x] 1.3 Run targeted tests, inspect the scoped diff, and run the configured validation gate. — 5b437032; targeted 12/12 and unit 42/42 pass; repository gate has unrelated baseline failures
-- [x] 1.4 Review the final diff locally and publish the tested branch as a PR. — 5b437032; draft PR #1332
+- [x] 1.3 Run targeted tests, inspect the scoped diff, and run the configured validation gate. — e686b4dc; targeted 13/13, typecheck, unit 42/42, build, and package 17/17 pass; full test has 15 unrelated failures
+- [x] 1.4 Review the final diff locally and publish the tested branch as a PR. — e686b4dc; draft PR #1332
