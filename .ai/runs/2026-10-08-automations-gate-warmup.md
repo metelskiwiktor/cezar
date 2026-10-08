@@ -49,7 +49,7 @@ PR: #1330
 - Historical fixed-sleep implementation plus a 1-second `git` shim: 2 failed, 20 passed (scheduler start and re-baseline state).
 - Current implementation plus the same shim: 22 passed; normal focused run: 22 passed.
 - `npm run test:unit`: 42 passed.
-- `npm run typecheck`: blocked by pre-existing contract/schema drift outside this scope.
-- `npm test`: 8,894 passed, 21 failed, 3 skipped; failures are outside this scope.
-- `npm run build`: blocked by the same typecheck failures.
-- `npm run test:package`: 15 passed, 2 failed because the blocked build did not produce expected contract/web artifacts.
+- After isolated `npm ci`, package resolution points into this worktree; `npm run typecheck`: passed.
+- `npm test`: 8,898 passed, 17 failed, 3 skipped; failures are unrelated existing checkout/worktree and UI/automation issues, including temp-directory git-root assumptions.
+- `npm run build`: passed, including contract inlining, web build, and `check:pack`.
+- `npm run test:package`: 17 passed.
