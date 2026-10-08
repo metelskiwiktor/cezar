@@ -38,7 +38,9 @@ const COUNT_SUFFIX_RE = / \(×(\d+)\)$/;
 function parseHeartbeat(line: string): ParsedHeartbeat | undefined {
   const match = HEARTBEAT_RE.exec(line);
   if (!match) return undefined;
-  const [, timestamp, rawNote] = match;
+  const timestamp = match[1];
+  const rawNote = match[2];
+  if (!timestamp || !rawNote) return undefined;
   const countMatch = COUNT_SUFFIX_RE.exec(rawNote);
   const count = countMatch ? Number(countMatch[1]) : 1;
   if (!Number.isSafeInteger(count) || count < 1) return undefined;
