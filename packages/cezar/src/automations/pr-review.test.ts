@@ -124,6 +124,13 @@ describe('publishPrReviewComment', () => {
     expect(calls).toEqual([]);
   });
 
+  it('accepts a regex literal starting /^ without weakening local-path protection', async () => {
+    const body = 'P1 scripts/lib/previewHandoff.cjs:49 Add `/^\\.ai\\//` to NON_APP_PATTERNS.\n\nRecommendation: CHANGES REQUESTED';
+    expect(checkReviewText(body)).toEqual({ ok: true, recommendation: 'CHANGES REQUESTED' });
+    const { run, posts } = fakeRun({});
+    await expect(publishPrReviewComment({ ...base, body, run })).resolves.toEqual({ status: 'published' });
+    expect(posts[0]?.body).toContain('`/^\\.ai\\//`');
+  });
   it('keeps repo-relative references and web links intact', async () => {
     const body = 'src/a.ts:12 and `docs/README.md:2`; https://github.com/o/r/pull/25; `ready-for-agent`/`ready-for-human`';
     const { run, posts } = fakeRun({});
