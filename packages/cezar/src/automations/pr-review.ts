@@ -9,6 +9,9 @@
  * record at launch), never from the prompt or the model's text.
  */
 import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -106,13 +109,13 @@ const RECOMMENDATION_RE = /^\s*\**\s*Recommendation\s*:?\s*\**\s*:?\s*(APPROVE|C
 export function checkReviewText(text: string): { ok: true; recommendation: 'APPROVE' | 'CHANGES REQUESTED' } | { ok: false; reason: string } {
   const body = text.trim();
   if (!body) return { ok: false, reason: 'the review is empty' };
-  const found = new Set([...body.matchAll(RECOMMENDATION_RE)].map((m) => (m[1] as string).toUpperCase()));
-  if (found.size === 0) return { ok: false, reason: 'the review has no "Recommendation: APPROVE" or "Recommendation: CHANGES REQUESTED" line' };
-  if (found.size > 1) return { ok: false, reason: 'the review recommends both APPROVE and CHANGES REQUESTED' };
+  const found = [...body.matchAll(RECOMMENDATION_RE)].map((m) => (m[1] as string).toUpperCase());
+  if (found.length === 0) return { ok: false, reason: 'the review has no "Recommendation: APPROVE" or "Recommendation: CHANGES REQUESTED" line' };
+  if (found.length > 1) return { ok: false, reason: `the review has ${found.length} recommendation lines (${found.join(', ')}); exactly one is required` };
   // A recommendation line alone is not a review.
   const rest = body.replace(RECOMMENDATION_RE, '').trim();
   if (rest.length < 40) return { ok: false, reason: 'the review has no findings or assessment, only a recommendation' };
-  return { ok: true, recommendation: [...found][0] as 'APPROVE' | 'CHANGES REQUESTED' };
+  return { ok: true, recommendation: found[0] as 'APPROVE' | 'CHANGES REQUESTED' };
 }
 
 /** cezar's own in-band protocol lines (`CEZ:DONE`, `CEZ:PR=25`, …) — for cezar, not the PR. */
@@ -163,7 +166,16 @@ export async function publishPrReviewComment(input: PublishPrReviewInput): Promi
   if (existing.includes(marker)) return { status: 'skipped-duplicate' };
   const full = `${body}\n\n${marker}`;
   if (input.dryRun) return { status: 'dry-run', body: full };
-  await run('gh', ['api', `repos/${input.repo}/issues/${input.number}/comments`, '-f', `body=${full}`], input.repoRoot);
+  // The body goes through a JSON file (`--input`), never argv: Windows caps a command line at
+  // ~32k chars, and a long review must still post.
+  const dir = await mkdtemp(join(tmpdir(), 'cez-pr-review-'));
+  try {
+    const file = join(dir, 'comment.json');
+    await writeFile(file, JSON.stringify({ body: full }), 'utf8');
+    await run('gh', ['api', '--method', 'POST', `repos/${input.repo}/issues/${input.number}/comments`, '--input', file], input.repoRoot);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
   return { status: 'published' };
 }
 

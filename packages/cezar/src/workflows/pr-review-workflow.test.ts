@@ -28,8 +28,8 @@ function fakeGh(state: { remoteHead: string; comments: string[] }): { run: Comma
     if (exe !== 'gh') throw new Error(`unexpected ${exe}`);
     if (args[1] === `repos/${TARGET.repo}/pulls/${TARGET.number}`) return `${state.remoteHead}\n`;
     if (args[1] === '--paginate') return state.comments.join('\n');
-    if (args[1] === `repos/${TARGET.repo}/issues/${TARGET.number}/comments` && args[2] === '-f') {
-      const body = (args[3] as string).slice('body='.length);
+    if (args[1] === '--method' && args[2] === 'POST' && args[3] === `repos/${TARGET.repo}/issues/${TARGET.number}/comments` && args[4] === '--input') {
+      const { body } = JSON.parse(readFileSync(args[5] as string, 'utf8')) as { body: string };
       posts.push(body);
       state.comments.push(body);
       return '{}';
@@ -221,7 +221,7 @@ describe('pr-review workflow run (mock agent, fake gh)', () => {
     expect(back.status).not.toBe('failed');
     expect(back.steps.find((s) => s.id === 'review')?.iterations).toBe(1); // the review is not redone
     expect(gh.posts).toHaveLength(1);
-    expect(gh.calls.filter((c) => c.includes('-f body='))).toHaveLength(1);
+    expect(gh.calls.filter((c) => c.startsWith('gh api --method POST '))).toHaveLength(1);
 
     // Lost outputs (killed between the POST and persisting it): the PR's own marker still blocks a
     // second post. Not an atomic guarantee — GitHub has no conditional create — but no duplicate here.
