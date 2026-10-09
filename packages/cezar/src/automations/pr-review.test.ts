@@ -52,6 +52,7 @@ describe('preparePrReviewCheckout', () => {
     const context = renderPrReviewContext(checkout);
     expect(context).toContain(`git diff ${BASE} ${HEAD}`);
     expect(context).toContain('READ-ONLY');
+    expect(context).toContain('plain repo-relative path:line');
   });
 
   it('fails without a base branch instead of guessing', async () => {
@@ -104,6 +105,30 @@ describe('publishPrReviewComment', () => {
   it('refuses an empty review', async () => {
     const { run } = fakeRun({});
     await expect(publishPrReviewComment({ ...base, body: '  ', run })).rejects.toThrow(/empty/);
+  });
+
+  it.each([
+    '[src/a.ts](file:///C:/Users/Viktor/repo/src/a.ts:12)',
+    'file:///home/viktor/repo/src/a.ts',
+    'C:/Users/Viktor/repo/src/a.ts:12',
+    'C:\\Users\\Viktor\\repo\\src\\a.ts:12',
+    '\\\\host\\share\\repo\\src\\a.ts',
+    '/home/viktor/repo/src/a.ts:12',
+    '`/Users/viktor/repo/src/a.ts:12`',
+    '~/repo/src/a.ts:12',
+    '/tmp',
+    '(//host/share/repo/src/a.ts)',
+  ])('refuses local paths before any GitHub call: %s', async (body) => {
+    const { run, calls } = fakeRun({});
+    await expect(publishPrReviewComment({ ...base, body, run })).rejects.toThrow(/local path/);
+    expect(calls).toEqual([]);
+  });
+
+  it('keeps repo-relative references and web links intact', async () => {
+    const body = 'src/a.ts:12 and `docs/README.md:2`; https://github.com/o/r/pull/25';
+    const { run, posts } = fakeRun({});
+    await publishPrReviewComment({ ...base, body, run });
+    expect(posts[0]?.body).toBe(`${body}\n\n${prReviewMarker(25, HEAD)}`);
   });
 });
 
@@ -165,6 +190,13 @@ describe('publishReviewFromRun', () => {
       expect((await publishReviewFromRun({ repoRoot: '/r', target: bad, text, run })).status).toBe('invalid');
     }
     expect((await publishReviewFromRun({ repoRoot: '/r', target, text: 'done', run })).status).toBe('invalid');
+    expect(calls).toEqual([]);
+  });
+
+  it('a review with a local path is invalid and never reaches GitHub', async () => {
+    const { run, calls } = gh(HEAD);
+    const result = await publishReviewFromRun({ repoRoot: '/r', target, text: `${text}\nfile:///C:/repo/src/x.ts`, run });
+    expect(result).toMatchObject({ status: 'invalid', reason: expect.stringMatching(/local path/) });
     expect(calls).toEqual([]);
   });
 

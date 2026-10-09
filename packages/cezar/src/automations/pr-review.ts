@@ -90,6 +90,7 @@ export function renderPrReviewContext(checkout: PrReviewCheckout): string {
     `Changed files: git diff --stat ${checkout.mergeBase} ${checkout.headSha}`,
     'This is a READ-ONLY review: do not edit, create or delete files, do not commit, push, merge or comment on GitHub.',
     'Your final message is the review; cezar publishes it after the run succeeds.',
+    'Cite files as plain repo-relative path:line, never Markdown file links, file:// URLs or absolute local paths.',
     '---',
   ].join('\n');
 }
@@ -101,6 +102,11 @@ export function prReviewMarker(number: number, headSha: string): string {
 
 const RECOMMENDATION_RE = /^\s*\**\s*Recommendation\s*:?\s*\**\s*:?\s*(APPROVE|CHANGES REQUESTED)\s*\**\s*$/gim;
 
+// Fail closed: without a verified checkout-relative mapping, stripping a prefix could point
+// readers at a different file. Cover file URIs, Windows drives/UNC, Unix roots and home paths.
+const LOCAL_PATH_RE = /file:\/|\b[a-z]:[\\/]|\\\\[^\s\\]+\\|(?:^|[\s`"'(<\[=])(?:~[\\/]|\/{1,2}[^\s/])/im;
+const LOCAL_PATH_REASON = 'the review contains a local path; use plain repo-relative path:line';
+
 /**
  * Whether an agent's final text is a complete review: non-blank, more than a bare
  * acknowledgement, and carrying exactly one unambiguous `Recommendation: APPROVE` /
@@ -109,6 +115,7 @@ const RECOMMENDATION_RE = /^\s*\**\s*Recommendation\s*:?\s*\**\s*:?\s*(APPROVE|C
 export function checkReviewText(text: string): { ok: true; recommendation: 'APPROVE' | 'CHANGES REQUESTED' } | { ok: false; reason: string } {
   const body = text.trim();
   if (!body) return { ok: false, reason: 'the review is empty' };
+  if (LOCAL_PATH_RE.test(body)) return { ok: false, reason: LOCAL_PATH_REASON };
   const found = [...body.matchAll(RECOMMENDATION_RE)].map((m) => (m[1] as string).toUpperCase());
   if (found.length === 0) return { ok: false, reason: 'the review has no "Recommendation: APPROVE" or "Recommendation: CHANGES REQUESTED" line' };
   if (found.length > 1) return { ok: false, reason: `the review has ${found.length} recommendation lines (${found.join(', ')}); exactly one is required` };
@@ -157,6 +164,7 @@ export async function publishPrReviewComment(input: PublishPrReviewInput): Promi
   const run = input.run ?? defaultCommandRunner;
   const body = input.body.trim();
   if (!body) throw new Error('refusing to publish an empty review');
+  if (LOCAL_PATH_RE.test(body)) throw new Error(`refusing to publish: ${LOCAL_PATH_REASON}`);
   const marker = prReviewMarker(input.number, input.headSha);
   const existing = await run(
     'gh',
