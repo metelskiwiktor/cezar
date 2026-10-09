@@ -119,6 +119,7 @@ export const BACKEND_MODEL_MAP: Readonly<Record<AgentBackend, BackendModelMap>> 
   // the run (#405's invariant). Rejecting a bare id the way opencode and pi do would reject the
   // only form Copilot accepts.
   copilot: { defaultProvider: 'github' },
+  agy: { defaultProvider: 'google', allowExplicitProvider: true, wireProviderQualified: false },
 };
 
 const SLASH = '/';

@@ -241,6 +241,7 @@ export const BACKEND_ALLOW_PREFIXES: Record<AgentBackend, readonly string[]> = {
   // it authenticates with (`GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`) are already forwarded to every
   // backend below, and `COPILOT_GITHUB_TOKEN` is covered by this prefix — so nothing else widens.
   copilot: ['COPILOT_'],
+  agy: ['AGY_', 'GOOGLE_', 'GEMINI_'],
 };
 
 /** `gh` handoff (draft PRs) works in every backend — the one credential the

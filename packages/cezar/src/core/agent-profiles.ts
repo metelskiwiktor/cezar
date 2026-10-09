@@ -58,6 +58,7 @@ export const PROFILE_ENV_VAR: Record<ProviderId, string | null> = {
   pi: null,
   junie: null,
   copilot: null,
+  agy: null,
 };
 
 /** Providers that can carry more than one account — what the UI offers "Add account" for. */
@@ -116,4 +117,5 @@ const PROFILE_DIR_MARKERS: Record<ProviderId, readonly string[]> = {
   junie: [],
   // Same for copilot (`PROFILE_ENV_VAR.copilot === null`).
   copilot: [],
+  agy: [],
 };

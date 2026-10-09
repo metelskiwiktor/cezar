@@ -2,11 +2,12 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolveCursorAgentBin } from './cursor-agent-runner.ts';
 import { resolveClaudeBin } from './claude-bin.ts';
+import { resolveAgyBin } from './agy-bin.ts';
 
 const exec = promisify(execFile);
 
 export interface BackendCheck {
-  name: 'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'junie' | 'copilot' | 'gh' | 'git';
+  name: 'claude' | 'codex' | 'opencode' | 'cursor' | 'pi' | 'junie' | 'copilot' | 'agy' | 'gh' | 'git';
   available: boolean;
   version?: string;
   hint?: string;
@@ -14,7 +15,7 @@ export interface BackendCheck {
 
 /**
  * Probe the host for everything cez leans on: the agent CLIs (`claude`, and
- * the optional `codex` / `opencode` / `cursor` / `pi` / `junie` / `copilot`
+ * the optional `codex` / `opencode` / `cursor` / `pi` / `junie` / `copilot` / `agy`
  * alternatives), `gh` (GitHub auth for PR creation) and `git`. Nothing is required except at
  * least one agent CLI — the GUI degrades gracefully, only offers the
  * runners that are present, and shows the hints for the rest.
@@ -28,6 +29,7 @@ export async function detectEnvironment(): Promise<BackendCheck[]> {
     probePi(),
     probeJunie(),
     probeCopilot(),
+    probeAgy(),
     probeGh(),
     probeGit(),
   ]);
@@ -211,6 +213,28 @@ async function probeCopilot(): Promise<BackendCheck> {
       name: 'copilot',
       available: false,
       hint: 'optional: install GitHub Copilot CLI (`npm i -g @github/copilot`) and run `copilot login` to use the copilot runner',
+    };
+  }
+}
+
+async function probeAgy(): Promise<BackendCheck> {
+  if (process.env.CEZ_DRY_RUN === '1') {
+    return { name: 'agy', available: true, version: 'mock (CEZ_DRY_RUN=1)' };
+  }
+  const bin = resolveAgyBin();
+  try {
+    const { stdout } = await exec(bin, ['--version'], { timeout: 10_000 });
+    return {
+      name: 'agy',
+      available: true,
+      version: stdout.trim(),
+      hint: 'if not authenticated, run `agy` once and log in with your Google account',
+    };
+  } catch {
+    return {
+      name: 'agy',
+      available: false,
+      hint: 'optional: install Google Antigravity CLI (`agy`) and log in to use the Antigravity runner',
     };
   }
 }

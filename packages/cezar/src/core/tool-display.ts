@@ -59,7 +59,7 @@ function field(input: unknown, ...keys: string[]): string | undefined {
  *  a string or an argv array — join the string members. */
 function commandText(input: unknown): string | undefined {
   if (!isRecord(input)) return undefined;
-  const command = input.command;
+  const command = input.command ?? input.CommandLine;
   if (typeof command === 'string' && command.trim() !== '') return oneLine(command);
   if (Array.isArray(command)) {
     const argv = command.filter((part): part is string => typeof part === 'string');
@@ -98,17 +98,20 @@ export function toolDisplay(name: string, input?: unknown): ToolDisplay {
   switch (key) {
     case 'bash':
     case 'commandexecution':
+    case 'run_command':
       return {
         toolKind: 'execute',
         title: titled('Ran', commandText(input)),
-        subtitle: field(input, 'description'),
+        subtitle: field(input, 'description', 'toolAction', 'toolSummary'),
       };
 
     case 'edit':
     case 'multiedit':
-      return { toolKind: 'edit', title: titled('Edit', field(input, 'file_path', 'filePath', 'path')) };
+    case 'replace_file_content':
+      return { toolKind: 'edit', title: titled('Edit', field(input, 'TargetFile', 'file_path', 'filePath', 'path')) };
     case 'write':
-      return { toolKind: 'edit', title: titled('Write', field(input, 'file_path', 'filePath', 'path')) };
+    case 'write_to_file':
+      return { toolKind: 'edit', title: titled('Write', field(input, 'TargetFile', 'file_path', 'filePath', 'path')) };
     case 'notebookedit':
       return {
         toolKind: 'edit',
@@ -121,11 +124,14 @@ export function toolDisplay(name: string, input?: unknown): ToolDisplay {
     }
 
     case 'read':
-      return { toolKind: 'read', title: titled('Read', field(input, 'file_path', 'filePath', 'path')) };
+    case 'view_file':
+      return { toolKind: 'read', title: titled('Read', field(input, 'AbsolutePath', 'file_path', 'filePath', 'path')) };
     case 'imageview':
       return { toolKind: 'read', title: titled('View image', field(input, 'path')) };
     case 'glob':
     case 'grep':
+    case 'search_files':
+    case 'find_files':
       return {
         toolKind: 'search',
         title: titled('Search', field(input, 'pattern', 'query')),

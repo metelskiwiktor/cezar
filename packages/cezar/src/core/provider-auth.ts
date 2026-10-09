@@ -6,8 +6,9 @@ import { profileEnv } from './agent-profiles.ts';
 import { resolveClaudeBin } from './claude-bin.ts';
 import { quoteExecutable, withEnvPrefix } from './shell-env.ts';
 import { probeJunieAuthentication } from './junie-auth-probe.ts';
+import { resolveAgyBin } from './agy-bin.ts';
 
-export const PROVIDER_IDS = ['claude', 'codex', 'opencode', 'cursor', 'pi', 'junie', 'copilot'] as const;
+export const PROVIDER_IDS = ['claude', 'codex', 'opencode', 'cursor', 'pi', 'junie', 'copilot', 'agy'] as const;
 export type ProviderId = (typeof PROVIDER_IDS)[number];
 export type ProviderConnectionState =
   | 'connected'
@@ -380,7 +381,22 @@ const DESCRIPTORS: readonly ProviderDescriptor[] = [
     parse: parseCopilotStatus,
     stdin: copilotAcpProbeStdin,
   },
+  {
+    id: 'agy',
+    executable: () => resolveAgyBin(),
+    statusArgs: ['--version'],
+    loginArgs: [],
+    installHint: 'Install Google Antigravity CLI (`agy`), then log in with your Google account.',
+    parse: parseAgyStatus,
+  },
 ];
+
+function parseAgyStatus(result: ProviderCommandResult): ProviderConnectionState | null {
+  if (result.exitCode === 0 && result.stdout.trim().length > 0) {
+    return 'connected';
+  }
+  return null;
+}
 
 function parseCursorStatus(result: ProviderCommandResult): ProviderConnectionState | null {
   // probe() already handles ENOENT / any other errorCode before calling parse() — result here

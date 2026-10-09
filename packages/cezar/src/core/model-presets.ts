@@ -52,6 +52,7 @@ export const KNOWN_PRESETS_BY_RUNNER: Record<RunnerId, readonly string[]> = {
   // `claude-sonnet-4`). Naming them here would make this guard reject a legitimate codex or
   // claude model as "another runner's preset" — the exact failure pi's comment warns about.
   copilot: [],
+  agy: ['gemini-3.8-flash-high', 'gemini-3.8-flash'],
 };
 
 /**
@@ -64,6 +65,7 @@ export const KNOWN_PRESETS_BY_RUNNER: Record<RunnerId, readonly string[]> = {
 const NATIVE_MODEL_ID_PREFIX: Partial<Record<RunnerId, RegExp>> = {
   claude: /^claude[-.]/,
   codex: /^gpt[-.]/,
+  agy: /^gemini[-.]/,
 };
 
 /**
