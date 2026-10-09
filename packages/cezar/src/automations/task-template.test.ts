@@ -60,6 +60,36 @@ describe('automation task templates', () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it('a read-only PR automation forks from the fetched PR HEAD and tells the agent the diff range', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'cezar-template-pr-review-'));
+    try {
+      const store = RunStore.open(join(root, '.ai/cezar'));
+      const inputs: Array<{ task: string; baseBranch?: string; readOnly?: boolean }> = [];
+      const manager = {
+        startRun: (workflow: { name: string; steps: [] }, input: { task: string; baseBranch?: string; readOnly?: boolean }) => {
+          inputs.push(input);
+          return store.createRun({ title: 'automation', workflow: workflow.name, task: input.task, steps: [] });
+        },
+      } as unknown as RunManager;
+      const head = 'c'.repeat(40);
+      const prepared: number[] = [];
+      const preparePrReview = async (_root: string, number: number) => {
+        prepared.push(number);
+        return { number, headSha: head, baseRef: 'origin/main', mergeBase: 'd'.repeat(40) };
+      };
+      const pr = { ...candidate, event: 'pull_request.opened' as const, number: 25 };
+      const task = { ...definition.task, workflow: 'quick-task', readOnly: true };
+      await launchAutomationRun({ root, manager, store, definition: { ...definition, task }, candidate: pr, receiptId: 'r', preparePrReview });
+      expect(prepared).toEqual([25]);
+      expect(inputs[0]).toMatchObject({ baseBranch: head, readOnly: true });
+      expect(inputs[0]?.task).toContain(`git diff ${'d'.repeat(40)} ${head}`);
+      // Not read-only → no PR checkout, unchanged input.
+      await launchAutomationRun({ root, manager, store, definition: { ...definition, task: { ...task, readOnly: false } }, candidate: pr, receiptId: 'r2', preparePrReview });
+      expect(prepared).toEqual([25]);
+      expect(inputs[1]?.baseBranch).toBeUndefined();
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it('refuses successful delivery when run provenance cannot be persisted', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cezar-durable-launch-'));
     const store = RunStore.open(join(root, '.ai/cezar'));

@@ -9,7 +9,7 @@
  */
 
 import { resolve } from 'node:path';
-import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn as nodeSpawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
   AgentEvent,
   AgentRunResult,
@@ -83,6 +83,8 @@ export function isPermissionError(result: string): boolean {
 
 export interface AgyCliRunnerOptions {
   bin?: string;
+  /** Arguments placed before agy's own (e.g. a script when `bin` is an interpreter). Test seam. */
+  binArgs?: string[];
   timeoutMs?: number;
 }
 
@@ -144,6 +146,28 @@ function wrapSpawnError(err: unknown, bin: string): Error {
   return err instanceof Error ? err : new Error(String(err));
 }
 
+/**
+ * Terminate the agy process and anything it spawned. On Windows `child.kill()`
+ * only ends the top process, so a `run_command` grandchild would survive;
+ * `taskkill /T /F` takes the whole tree. Best-effort: errors are ignored.
+ */
+export function killAgyTree(
+  child: Pick<ChildProcessWithoutNullStreams, 'pid' | 'kill'>,
+  signal: NodeJS.Signals = 'SIGTERM',
+  platform: NodeJS.Platform = process.platform,
+  run: typeof spawnSync = spawnSync,
+): void {
+  try {
+    if (platform === 'win32' && child.pid) {
+      run('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+      return;
+    }
+    child.kill(signal);
+  } catch {
+    /* already gone */
+  }
+}
+
 function waitForExit(child: ChildProcessWithoutNullStreams): Promise<number | null> {
   if (child.exitCode != null) return Promise.resolve(child.exitCode);
   return new Promise((resolve) => {
@@ -158,11 +182,13 @@ export class AgyCliRunner implements AgentRunner {
   readonly backend = 'agy' as const;
 
   private readonly bin: string;
+  private readonly binArgs: string[];
   private readonly timeoutMs: number;
   private lastSession: AgentSession | null = null;
 
   constructor(opts: AgyCliRunnerOptions = {}) {
     this.bin = resolveAgyBin(opts.bin);
+    this.binArgs = opts.binArgs ?? [];
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_AGY_TIMEOUT_MS;
   }
 
@@ -215,18 +241,8 @@ export class AgyCliRunner implements AgentRunner {
         deadline = setTimeout(() => {
           timedOut = true;
           terminatedByCezar = true;
-          try {
-            child.kill('SIGTERM');
-          } catch {
-            /* ignore */
-          }
-          killTimer = setTimeout(() => {
-            try {
-              child.kill('SIGKILL');
-            } catch {
-              /* ignore */
-            }
-          }, AGY_KILL_GRACE_MS);
+          killAgyTree(child);
+          killTimer = setTimeout(() => killAgyTree(child, 'SIGKILL'), AGY_KILL_GRACE_MS);
           killTimer.unref?.();
         }, limitMs);
         deadline.unref?.();
@@ -271,10 +287,15 @@ export class AgyCliRunner implements AgentRunner {
         env = buildChildEnv({ backend: this.backend, extraEnv: spec.env, readOnly: false });
       }
 
+      // Baseline of HEAD + every tracked/untracked change. Outside a git checkout
+      // there is nothing to compare against, so the check is skipped (noted).
       const initialSnapshot = readOnly && spec.cwd ? getWorkspaceGitSnapshot(spec.cwd) : undefined;
+      if (readOnly && initialSnapshot === undefined) {
+        onEvent?.({ type: 'note', message: 'read-only run outside a git checkout — change detection skipped' });
+      }
 
       try {
-        const [file, argv] = disclaimedCommand(this.bin, args, env);
+        const [file, argv] = disclaimedCommand(this.bin, [...this.binArgs, ...args], env);
         const child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
         currentChild = child;
 
@@ -300,38 +321,13 @@ export class AgyCliRunner implements AgentRunner {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
 
-            if (readOnly) {
-              const lowerTool = event.tool.toLowerCase();
-              if (MUTATING_TOOL_NAMES.has(lowerTool)) {
-                terminatedByCezar = true;
-                try {
-                  child.kill('SIGTERM');
-                } catch {
-                  /* ignore */
-                }
-                const violation = `Security policy violation: mutating tool "${event.tool}" is forbidden in read-only review mode`;
-                resultError = violation;
-                onEvent?.({ type: 'error', message: violation });
-                throw new Error(violation);
-              }
-              if (lowerTool === 'run_command' || lowerTool === 'bash') {
-                const cmd =
-                  typeof event.input === 'object' && event.input !== null
-                    ? String((event.input as any).CommandLine || (event.input as any).command || '')
-                    : '';
-                if (/\b(git\s+(push|commit|checkout\s+-b|branch|tag|merge|rebase|reset)|gh\s+(pr|issue|release)|rm\s+|del\s+|remove-item|set-content|out-file)\b/i.test(cmd)) {
-                  terminatedByCezar = true;
-                  try {
-                    child.kill('SIGTERM');
-                  } catch {
-                    /* ignore */
-                  }
-                  const violation = `Security policy violation: mutating command "${cmd}" is forbidden in read-only review mode`;
-                  resultError = violation;
-                  onEvent?.({ type: 'error', message: violation });
-                  throw new Error(violation);
-                }
-              }
+            // Best-effort tripwire, not a boundary: the event may arrive after the
+            // tool already ran. The hard check is the workspace snapshot below.
+            if (readOnly && !resultError && MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
+              terminatedByCezar = true;
+              resultError = `Read-only review violation: mutating tool "${event.tool}" is not allowed`;
+              onEvent?.({ type: 'error', message: resultError });
+              killAgyTree(child);
             }
           }
           if (event.type === 'tool-result') {
@@ -361,29 +357,38 @@ export class AgyCliRunner implements AgentRunner {
             emitUi((state) => mapAgyMessage(parsed, state));
             for (const event of mapAgyStreamEvent(parsed)) emit(event);
           }
-        } catch (err) {
-          if (!timedOut && !terminatedByCezar) {
-            /* premature close */
-          }
-          if (terminatedByCezar && resultError) {
-            throw err;
-          }
+        } catch {
+          /* premature stdout close — the exit code below decides */
         } finally {
           clearTimers();
         }
 
         const exitCode = await waitForExit(child);
-      if (spawnFailed) throw spawnFailed;
+        if (spawnFailed) throw spawnFailed;
 
-      if (timedOut) {
-        const mins = Math.round((limitMs / 60_000) * 10) / 10;
-        onEvent?.({ type: 'error', message: `Antigravity agent timed out after ${mins}m and was killed` });
-        return;
-      }
+        // Checked on every exit path (incl. timeout and cancel): a read-only run
+        // that changed the checkout must never settle as a clean review.
+        if (readOnly && initialSnapshot !== undefined && spec.cwd) {
+          const integrity = verifyWorkspaceIntegrity(spec.cwd, initialSnapshot);
+          if (!integrity.clean) {
+            const msg = `Read-only review violation: the checkout changed during the run: ${integrity.details}`;
+            onEvent?.({ type: 'error', message: msg });
+            throw new Error(msg);
+          }
+        }
 
-      if (terminatedByCezar && resultError) {
-        throw new Error(resultError);
-      }
+        if (timedOut) {
+          const mins = Math.round((limitMs / 60_000) * 10) / 10;
+          const msg = `Antigravity agent timed out after ${mins}m and was killed`;
+          onEvent?.({ type: 'error', message: msg });
+          // A read-only review must fail, not settle with a partial verdict.
+          if (readOnly) throw new Error(msg);
+          return;
+        }
+
+        if (terminatedByCezar && resultError) {
+          throw new Error(resultError);
+        }
 
       if (terminatedByCezar && isSignalTerminationExit(exitCode)) {
         onEvent?.({
@@ -411,15 +416,6 @@ export class AgyCliRunner implements AgentRunner {
         const msg = `Antigravity agent exited with code ${exitCode}${detail}`;
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
-      }
-
-      if (readOnly && spec.cwd) {
-        const integrity = verifyWorkspaceIntegrity(spec.cwd, initialSnapshot);
-        if (!integrity.clean) {
-          const msg = `Security policy violation: workspace files were modified during read-only review: ${integrity.details}`;
-          onEvent?.({ type: 'error', message: msg });
-          throw new Error(msg);
-        }
       }
 
       if (resultError) throw new Error(resultError);
@@ -467,11 +463,12 @@ export class AgyCliRunner implements AgentRunner {
     const interrupt = () => {
       terminatedByCezar = true;
       open = false;
-      try {
-        currentChild?.kill('SIGTERM');
-      } catch {
-        /* ignore */
-      }
+      const child = currentChild;
+      if (!child || child.exitCode != null) return;
+      killAgyTree(child);
+      const hard = setTimeout(() => killAgyTree(child, 'SIGKILL'), AGY_KILL_GRACE_MS);
+      hard.unref?.();
+      child.once('exit', () => clearTimeout(hard));
     };
 
     const session: AgentSession = {
