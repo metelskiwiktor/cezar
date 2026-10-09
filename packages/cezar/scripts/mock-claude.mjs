@@ -310,6 +310,24 @@ async function respond(userText, imageCount) {
     return;
   }
 
+  // `mock:review=<chars>` → a PR review of about <chars> characters ending with a
+  // `Recommendation:` line, so the graph `github.review-comment` node is testable dry with a
+  // review longer than a node summary keeps. `mock:review-bad` → the same without the line.
+  const reviewMatch = /mock:review=(\d+)/.exec(userText);
+  if (reviewMatch || userText.includes('mock:review-bad')) {
+    const size = reviewMatch ? Number(reviewMatch[1]) : 200;
+    const head = 'REVIEW-START P1: src/a.ts:12 off-by-one in the loop bound.\n';
+    const filler = 'P3: nit — wording. '.repeat(Math.ceil(size / 19)).slice(0, Math.max(0, size - head.length));
+    const review = `${head}${filler}\n\n${reviewMatch ? 'Recommendation: CHANGES REQUESTED' : 'done'}`;
+    emit({
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: review }], usage: { input_tokens: 100, output_tokens: 200 } },
+    });
+    await sleep(50);
+    emit({ type: 'result', subtype: 'success', result: review, usage: { input_tokens: 100, output_tokens: 200 }, total_cost_usd: 0.001 });
+    return;
+  }
+
   // `mock:subagents` → a parallel fan-out: two `Task` spawns whose child items
   // carry `parent_tool_use_id`, interleaved the way a real fan-out interleaves,
   // then their results. Makes the Agents dock and its drill-down sheet reachable

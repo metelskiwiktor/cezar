@@ -133,6 +133,7 @@ export const workflowGraphNodeSchema = z.discriminatedUnion('type', [
     pollMs: z.number().int().min(10_000).max(30 * 60_000).default(60_000),
   }),
   z.object({ ...graphNodeBase, type: z.literal('github.pr-comment'), body: z.string().min(1) }),
+  z.object({ ...graphNodeBase, type: z.literal('github.review-comment'), from: nodeId }),
   /** `branches` / `wait` are defaulted server-side, so the served shapes always carry them. */
   z.object({ ...graphNodeBase, type: z.literal('fork'), branches: z.number().int().min(2).max(4).default(3) }),
   z.object({ ...graphNodeBase, type: z.literal('join'), wait: z.enum(['all', 'any']).default('all') }),
@@ -263,6 +264,7 @@ export const workflowNodeCatalogResponseSchema = z.object({
         'github.draft-pr',
         'github.wait-ci',
         'github.pr-comment',
+        'github.review-comment',
         'fork',
         'join',
         'if',

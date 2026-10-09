@@ -54,6 +54,9 @@ export const automationTaskSchema = z
     worktree: z.boolean().optional(),
     generateFollowups: z.boolean().optional(),
     autonomous: z.boolean().optional(),
+    /** Read-only review (PR review V1): no credentials for the agent, checkout change detection;
+     *  on a `pull_request.*` event the worktree forks from the PR's fetched HEAD. */
+    readOnly: z.boolean().optional(),
     systemPrompt: z.string().max(100_000).optional(),
     /** The automation's own dispatch setting (spec 2026-09-14 Q4). */
     dispatch: z

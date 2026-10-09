@@ -1,11 +1,13 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { afterEach, describe, expect, it } from 'vitest';
 
-import { buildChildEnv, GH_CREDENTIAL_NAMES } from './agent-env.ts';
-import { AgyCliRunner, MUTATING_TOOL_NAMES } from './agy-cli-runner.ts';
-import { prepareReadOnlyIsolation, verifyWorkspaceIntegrity } from './read-only-sandbox.ts';
+import { buildChildEnv } from './agent-env.ts';
+import { AgyCliRunner, killAgyTree, MUTATING_TOOL_NAMES } from './agy-cli-runner.ts';
+import { getWorkspaceGitSnapshot, prepareReadOnlyIsolation, verifyWorkspaceIntegrity } from './read-only-sandbox.ts';
 
 describe('AgyCliRunner security hardening & isolation', () => {
   describe('1. GitHub credentials stripping and leak prevention', () => {
@@ -74,7 +76,7 @@ describe('AgyCliRunner security hardening & isolation', () => {
 
     it('cleans up temporary isolation directories safely after completion', () => {
       const isolation = prepareReadOnlyIsolation();
-      const tempPath = isolation.env.GH_CONFIG_DIR;
+      const tempPath = isolation.env.GH_CONFIG_DIR!;
       expect(tempPath).toBeDefined();
       expect(statSync(tempPath).isDirectory()).toBe(true);
 
@@ -116,6 +118,108 @@ describe('AgyCliRunner security hardening & isolation', () => {
       await expect(
         runner.run({ userPrompt: 'test', cwd: process.cwd(), readOnly: true }),
       ).rejects.toThrow(/not found/);
+    });  });
+
+  describe('5. Checkout change detection, timeout, cancel (fake agy)', () => {
+    const FAKE_AGY = fileURLToPath(new URL('./__fixtures__/fake-agy.mjs', import.meta.url));
+    const fakeRunner = (timeoutMs = 30_000) =>
+      new AgyCliRunner({ bin: process.execPath, binArgs: [FAKE_AGY], timeoutMs });
+    const repos: string[] = [];
+    const makeRepo = () => {
+      const repo = mkdtempSync(join(tmpdir(), 'cez-agy-ro-'));
+      repos.push(repo);
+      const g = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'ignore' });
+      g('init', '-q');
+      writeFileSync(join(repo, 'tracked.txt'), 'v1\n');
+      g('add', '.');
+      g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init');
+      return repo;
+    };
+    afterEach(() => {
+      for (const repo of repos.splice(0)) rmSync(repo, { recursive: true, force: true });
+    });
+
+    it('snapshot sees untracked files and new commits; git failure after baseline is not clean', () => {
+      const repo = makeRepo();
+      const base = getWorkspaceGitSnapshot(repo);
+      expect(base).toMatch(/^HEAD [0-9a-f]{40}/);
+      writeFileSync(join(repo, 'new.txt'), 'x');
+      expect(verifyWorkspaceIntegrity(repo, base).clean).toBe(false);
+      rmSync(join(repo, 'new.txt'));
+      execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'x'], { cwd: repo });
+      expect(verifyWorkspaceIntegrity(repo, base).clean).toBe(false);
+      expect(getWorkspaceGitSnapshot(join(repo, 'missing-dir'))).toBeUndefined();
+      expect(verifyWorkspaceIntegrity(join(repo, 'missing-dir'), base).clean).toBe(false);
+    });
+
+    it('read-only run that writes into the checkout fails', async () => {
+      const repo = makeRepo();
+      await expect(
+        fakeRunner().run({ userPrompt: 'review', cwd: repo, readOnly: true, env: { FAKE_AGY_MODE: 'write' } }),
+      ).rejects.toThrow(/checkout changed/);
+    });
+
+    it('the same write is allowed for a normal (non-read-only) task', async () => {
+      const repo = makeRepo();
+      await expect(
+        fakeRunner().run({ userPrompt: 'implement', cwd: repo, env: { FAKE_AGY_MODE: 'write' } }),
+      ).resolves.toMatchObject({ text: '' });
+    });
+
+    it('streamed text deltas reach the engine as one whole message, not one line per delta', async () => {
+      const repo = makeRepo();
+      const texts: string[] = [];
+      const result = await fakeRunner().run({ userPrompt: 'r', cwd: repo, readOnly: true, env: { FAKE_AGY_MODE: 'deltas' } }, (e) => {
+        if (e.type === 'text') texts.push(e.text);
+      });
+      expect(texts).toEqual(['Findings: none.\nRecommendation: APPROVE']);
+      expect(result.text).toBe('Findings: none.\nRecommendation: APPROVE');
+    });
+
+    it('clean read-only run succeeds; non-zero exit fails', async () => {
+      const repo = makeRepo();
+      await expect(fakeRunner().run({ userPrompt: 'r', cwd: repo, readOnly: true })).resolves.toBeDefined();
+      await expect(
+        fakeRunner().run({ userPrompt: 'r', cwd: repo, readOnly: true, env: { FAKE_AGY_MODE: 'fail' } }),
+      ).rejects.toThrow(/exited with code 3/);
+    });
+
+    it('read-only timeout kills the process and fails the run', async () => {
+      const repo = makeRepo();
+      const started = Date.now();
+      await expect(
+        fakeRunner(1_500).run({ userPrompt: 'r', cwd: repo, readOnly: true, env: { FAKE_AGY_MODE: 'hang' } }),
+      ).rejects.toThrow(/timed out/);
+      expect(Date.now() - started).toBeLessThan(15_000);
+    });
+
+    it('cancel (interrupt) terminates a hanging run and settles', async () => {
+      const repo = makeRepo();
+      const session = fakeRunner().startSession(
+        { userPrompt: 'r', cwd: repo, readOnly: true, env: { FAKE_AGY_MODE: 'hang' } },
+        undefined,
+        { autoEndAfterFirstTurn: true },
+      );
+      await new Promise((r) => setTimeout(r, 800));
+      const pid = session.pid;
+      expect(pid).toBeDefined();
+      session.interrupt();
+      await session.result.catch(() => undefined);
+      expect(() => process.kill(pid!, 0)).toThrow();
+    });
+  });
+
+  describe('6. killAgyTree', () => {
+    it('uses taskkill /T /F on Windows and child.kill elsewhere', () => {
+      const calls: unknown[][] = [];
+      const run = ((...args: unknown[]) => { calls.push(args); return {} as never; }) as never;
+      const kills: string[] = [];
+      const child = { pid: 42, kill: (s?: NodeJS.Signals | number) => { kills.push(String(s)); return true; } };
+      killAgyTree(child, 'SIGTERM', 'win32', run);
+      expect(calls[0]?.[0]).toBe('taskkill');
+      expect(calls[0]?.[1]).toEqual(['/pid', '42', '/T', '/F']);
+      killAgyTree(child, 'SIGKILL', 'linux', run);
+      expect(kills).toEqual(['SIGKILL']);
     });
   });
 });

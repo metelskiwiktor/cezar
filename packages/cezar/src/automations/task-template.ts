@@ -5,6 +5,7 @@ import { stepsIssue, type WorkflowDef } from '../workflows/types.ts';
 import type { RunStore } from '../runs/store.ts';
 import type { RunManager, StartRunInput } from '../workflows/run.ts';
 import type { GithubCandidate } from './github-poller.ts';
+import { preparePrReviewCheckout, renderPrReviewContext } from './pr-review.ts';
 import type { ScheduleOccurrence } from './schedule-runner.ts';
 import type { TrackerAutomationCandidate } from './tracker-poller.ts';
 import type { AutomationDefinition, GithubAutomationDefinition, ScheduleAutomationDefinition, TrackerAutomationDefinition } from './types.ts';
@@ -148,7 +149,31 @@ function startInput(definition: AutomationDefinition, task: string, dispatchEnab
     worktree: definition.task.worktree,
     autonomous: definition.task.autonomous,
     generateFollowups: definition.task.generateFollowups,
+    ...(definition.task.readOnly ? { readOnly: true } : {}),
     ...(intent ? { dispatchIntent: intent } : {}),
+  };
+}
+
+/**
+ * A read-only automation on a pull request reviews the PR's own HEAD: fetch it, fork the
+ * worktree from it, and tell the agent which range is the diff. Any other run is unchanged.
+ */
+async function withPrReviewCheckout(
+  root: string,
+  definition: GithubAutomationDefinition,
+  candidate: GithubCandidate,
+  input: StartRunInput,
+  prepare: typeof preparePrReviewCheckout,
+): Promise<StartRunInput> {
+  if (!definition.task.readOnly || !candidate.event.startsWith('pull_request')) return input;
+  if (definition.task.worktree === false) throw new Error('a read-only PR review needs its own worktree (task.worktree must not be false)');
+  const checkout = await prepare(root, candidate.number);
+  return {
+    ...input,
+    baseBranch: checkout.headSha,
+    task: `${input.task}\n\n${renderPrReviewContext(checkout)}`,
+    // Orchestrator data, persisted on the run: where `github.review-comment` publishes.
+    prReview: { repo: candidate.repo, ...checkout },
   };
 }
 
@@ -161,10 +186,18 @@ export async function launchAutomationRun(options: {
   receiptId: string;
   /** `capabilities.dispatch` — off, the automation's dispatch setting is ignored, never refused. */
   dispatchEnabled?: boolean;
+  /** Test seam for the PR-head fetch of a read-only PR review. */
+  preparePrReview?: typeof preparePrReviewCheckout;
 }): Promise<{ runId: string }> {
   const { definition, candidate } = options;
   const workflow = await resolveWorkflow(options.root, definition);
-  const input = startInput(definition, renderAutomationTask(definition, candidate), options.dispatchEnabled ?? false);
+  const input = await withPrReviewCheckout(
+    options.root,
+    definition,
+    candidate,
+    startInput(definition, renderAutomationTask(definition, candidate), options.dispatchEnabled ?? false),
+    options.preparePrReview ?? preparePrReviewCheckout,
+  );
   const runs = (definition.task.variants ?? 1) > 1
     ? options.manager.startVariants(workflow, input, definition.task.variants ?? 1)
     : [options.manager.startRun(workflow, input)];

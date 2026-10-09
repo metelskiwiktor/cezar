@@ -1289,6 +1289,7 @@ const OUTPUTS: Record<GraphNodeType, string[]> = {
   'github.draft-pr': ['url', 'number'],
   'github.wait-ci': ['status'],
   'github.pr-comment': [],
+  'github.review-comment': ['status', 'headSha'],
   fork: ['runIds'],
   join: ['succeeded', 'failed'],
   workflow: ['runId', 'status', 'summary'],
@@ -1538,6 +1539,12 @@ function Inspector({
       {node.type === 'github.draft-pr' && (
         <Field label="title — optional, defaults to the task title">
           <Input value={node.title ?? ''} onChange={(e) => set({ title: e.target.value })} className="h-8" />
+        </Field>
+      )}
+
+      {node.type === 'github.review-comment' && (
+        <Field label="publish the review of agent node">
+          <Input value={node.from} onChange={(e) => set({ from: e.target.value })} className="h-8" />
         </Field>
       )}
 

@@ -77,6 +77,7 @@ export const TYPE_CATEGORY: Record<GraphNodeType, Category> = {
   'github.draft-pr': 'git',
   'github.wait-ci': 'git',
   'github.pr-comment': 'git',
+  'github.review-comment': 'git',
   fork: 'flow',
   join: 'flow',
   if: 'flow',
@@ -101,6 +102,7 @@ export const ICONS: Record<GraphNodeType, LucideIcon> = {
   'github.draft-pr': GitPullRequestIcon,
   'github.wait-ci': TimerIcon,
   'github.pr-comment': MessageSquareIcon,
+  'github.review-comment': MessageSquareIcon,
   fork: GitForkIcon,
   join: MergeIcon,
   if: SignpostIcon,
@@ -132,6 +134,7 @@ export const TYPE_LABEL: Record<GraphNodeType, string> = {
   'github.draft-pr': 'Draft PR',
   'github.wait-ci': 'Wait for CI',
   'github.pr-comment': 'PR comment',
+  'github.review-comment': 'Publish PR review',
   fork: 'Fork',
   join: 'Join',
   if: 'If',
@@ -177,6 +180,8 @@ export function nodeDetail(node: WorkflowGraphNode, loopCount?: number): string 
       return `≤ ${Math.round(node.timeoutMs / 60_000)} min`
     case 'github.pr-comment':
       return node.body
+    case 'github.review-comment':
+      return `review of ${node.from}`
     case 'fork':
       return `${node.branches} agents at once`
     case 'join':

@@ -3,40 +3,39 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
+/**
+ * Read-only review mode — what it does and does NOT guarantee.
+ *
+ * Real (enforced by cezar):
+ *  - GitHub/git credentials are not forwarded to the agent (agent-env + the
+ *    empty gh/git config below), so `gh`/`git push` from the agent fail to auth.
+ *  - The checkout is snapshotted (HEAD + `git status`) before and after the run;
+ *    any change fails the run, also on timeout/cancel.
+ *  - The agent process tree is killed on timeout/cancel/violation.
+ *
+ * Best-effort (NOT an OS boundary):
+ *  - The review-only prompt and the mutating-tool tripwire. agy runs as the
+ *    operator's own user; it can still read the user's files and run commands.
+ *    There is no OS sandbox, VM or separate account in this MVP.
+ */
 export interface ReadOnlyIsolation {
   env: Record<string, string>;
   cleanup: () => void;
 }
 
 /**
- * Prepares ephemeral environment isolation for read-only review sessions:
- * - Redirects GH_CONFIG_DIR to a fresh empty temporary directory so GitHub CLI has no stored credentials.
- * - Points GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM to an empty config file to prevent reading user/system helpers.
- * - Explicitly disables Git Credential Manager via GIT_CONFIG_KEY_0='credential.helper' and GIT_CONFIG_VALUE_0=''.
- * - Sets remote.origin.pushurl to 'DISABLED_READ_ONLY_REVIEW'.
- * - Disables git prompts and askpass.
- *
- * IMPORTANT: This mechanism NEVER modifies ACLs or file permissions of the user workspace.
- * Isolation is fail-closed: any failure in preparing isolation throws immediately before agent execution.
+ * Ephemeral env for read-only runs: empty GH_CONFIG_DIR, empty global/system
+ * git config, no credential helper, no prompts, push URL disabled.
+ * Throws (before the agent is spawned) if the temp dir cannot be created.
  */
 export function prepareReadOnlyIsolation(): ReadOnlyIsolation {
-  let tempDir: string;
-  try {
-    tempDir = mkdtempSync(join(tmpdir(), 'cez-ro-sandbox-'));
-  } catch (err) {
-    throw new Error(`Fail-closed security check: failed to allocate read-only temporary directory: ${String(err)}`);
-  }
-
+  const tempDir = mkdtempSync(join(tmpdir(), 'cez-ro-'));
   const emptyGitConfig = join(tempDir, 'empty.gitconfig');
   try {
     writeFileSync(emptyGitConfig, '', { encoding: 'utf8' });
   } catch (err) {
-    try {
-      rmSync(tempDir, { recursive: true, force: true });
-    } catch {
-      /* ignore cleanup */
-    }
-    throw new Error(`Fail-closed security check: failed to create empty gitconfig: ${String(err)}`);
+    rmSync(tempDir, { recursive: true, force: true });
+    throw err;
   }
 
   const env: Record<string, string> = {
@@ -56,54 +55,55 @@ export function prepareReadOnlyIsolation(): ReadOnlyIsolation {
     try {
       rmSync(tempDir, { recursive: true, force: true });
     } catch {
-      /* ignore cleanup error after child exit */
+      /* best-effort after child exit */
     }
   };
 
   return { env, cleanup };
 }
 
+function git(cwd: string, args: string[]): string {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  }).trim();
+}
+
 /**
- * Captures a baseline porcelain git status snapshot of the workspace.
+ * HEAD + full porcelain status (untracked files included). Catches edits, new
+ * files, deletions, commits and branch switches. Not a content hash: a file
+ * that was already dirty and is edited again is not detected (acceptable for
+ * a clean review worktree). `undefined` when `cwd` is not a git checkout.
  */
-export function getWorkspaceGitSnapshot(cwd: string): string {
+export function getWorkspaceGitSnapshot(cwd: string): string | undefined {
   try {
-    return execFileSync('git', ['status', '--porcelain'], {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      windowsHide: true,
-    }).trim();
+    const head = git(cwd, ['rev-parse', 'HEAD']);
+    const status = git(cwd, ['status', '--porcelain', '--untracked-files=all']);
+    return `HEAD ${head}\n${status}`;
   } catch {
-    return '';
+    return undefined;
   }
 }
 
 /**
- * Verifies that no files were created, modified, or deleted in the target git workspace
- * relative to the initial baseline snapshot.
+ * Compares against the baseline. A git failure after a successful baseline is
+ * reported as not clean — it is never silently treated as "no changes".
  */
 export function verifyWorkspaceIntegrity(
   cwd: string,
   initialSnapshot?: string,
 ): { clean: boolean; details?: string } {
-  try {
-    const current = getWorkspaceGitSnapshot(cwd);
-    if (initialSnapshot !== undefined) {
-      if (current !== initialSnapshot) {
-        return {
-          clean: false,
-          details: `Workspace status changed from initial baseline:\nExpected:\n${initialSnapshot}\nActual:\n${current}`,
-        };
-      }
-      return { clean: true };
-    }
-    if (current.length > 0) {
-      return { clean: false, details: current };
-    }
-    return { clean: true };
-  } catch {
-    // If not a git repo or git is unavailable, pass integrity check
-    return { clean: true };
+  const current = getWorkspaceGitSnapshot(cwd);
+  if (current === undefined) {
+    return initialSnapshot === undefined
+      ? { clean: true }
+      : { clean: false, details: 'git state could not be read after the run' };
   }
+  const baseline = initialSnapshot ?? `HEAD ${current.split('\n')[0]!.slice(5)}\n`;
+  if (current.trim() !== baseline.trim()) {
+    return { clean: false, details: `expected:\n${baseline}\nactual:\n${current}` };
+  }
+  return { clean: true };
 }

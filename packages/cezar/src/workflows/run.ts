@@ -54,6 +54,8 @@ import type { AgentEvent, ContentBlock } from '../core/agent-runner.ts';
 import { discoverSkills, type Skill } from '../skills.ts';
 import { automationsReachable } from '../automations/builtin-skill.ts';
 import { AUTOMATIONS_PROMPT } from '../automations/prompts.ts';
+import { publishReviewFromRun, type CommandRunner } from '../automations/pr-review.ts';
+import { readNodeText, writeNodeText } from './node-text.ts';
 import { materializeSkillDir } from '../skills-remote.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { readAgentModelProvider } from '../agent-config/models.ts';
@@ -708,6 +710,8 @@ export interface StartRunInput {
   baseBranch?: string;
   /** Explicit read-only review mode: blocks file mutations and isolates credentials. */
   readOnly?: boolean;
+  /** The PR a review run reviews — orchestrator data for `github.review-comment`. */
+  prReview?: RunRecord['prReview'];
   /** Autonomous mode (#autonomous): the run never parks at `waiting` for the
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
@@ -1140,6 +1144,9 @@ export class RunManager {
   private readonly projectId: string | undefined;
 
   /** See the constructor option of the same name. */
+  private readonly prReviewCommandRunner: CommandRunner | undefined;
+
+  /** See the constructor option of the same name. */
   private readonly resolveTrackerEnv: ((root: string, expected: TrackerAssociation | undefined) => Promise<Record<string, string>>) | undefined;
 
   constructor(
@@ -1154,9 +1161,12 @@ export class RunManager {
        * reach an agent. Secrets are registered with RunStore before any output arrives.
        */
       resolveTrackerEnv?: (root: string, expected: TrackerAssociation | undefined) => Promise<Record<string, string>>;
+      /** Test seam: the `gh` calls of the `github.review-comment` node. */
+      prReviewCommandRunner?: CommandRunner;
     } = {},
   ) {
     this.dataDir = join(repoRoot, '.ai/cezar');
+    this.prReviewCommandRunner = options.prReviewCommandRunner;
     this.projectId = options.projectId;
     this.resolveTrackerEnv = options.resolveTrackerEnv;
     this.semaphore = options.semaphore ?? new WorkspaceSemaphore();
@@ -1378,6 +1388,7 @@ export class RunManager {
       model: effectiveInput.model,
       runner: input.runner,
       readOnly: input.readOnly,
+      prReview: input.prReview,
       // The composer's per-task account (spec 2026-07-29-agent-profiles). Persisted at creation
       // so a queued run picks it up at dequeue and every later resume reads the same answer.
       agentProfile: input.agentProfile,
@@ -4732,11 +4743,22 @@ export class RunManager {
             if (!nudge) verdict = parseVerdict(lastTurn.text, verdicts);
           }
         }
-        const stepRec = this.store.getRun(runId)?.steps.find((s) => s.id === node.id);
+        const runRec = this.store.getRun(runId);
+        const stepRec = runRec?.steps.find((s) => s.id === node.id);
+        const finalText = stripVerdictMarker(lastTurn.text.trim());
+        // The model this step actually ran with: `runAgentStep` re-writes `modelIdentity` from the
+        // step's resolved identity right before the spawn.
+        const ranModel = runRec?.modelIdentity ?? node.model ?? input.model ?? '';
+        // A text a later node publishes is kept whole (and durable across a restart); the
+        // outputs map keeps only the summary tail.
+        if (graph.nodes.some((n) => n.type === 'github.review-comment' && n.from === node.id)) {
+          writeNodeText(this.dataDir, runId, node.id, finalText);
+        }
         outputs.set(node.id, {
-          summary: stripVerdictMarker(lastTurn.text.trim()).slice(-NODE_SUMMARY_CAP),
+          summary: finalText.slice(-NODE_SUMMARY_CAP),
           verdict: verdict ?? '',
           costUsd: stepRec?.costUsd ?? 0,
+          model: ranModel,
         });
         if (failure) {
           this.finishStep(runId, node.id, 'failed', failure, emit);
@@ -5099,6 +5121,82 @@ export class RunManager {
         }
         note(`commented on PR #${number}`);
         return 'done';
+      }
+      case 'github.review-comment': {
+        const run = record();
+        const target = run?.prReview;
+        const where = target ? `${target.repo}#${target.number} @ ${target.headSha.slice(0, 8)}` : '';
+        // Already published (or found published) on this walk — a resumed or repeated visit
+        // never posts again for the same head.
+        const earlier = outputs.get(node.id);
+        if (target && earlier?.headSha === target.headSha && (earlier.status === 'published' || earlier.status === 'duplicate')) {
+          note(`review already ${earlier.status === 'published' ? 'published' : 'present'} on ${where} — not posting again`);
+          return earlier.status === 'published' ? 'published' : 'duplicate';
+        }
+        // Only the text of an agent step that SUCCEEDED is ever published.
+        const source = run?.steps.find((s) => s.id === node.from);
+        if (source?.status !== 'done') {
+          note(`review step "${node.from}" did not succeed (${source?.status ?? 'never ran'}) — nothing published`, 'danger');
+          outputs.set(node.id, { status: 'failed' });
+          return 'failed';
+        }
+        const text = readNodeText(this.dataDir, runId, node.from);
+        if (text === undefined) {
+          note(`the full text of "${node.from}" was not recorded — nothing published`, 'danger');
+          outputs.set(node.id, { status: 'failed' });
+          return 'failed';
+        }
+        const sourceOut = outputs.get(node.from);
+        const model = typeof sourceOut?.model === 'string' && sourceOut.model ? sourceOut.model : undefined;
+        const runner = run?.steps.find((s) => s.id === node.from)?.backend ?? run?.runner;
+        // `CEZ_DRY_RUN=1` (no GitHub at all) skips the network like every other GitHub node;
+        // `CEZ_PR_REVIEW_DRY_RUN=1` reads GitHub (stale + duplicate checks) but never posts.
+        if (process.env.CEZ_DRY_RUN === '1' && !this.prReviewCommandRunner) {
+          note(`dry run — review for ${where || 'this run'} not published`);
+          outputs.set(node.id, { status: 'dry-run', headSha: target?.headSha ?? '' });
+          return 'published';
+        }
+        try {
+          const res = await publishReviewFromRun({
+            repoRoot: this.repoRoot,
+            target,
+            text,
+            ...(model ? { model } : {}),
+            ...(runner ? { runner } : {}),
+            dryRun: process.env.CEZ_PR_REVIEW_DRY_RUN === '1',
+            ...(this.prReviewCommandRunner ? { run: this.prReviewCommandRunner } : {}),
+          });
+          switch (res.status) {
+            case 'invalid':
+              note(`review not published — ${res.reason}`, 'danger');
+              outputs.set(node.id, { status: 'invalid' });
+              return 'failed';
+            case 'stale':
+              note(`review-stale — PR HEAD moved from ${target?.headSha.slice(0, 8)} to ${res.remoteHead.slice(0, 8) || '?'} during the review; nothing published`, 'danger');
+              outputs.set(node.id, { status: 'stale', headSha: target?.headSha ?? '' });
+              return 'stale';
+            case 'skipped-duplicate':
+              note(`a review of ${where} is already on the PR — skipped`);
+              outputs.set(node.id, { status: 'duplicate', headSha: target?.headSha ?? '' });
+              onOutputs();
+              return 'duplicate';
+            case 'dry-run':
+              writeNodeText(this.dataDir, runId, node.id, res.body);
+              note(`dry run — review for ${where} NOT posted (${res.body.length} chars, saved as node-text/${runId}/${node.id}.md)`);
+              outputs.set(node.id, { status: 'dry-run', headSha: target?.headSha ?? '' });
+              return 'published';
+            case 'published':
+              outputs.set(node.id, { status: 'published', headSha: target?.headSha ?? '' });
+              onOutputs();
+              note(`review published on ${where}`);
+              return 'published';
+          }
+        } catch (err) {
+          note(`publishing the review failed — ${err instanceof Error ? err.message.split('\n')[0] : String(err)}`, 'danger');
+          outputs.set(node.id, { status: 'failed' });
+          return 'failed';
+        }
+        return 'failed';
       }
       case 'workflow': {
         const earlier = resuming ? outputs.get(node.id)?.runId : undefined;
