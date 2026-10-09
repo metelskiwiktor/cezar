@@ -42,6 +42,8 @@ export const workflowStepSchema = z
     runner: z.enum(RUNNER_IDS).optional(),
     allowedTools: z.array(z.string()).optional(),
     bashAllowlist: z.array(z.string()).optional(),
+    /** Marks the step as an automated review step (read-only execution, file modifications blocked). */
+    review: z.boolean().optional(),
     // check step
     command: z.string().optional(),
     onFail: z

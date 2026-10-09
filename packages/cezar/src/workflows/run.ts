@@ -706,6 +706,8 @@ export interface StartRunInput {
   worktree?: boolean;
   /** Explicit base branch to fork or inspect (e.g. for PR reviews or diff comparisons). */
   baseBranch?: string;
+  /** Explicit read-only review mode: blocks file mutations and isolates credentials. */
+  readOnly?: boolean;
   /** Autonomous mode (#autonomous): the run never parks at `waiting` for the
    *  user — turn-ends auto-continue until the agent signals done or the safety
    *  cap is hit. No "needs you" is ever raised. */
@@ -1375,6 +1377,7 @@ export class RunManager {
       baseBranch: input.baseBranch,
       model: effectiveInput.model,
       runner: input.runner,
+      readOnly: input.readOnly,
       // The composer's per-task account (spec 2026-07-29-agent-profiles). Persisted at creation
       // so a queued run picks it up at dequeue and every later resume reads the same answer.
       agentProfile: input.agentProfile,
@@ -4119,6 +4122,7 @@ export class RunManager {
         model: continueModel,
         sessionId: spawnSessionId,
         resume: sessionId !== undefined,
+        readOnly: record?.readOnly === true,
         timeoutMs: 0,
       },
       onEvent,
@@ -5919,6 +5923,7 @@ export class RunManager {
           model: backendModel,
           sessionId,
           resume: graphHooks?.resumeSessionId !== undefined,
+          readOnly: (step as any).review === true || this.store.getRun(runId)?.readOnly === true || input.readOnly === true,
           // Interactive sessions have no wall clock — the idle timer rules.
           //
           // A non-final step keeps its wall clock (`DEFAULT_RUN_TIMEOUT_MS`)

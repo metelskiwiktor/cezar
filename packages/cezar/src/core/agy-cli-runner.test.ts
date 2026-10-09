@@ -4,7 +4,9 @@ import {
   buildAgyArgs,
   AgyCliRunner,
   DEFAULT_AGY_MODEL,
+  MUTATING_TOOL_NAMES,
 } from './agy-cli-runner.ts';
+import { setupReadOnlyEnvironment } from './fs-readonly-lock.ts';
 import {
   createAgyUiState,
   mapAgyMessage,
@@ -12,7 +14,7 @@ import {
 } from './agy-ui-mapper.ts';
 
 describe('buildAgyArgs', () => {
-  it('builds stream-json print mode args with default gemini-3.8-flash-high model', () => {
+  it('builds stream-json print mode args with default gemini-3.8-flash-low model', () => {
     const args = buildAgyArgs({ userPrompt: 'Hello Gemini' });
     expect(args).toEqual(
       expect.arrayContaining(['--output-format', 'stream-json', '--mode', 'accept-edits', '--model', DEFAULT_AGY_MODEL]),
@@ -327,3 +329,44 @@ describe('AgyCliRunner lifecycle', () => {
     ).rejects.toThrow(/not found/);
   });
 });
+
+describe('AgyCliRunner security hardening', () => {
+  it('setupReadOnlyEnvironment strips tokens and sets isolated GH_CONFIG_DIR and disabled pushurl', () => {
+    const { env, cleanup } = setupReadOnlyEnvironment({
+      GITHUB_TOKEN: 'secret-token-123',
+      GH_TOKEN: 'secret-gh-token',
+      OTHER_VAR: 'preserved',
+    });
+
+    try {
+      expect(env.GITHUB_TOKEN).toBeUndefined();
+      expect(env.GH_TOKEN).toBeUndefined();
+      expect(env.OTHER_VAR).toBe('preserved');
+      expect(env.GH_CONFIG_DIR).toBeDefined();
+      expect(env.GIT_CONFIG_KEY_0).toBe('remote.origin.pushurl');
+      expect(env.GIT_CONFIG_VALUE_0).toBe('DISABLED_READ_ONLY_REVIEW');
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('buildAgyArgs forces read-only prompt even with DEFAULT_ALLOWED_TOOLS when readOnly is true', () => {
+    const args = buildAgyArgs({
+      userPrompt: 'Review PR changes',
+      readOnly: true,
+      allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'],
+    });
+    const prompt = args[args.length - 1];
+    expect(prompt).toContain('READ-ONLY review mode');
+    expect(prompt).toContain('You MUST NOT create, edit, or modify any files');
+  });
+
+  it('MUTATING_TOOL_NAMES includes all file-writing and editing tools', () => {
+    expect(MUTATING_TOOL_NAMES.has('write_to_file')).toBe(true);
+    expect(MUTATING_TOOL_NAMES.has('replace_file_content')).toBe(true);
+    expect(MUTATING_TOOL_NAMES.has('multi_replace_file_content')).toBe(true);
+    expect(MUTATING_TOOL_NAMES.has('write')).toBe(true);
+    expect(MUTATING_TOOL_NAMES.has('edit')).toBe(true);
+  });
+});
+

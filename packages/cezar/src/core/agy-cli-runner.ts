@@ -31,10 +31,14 @@ import {
   mapAgyStreamEvent,
   type AgyUiMapperState,
 } from './agy-ui-mapper.ts';
+import {
+  acquireFileSystemReadOnlyLock,
+  setupReadOnlyEnvironment,
+} from './fs-readonly-lock.ts';
 
 export const DEFAULT_AGY_TIMEOUT_MS = 30 * 60_000;
 export const AGY_KILL_GRACE_MS = 10_000;
-export const DEFAULT_AGY_MODEL = 'gemini-3.8-flash-high';
+export const DEFAULT_AGY_MODEL = 'gemini-3.8-flash-low';
 
 export const MUTATING_TOOL_NAMES = new Set([
   'write',
@@ -199,7 +203,7 @@ export class AgyCliRunner implements AgentRunner {
       }
     };
 
-    const readOnly = isReadOnlyTools(spec.allowedTools);
+    const readOnly = spec.readOnly === true || isReadOnlyTools(spec.allowedTools);
 
     const limitMs = spec.timeoutMs ?? this.timeoutMs;
     let deadline: NodeJS.Timeout | undefined;
@@ -246,7 +250,21 @@ export class AgyCliRunner implements AgentRunner {
         allowedTools: spec.allowedTools,
       });
 
-      const env = buildChildEnv({ backend: this.backend, extraEnv: spec.env });
+      let releaseFsLock: (() => void) | undefined;
+      let cleanupRoEnv: (() => void) | undefined;
+      let env: NodeJS.ProcessEnv;
+
+      if (readOnly) {
+        const roEnvSetup = setupReadOnlyEnvironment(spec.env);
+        cleanupRoEnv = roEnvSetup.cleanup;
+        env = buildChildEnv({ backend: this.backend, extraEnv: roEnvSetup.env });
+        if (spec.cwd) {
+          releaseFsLock = acquireFileSystemReadOnlyLock(spec.cwd);
+        }
+      } else {
+        env = buildChildEnv({ backend: this.backend, extraEnv: spec.env });
+      }
+
       const [file, argv] = disclaimedCommand(this.bin, args, env);
       const child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
       currentChild = child;
@@ -273,17 +291,38 @@ export class AgyCliRunner implements AgentRunner {
           callToolNames.set(event.id, event.tool);
           toolCalls.push({ id: event.id, name: event.tool, input: event.input });
 
-          if (readOnly && MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
-            terminatedByCezar = true;
-            try {
-              child.kill('SIGTERM');
-            } catch {
-              /* ignore */
+          if (readOnly) {
+            const lowerTool = event.tool.toLowerCase();
+            if (MUTATING_TOOL_NAMES.has(lowerTool)) {
+              terminatedByCezar = true;
+              try {
+                child.kill('SIGTERM');
+              } catch {
+                /* ignore */
+              }
+              const violation = `Security policy violation: mutating tool "${event.tool}" is forbidden in read-only review mode`;
+              resultError = violation;
+              onEvent?.({ type: 'error', message: violation });
+              throw new Error(violation);
             }
-            const violation = `Security policy violation: mutating tool "${event.tool}" is forbidden in read-only review mode`;
-            resultError = violation;
-            onEvent?.({ type: 'error', message: violation });
-            throw new Error(violation);
+            if (lowerTool === 'run_command' || lowerTool === 'bash') {
+              const cmd =
+                typeof event.input === 'object' && event.input !== null
+                  ? String((event.input as any).CommandLine || (event.input as any).command || '')
+                  : '';
+              if (/\b(git\s+(push|commit|checkout\s+-b)|gh\s+(pr|issue|release))\b/i.test(cmd)) {
+                terminatedByCezar = true;
+                try {
+                  child.kill('SIGTERM');
+                } catch {
+                  /* ignore */
+                }
+                const violation = `Security policy violation: mutating command "${cmd}" is forbidden in read-only review mode`;
+                resultError = violation;
+                onEvent?.({ type: 'error', message: violation });
+                throw new Error(violation);
+              }
+            }
           }
         }
         if (event.type === 'tool-result') {
@@ -322,6 +361,20 @@ export class AgyCliRunner implements AgentRunner {
         }
       } finally {
         clearTimers();
+        if (releaseFsLock) {
+          try {
+            releaseFsLock();
+          } catch {
+            /* ignore */
+          }
+        }
+        if (cleanupRoEnv) {
+          try {
+            cleanupRoEnv();
+          } catch {
+            /* ignore */
+          }
+        }
       }
 
       const exitCode = await waitForExit(child);
@@ -351,8 +404,8 @@ export class AgyCliRunner implements AgentRunner {
         throw new Error(msg);
       }
 
-      if (readOnly && inspectionCalls > 0 && inspectionCalls === inspectionErrors) {
-        const msg = `Tool execution failure: all ${inspectionCalls} file inspection attempts failed. Cannot complete review without accessing files.`;
+      if (readOnly && inspectionErrors > 0) {
+        const msg = `Tool execution failure: ${inspectionErrors} file inspection attempt(s) failed out of ${inspectionCalls}. Cannot complete review without unhindered file access.`;
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
       }

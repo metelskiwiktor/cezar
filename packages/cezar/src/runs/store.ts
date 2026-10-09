@@ -339,6 +339,8 @@ export const runRecordSchema = z.object({
   branch: z.string().optional(),
   /** Stable baseline for session git views: a worktree's fork ref, or an in-place run's starting commit. */
   baseBranch: z.string().optional(),
+  /** Explicit read-only mode for review tasks. Enforces file system and environment sandbox. */
+  readOnly: z.boolean().optional(),
   /** Set when count-based retention (#483) reclaimed this run's worktree
    *  *directory* (the `cez/<id8>` branch is kept). Presence means "materialized
    *  dir gone, recoverable via `git worktree add`"; it excludes the run from the
@@ -988,6 +990,7 @@ export class RunStore extends EventEmitter {
     autonomous?: boolean;
     worktree?: false;
     baseBranch?: string;
+    readOnly?: boolean;
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -1004,6 +1007,7 @@ export class RunStore extends EventEmitter {
       workflow: input.workflow,
       task: input.task,
       baseBranch: input.baseBranch,
+      readOnly: input.readOnly,
       model: input.model,
       runner: input.runner,
       agentProfile: input.agentProfile,

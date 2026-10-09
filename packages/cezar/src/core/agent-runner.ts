@@ -75,6 +75,11 @@ export interface AgentRunSpec {
    * picks up the on-disk conversation (used by "Continue" after a run ends).
    */
   resume?: boolean;
+  /**
+   * Explicit read-only mode (e.g. for PR review or audit tasks). Enforces file-system
+   * and environment sandboxing so the agent cannot modify files or push to remotes.
+   */
+  readOnly?: boolean;
 }
 
 /**
