@@ -125,8 +125,15 @@ export class ClaudeCliRunner implements AgentRunner {
 
     let child: ChildProcessWithoutNullStreams;
     try {
+      // A Node script (the CEZ_DRY_RUN mock) runs through node itself: Windows cannot exec a
+      // shebang script and fails the spawn with EFTYPE. Same as `CursorAgentRunner`.
+      const isNodeScript = /\.[cm]?js$/.test(this.bin);
       const env = buildChildEnv({ backend: this.backend, extraEnv: spec.env });
-      const [file, argv] = disclaimedCommand(this.bin, args, env);
+      const [file, argv] = disclaimedCommand(
+        isNodeScript ? process.execPath : this.bin,
+        isNodeScript ? [this.bin, ...args] : args,
+        env,
+      );
       child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
     } catch (err) {
       mcpConfig?.cleanup();
