@@ -1,5 +1,6 @@
-// Operator step of PR review V1: publish a SUCCESSFUL review run's final text as ONE PR comment,
-// idempotent per PR + reviewed HEAD. Runs with the operator's own `gh` auth (the agent has none).
+// Manual fallback only: the `pr-review` workflow's `github.review-comment` node publishes on its
+// own. Publishes a SUCCESSFUL review run's final text as ONE PR comment, idempotent per PR +
+// reviewed HEAD. Runs with the operator's own `gh` auth (the agent has none).
 //
 //   node --import tsx packages/cezar/scripts/publish-pr-review.ts \
 //     --repo owner/name --pr 25 --head <sha> --body-file review.md [--dry-run]

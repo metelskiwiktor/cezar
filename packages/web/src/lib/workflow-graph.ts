@@ -28,6 +28,7 @@ const PORTS: Record<GraphNodeType, readonly string[]> = {
   'github.draft-pr': ['created', 'failed'],
   'github.wait-ci': ['green', 'red', 'timeout', 'failed'],
   'github.pr-comment': ['done', 'failed'],
+  'github.review-comment': ['published', 'duplicate', 'stale', 'failed'],
   fork: ['1', '2', '3'],
   join: ['done', 'failed'],
   workflow: ['done', 'failed'],
@@ -38,7 +39,7 @@ const PORTS: Record<GraphNodeType, readonly string[]> = {
   'github.issue-comment': ['done', 'failed'],
   'notify.webhook': ['done', 'failed'],
 }
-const FAILURE_PORTS = new Set(['failed', 'fail', 'exhausted', 'reject', 'red', 'timeout', 'conflict'])
+const FAILURE_PORTS = new Set(['failed', 'fail', 'exhausted', 'reject', 'red', 'timeout', 'conflict', 'stale'])
 
 export function portsOf(node: WorkflowGraphNode): readonly string[] {
   if (node.type === 'agent' && node.verdicts?.length) return [...new Set([...node.verdicts, 'failed'])]
@@ -176,6 +177,8 @@ export function newNode(type: GraphNodeType, taken: Iterable<string>): WorkflowG
       return { id: uniqueId('ci', taken), type, timeoutMs: 60 * 60_000, pollMs: 60_000 }
     case 'github.pr-comment':
       return { id: uniqueId('comment', taken), type, body: 'Update: {{task}}' }
+    case 'github.review-comment':
+      return { id: uniqueId('publish-review', taken), type, from: 'review' }
     case 'fork':
       return { id: uniqueId('fork', taken), type, branches: 3 }
     case 'join':

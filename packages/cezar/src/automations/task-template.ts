@@ -168,7 +168,13 @@ async function withPrReviewCheckout(
   if (!definition.task.readOnly || !candidate.event.startsWith('pull_request')) return input;
   if (definition.task.worktree === false) throw new Error('a read-only PR review needs its own worktree (task.worktree must not be false)');
   const checkout = await prepare(root, candidate.number);
-  return { ...input, baseBranch: checkout.headSha, task: `${input.task}\n\n${renderPrReviewContext(checkout)}` };
+  return {
+    ...input,
+    baseBranch: checkout.headSha,
+    task: `${input.task}\n\n${renderPrReviewContext(checkout)}`,
+    // Orchestrator data, persisted on the run: where `github.review-comment` publishes.
+    prReview: { repo: candidate.repo, ...checkout },
+  };
 }
 
 export async function launchAutomationRun(options: {

@@ -341,6 +341,12 @@ export const runRecordSchema = z.object({
   baseBranch: z.string().optional(),
   /** Explicit read-only mode for review tasks. Enforces file system and environment sandbox. */
   readOnly: z.boolean().optional(),
+  /** The PR a review run reviews (`github.review-comment` publishes there) — set by the
+   *  orchestrator at launch from the automation's own poll, never from the prompt or the
+   *  model, and persisted here so a restart publishes to the same repo + PR + HEAD. */
+  prReview: z
+    .object({ repo: z.string(), number: z.number().int(), headSha: z.string(), baseRef: z.string(), mergeBase: z.string() })
+    .optional(),
   /** Set when count-based retention (#483) reclaimed this run's worktree
    *  *directory* (the `cez/<id8>` branch is kept). Presence means "materialized
    *  dir gone, recoverable via `git worktree add`"; it excludes the run from the
@@ -991,6 +997,7 @@ export class RunStore extends EventEmitter {
     worktree?: false;
     baseBranch?: string;
     readOnly?: boolean;
+    prReview?: RunRecord['prReview'];
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -1008,6 +1015,7 @@ export class RunStore extends EventEmitter {
       task: input.task,
       baseBranch: input.baseBranch,
       readOnly: input.readOnly,
+      ...(input.prReview ? { prReview: input.prReview } : {}),
       model: input.model,
       runner: input.runner,
       agentProfile: input.agentProfile,

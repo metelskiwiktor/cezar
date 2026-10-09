@@ -166,6 +166,16 @@ describe('AgyCliRunner security hardening & isolation', () => {
       ).resolves.toMatchObject({ text: '' });
     });
 
+    it('streamed text deltas reach the engine as one whole message, not one line per delta', async () => {
+      const repo = makeRepo();
+      const texts: string[] = [];
+      const result = await fakeRunner().run({ userPrompt: 'r', cwd: repo, readOnly: true, env: { FAKE_AGY_MODE: 'deltas' } }, (e) => {
+        if (e.type === 'text') texts.push(e.text);
+      });
+      expect(texts).toEqual(['Findings: none.\nRecommendation: APPROVE']);
+      expect(result.text).toBe('Findings: none.\nRecommendation: APPROVE');
+    });
+
     it('clean read-only run succeeds; non-zero exit fails', async () => {
       const repo = makeRepo();
       await expect(fakeRunner().run({ userPrompt: 'r', cwd: repo, readOnly: true })).resolves.toBeDefined();

@@ -200,4 +200,32 @@ export const REVIEW_COUNCIL = builtIn(
   },
 );
 
-export const BUILT_IN_GRAPH_WORKFLOWS: readonly WorkflowDef[] = [IMPLEMENT_AND_VERIFY, IMPLEMENT_REVIEW_PR, REVIEW_COUNCIL, FIX_CI];
+/**
+ * PR review: one read-only agent reviews the PR HEAD the automation checked out, then cezar
+ * itself publishes its FULL final text as one PR comment — only when the agent succeeded, only
+ * while the PR HEAD is still the reviewed one, once per repo + PR + HEAD. The PR comes from the
+ * run record (`prReview`), so the workflow needs a launch by a read-only PR automation.
+ */
+export const PR_REVIEW = builtIn(
+  'pr-review',
+  'Review a pull request read-only, then publish the review as one PR comment (once per PR head).',
+  {
+    nodes: [
+      { id: 'start', type: 'start' },
+      { id: 'review', type: 'agent', name: 'Review', prompt: '{{task}}' },
+      { id: 'publish', type: 'github.review-comment', name: 'Publish review', from: 'review' },
+      { id: 'done', type: 'end', name: 'Published', status: 'success' },
+      { id: 'already', type: 'end', name: 'Already reviewed', status: 'success' },
+      { id: 'review-stale', type: 'end', name: 'Review stale', status: 'failed' },
+    ],
+    edges: [
+      { from: 'start', to: 'review' },
+      { from: 'review.done', to: 'publish' },
+      { from: 'publish.published', to: 'done' },
+      { from: 'publish.duplicate', to: 'already' },
+      { from: 'publish.stale', to: 'review-stale' },
+    ],
+  },
+);
+
+export const BUILT_IN_GRAPH_WORKFLOWS: readonly WorkflowDef[] = [IMPLEMENT_AND_VERIFY, IMPLEMENT_REVIEW_PR, REVIEW_COUNCIL, FIX_CI, PR_REVIEW];

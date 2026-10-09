@@ -78,15 +78,20 @@ describe('automation task templates', () => {
         return { number, headSha: head, baseRef: 'origin/main', mergeBase: 'd'.repeat(40) };
       };
       const pr = { ...candidate, event: 'pull_request.opened' as const, number: 25 };
-      const task = { ...definition.task, workflow: 'quick-task', readOnly: true };
+      const task = { ...definition.task, workflow: 'pr-review', readOnly: true };
       await launchAutomationRun({ root, manager, store, definition: { ...definition, task }, candidate: pr, receiptId: 'r', preparePrReview });
       expect(prepared).toEqual([25]);
       expect(inputs[0]).toMatchObject({ baseBranch: head, readOnly: true });
       expect(inputs[0]?.task).toContain(`git diff ${'d'.repeat(40)} ${head}`);
+      // The PR target is the orchestrator's: the poll's repo + number and the fetched HEAD.
+      expect((inputs[0] as Record<string, unknown>).prReview).toEqual({
+        repo: pr.repo, number: 25, headSha: head, baseRef: 'origin/main', mergeBase: 'd'.repeat(40),
+      });
       // Not read-only → no PR checkout, unchanged input.
       await launchAutomationRun({ root, manager, store, definition: { ...definition, task: { ...task, readOnly: false } }, candidate: pr, receiptId: 'r2', preparePrReview });
       expect(prepared).toEqual([25]);
       expect(inputs[1]?.baseBranch).toBeUndefined();
+      expect((inputs[1] as Record<string, unknown>).prReview).toBeUndefined();
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

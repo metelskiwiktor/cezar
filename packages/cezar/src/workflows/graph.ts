@@ -108,6 +108,10 @@ export const graphNodeSchema = z.discriminatedUnion('type', [
     pollMs: z.number().int().min(10_000).max(30 * 60_000).default(60_000),
   }),
   z.object({ ...nodeBase, type: z.literal('github.pr-comment'), body: z.string().min(1) }),
+  /** Publish the FULL final text of agent node `from` as one comment on the PR this run reviews
+   *  (`run.prReview`, set by the orchestrator at launch) — once per repo + PR + reviewed HEAD,
+   *  and never when the PR's HEAD moved on since (`stale`). */
+  z.object({ ...nodeBase, type: z.literal('github.review-comment'), from: nodeId }),
   // ---- flow: fork/join, branching, composition ----
   /** Fork: 2–4 output ports (`1`…`4`), each wired to an agent node that runs as its own child
    *  task (fresh session, own worktree, carved budget) at the same time as the others. Every
@@ -182,6 +186,7 @@ export const NODE_PORTS: Record<GraphNodeType, readonly string[]> = {
   'github.draft-pr': ['created', 'failed'],
   'github.wait-ci': ['green', 'red', 'timeout', 'failed'],
   'github.pr-comment': ['done', 'failed'],
+  'github.review-comment': ['published', 'duplicate', 'stale', 'failed'],
   fork: ['1', '2', '3'],
   join: ['done', 'failed'],
   workflow: ['done', 'failed'],
@@ -210,7 +215,7 @@ export const NODE_CATALOG: NodeCatalogEntry[] = [
   { type: 'start', category: 'flow', label: 'Start', description: 'Entry point — receives {{task}}.', ports: ['next'], outputs: [] },
   { type: 'end', category: 'flow', label: 'End', description: 'Finishes the run as success or failed.', ports: [], outputs: [] },
   { type: 'loop', category: 'flow', label: 'Loop', description: 'Bounded repeat; every cycle passes through one.', ports: ['repeat', 'exhausted'], outputs: ['iteration', 'max'] },
-  { type: 'agent', category: 'agents', label: 'Agent', description: 'One agent session: prompt, skill, runner, model, optional verdicts.', ports: ['done', 'failed'], outputs: ['summary', 'verdict', 'costUsd'] },
+  { type: 'agent', category: 'agents', label: 'Agent', description: 'One agent session: prompt, skill, runner, model, optional verdicts.', ports: ['done', 'failed'], outputs: ['summary', 'verdict', 'costUsd', 'model'] },
   { type: 'check', category: 'scripts', label: 'Check', description: 'Shell command in the worktree — exit 0 passes.', ports: ['pass', 'fail'], outputs: ['exitCode', 'output'] },
   { type: 'gate.human', category: 'flow', label: 'Human gate', description: 'Pause for your approve / reject. Holds no slot while it waits.', ports: ['approve', 'reject'], outputs: ['comment'] },
   { type: 'ask-user', category: 'agents', label: 'Ask user', description: 'Ask a question and continue with the answer.', ports: ['answered'], outputs: ['answer'] },
@@ -219,6 +224,7 @@ export const NODE_CATALOG: NodeCatalogEntry[] = [
   { type: 'github.draft-pr', category: 'git', label: 'Draft PR', description: 'Push the branch and open a draft PR through gh.', ports: ['created', 'failed'], outputs: ['url', 'number'] },
   { type: 'github.wait-ci', category: 'git', label: 'Wait for CI', description: "Park until the PR's checks pass or fail (timeout required).", ports: ['green', 'red', 'timeout', 'failed'], outputs: ['status'] },
   { type: 'github.pr-comment', category: 'git', label: 'PR comment', description: 'Comment on the task PR.', ports: ['done', 'failed'], outputs: [] },
+  { type: 'github.review-comment', category: 'git', label: 'Publish PR review', description: "Post an agent's full review on the PR this run reviews — once per PR head, never on a stale head.", ports: ['published', 'duplicate', 'stale', 'failed'], outputs: ['status', 'headSha'] },
   { type: 'fork', category: 'flow', label: 'Fork', description: 'Split into 2–4 agents that run at once, each a fresh subtask. Wire every branch into one Join.', ports: ['1', '2', '3'], outputs: ['runIds'] },
   { type: 'join', category: 'flow', label: 'Join', description: "Where a fork's agents meet: wait for all, or the first to succeed.", ports: ['done', 'failed'], outputs: ['succeeded', 'failed'] },
   { type: 'if', category: 'flow', label: 'If', description: 'Branch on the diff size, changed paths, a node output or the base branch.', ports: ['true', 'false'], outputs: ['result', 'value'] },
@@ -231,7 +237,7 @@ export const NODE_CATALOG: NodeCatalogEntry[] = [
 ];
 
 /** Ports that end the run as `failed` when left unwired; every other unwired port succeeds. */
-const FAILURE_PORTS = new Set(['failed', 'fail', 'exhausted', 'reject', 'red', 'timeout', 'conflict']);
+const FAILURE_PORTS = new Set(['failed', 'fail', 'exhausted', 'reject', 'red', 'timeout', 'conflict', 'stale']);
 
 export function isFailurePort(port: string): boolean {
   return FAILURE_PORTS.has(port);
@@ -317,6 +323,10 @@ export function graphIssues(graph: WorkflowGraph): string[] {
     if (n.type === 'if' && n.condition.kind === 'output') {
       const refNode = n.condition.ref.split('.')[0] as string;
       if (!ids.includes(refNode)) issues.push(`if node "${n.id}" reads unknown node "${refNode}"`);
+    }
+    if (n.type === 'github.review-comment') {
+      const source = graph.nodes.find((x) => x.id === n.from);
+      if (source?.type !== 'agent') issues.push(`review comment node "${n.id}" must publish an agent node's text (got "${n.from}")`);
     }
     if (n.type !== 'agent') continue;
     if (!n.prompt && !n.skill) issues.push(`agent node "${n.id}" needs a prompt or a skill`);

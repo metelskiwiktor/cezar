@@ -9,7 +9,8 @@ import { createRunner } from './runner-factory.ts';
 import type { UiEvent } from './ui-events.ts';
 import { resolveAgyBin } from './agy-bin.ts';
 
-const isAgyAvailable = resolveAgyBin() !== 'agy' || process.env.AGY_REAL_SMOKE === '1';
+// Opt-in only: an installed agy alone must not make a routine test run spend real model calls.
+const isAgyAvailable = process.env.AGY_REAL_SMOKE === '1' && resolveAgyBin() !== 'agy';
 
 describe.skipIf(!isAgyAvailable)('AgyCliRunner against real agy CLI on Windows (opt-in smoke)', () => {
   let cwd: string;

@@ -315,8 +315,23 @@ export class AgyCliRunner implements AgentRunner {
         let permissionDeniedError: string | null = null;
         const callToolNames = new Map<string, string>();
 
+        // agy streams text as deltas, but a `text` event is one whole message to the engine
+        // (it joins them with newlines): buffer consecutive deltas and forward them as one
+        // message, before the next non-text event and at the end of the stream.
+        let pendingText = '';
+        const flushText = () => {
+          if (!pendingText) return;
+          const text = pendingText;
+          pendingText = '';
+          onEvent?.({ type: 'text', text });
+        };
         const emit = (event: AgentEvent) => {
-          if (event.type === 'text') textChunks.push(event.text);
+          if (event.type === 'text') {
+            textChunks.push(event.text);
+            pendingText += event.text;
+            return;
+          }
+          flushText();
           if (event.type === 'tool-call') {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
@@ -361,6 +376,7 @@ export class AgyCliRunner implements AgentRunner {
           /* premature stdout close — the exit code below decides */
         } finally {
           clearTimers();
+          flushText();
         }
 
         const exitCode = await waitForExit(child);

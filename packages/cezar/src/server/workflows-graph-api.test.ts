@@ -59,6 +59,7 @@ describe('the workflow graph API', () => {
       'github.draft-pr',
       'github.wait-ci',
       'github.pr-comment',
+      'github.review-comment',
       'fork',
       'join',
       'if',

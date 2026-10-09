@@ -13,6 +13,12 @@ switch (mode) {
   case 'hang':
     setInterval(() => {}, 1_000);
     break;
+  case 'deltas':
+    // One message streamed as deltas, the way agy streams `agent_response` text.
+    for (const text_delta of ['Find', 'ings: no', 'ne.\n', 'Recommendation: ', 'APPROVE']) {
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta } });
+    }
+    break;
   case 'fail':
     process.stderr.write('boom\n');
     process.exit(3);

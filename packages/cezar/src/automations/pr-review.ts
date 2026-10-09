@@ -1,10 +1,12 @@
 /**
- * PR review V1 (read-only automation): check out the reviewed PR's HEAD, tell the
- * agent where the base is, and — as a separate, explicit operator step after a
- * successful run — publish ONE comment per PR+HEAD.
+ * PR review (read-only automation): check out the reviewed PR's HEAD, tell the agent where the
+ * base is, and — as the `pr-review` workflow's system node `github.review-comment`, after the
+ * review agent SUCCEEDED — publish ONE comment per repo + PR + HEAD.
  *
- * The agent never gets GitHub credentials in read-only mode (agent-env), so
- * publication is necessarily cezar/operator-side, never the agent's job.
+ * The agent never gets GitHub credentials in read-only mode (agent-env), so publication is
+ * cezar-side, with the orchestrator's own `gh` auth, never the agent's job. Which repo, PR and
+ * HEAD are reviewed comes only from the orchestrator (`PrReviewTarget`, persisted on the run
+ * record at launch), never from the prompt or the model's text.
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -30,6 +32,24 @@ export interface PrReviewCheckout {
   baseRef: string;
   /** `git merge-base baseRef headSha` — the lower bound of the PR diff. */
   mergeBase: string;
+}
+
+/** What a PR review run reviews and where its comment goes — persisted on the run record. */
+export interface PrReviewTarget extends PrReviewCheckout {
+  /** `owner/name` of the repository the PR lives in (the automation's poll target). */
+  repo: string;
+}
+
+const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const SHA_RE = /^[0-9a-f]{40}$/;
+
+/** Why a target cannot be published to, or null when it is sound. */
+export function prReviewTargetIssue(target: Partial<PrReviewTarget> | undefined): string | null {
+  if (!target) return 'this run has no PR review target (it was not launched by a PR review automation)';
+  if (!target.repo || !REPO_RE.test(target.repo)) return `invalid PR review repo "${target.repo ?? ''}"`;
+  if (!Number.isInteger(target.number) || (target.number ?? 0) <= 0) return `invalid PR number "${String(target.number)}"`;
+  if (!target.headSha || !SHA_RE.test(target.headSha)) return `invalid reviewed head SHA "${target.headSha ?? ''}"`;
+  return null;
 }
 
 /**
@@ -76,6 +96,37 @@ export function prReviewMarker(number: number, headSha: string): string {
   return `<!-- cez-pr-review pr=${number} head=${headSha} -->`;
 }
 
+const RECOMMENDATION_RE = /^\s*\**\s*Recommendation\s*:?\s*\**\s*:?\s*(APPROVE|CHANGES REQUESTED)\s*\**\s*$/gim;
+
+/**
+ * Whether an agent's final text is a complete review: non-blank, more than a bare
+ * acknowledgement, and carrying exactly one unambiguous `Recommendation: APPROVE` /
+ * `Recommendation: CHANGES REQUESTED` line.
+ */
+export function checkReviewText(text: string): { ok: true; recommendation: 'APPROVE' | 'CHANGES REQUESTED' } | { ok: false; reason: string } {
+  const body = text.trim();
+  if (!body) return { ok: false, reason: 'the review is empty' };
+  const found = new Set([...body.matchAll(RECOMMENDATION_RE)].map((m) => (m[1] as string).toUpperCase()));
+  if (found.size === 0) return { ok: false, reason: 'the review has no "Recommendation: APPROVE" or "Recommendation: CHANGES REQUESTED" line' };
+  if (found.size > 1) return { ok: false, reason: 'the review recommends both APPROVE and CHANGES REQUESTED' };
+  // A recommendation line alone is not a review.
+  const rest = body.replace(RECOMMENDATION_RE, '').trim();
+  if (rest.length < 40) return { ok: false, reason: 'the review has no findings or assessment, only a recommendation' };
+  return { ok: true, recommendation: [...found][0] as 'APPROVE' | 'CHANGES REQUESTED' };
+}
+
+/** cezar's own in-band protocol lines (`CEZ:DONE`, `CEZ:PR=25`, …) — for cezar, not the PR. */
+const CEZ_MARKER_LINE_RE = /^[ \t]*CEZ:(?:DONE|MONITORING|ASK|VERDICT|PR|ISSUE|TITLE)\b.*(?:\r?\n|$)/gm;
+
+export function stripCezMarkers(text: string): string {
+  return text.replace(CEZ_MARKER_LINE_RE, '').trim();
+}
+
+/** The comment's header — the model is what the review step actually ran with. */
+export function prReviewHeader(model: string | undefined, runner: string | undefined): string {
+  return `Automated review — model: ${model?.trim() || 'runner default'} (${runner?.trim() || 'agent'}, via Cezar)`;
+}
+
 export interface PublishPrReviewInput {
   repoRoot: string;
   /** `owner/name` */
@@ -95,6 +146,9 @@ export type PublishPrReviewResult =
 /**
  * Posts the review as ONE PR comment, unless a comment carrying the same
  * PR+HEAD marker already exists. Call only after the review run succeeded.
+ * Check-then-post: GitHub has no conditional create, so two publishers racing
+ * on the same PR+HEAD can still both post — this prevents duplicates, it does
+ * not make them impossible.
  */
 export async function publishPrReviewComment(input: PublishPrReviewInput): Promise<PublishPrReviewResult> {
   const run = input.run ?? defaultCommandRunner;
@@ -111,4 +165,52 @@ export async function publishPrReviewComment(input: PublishPrReviewInput): Promi
   if (input.dryRun) return { status: 'dry-run', body: full };
   await run('gh', ['api', `repos/${input.repo}/issues/${input.number}/comments`, '-f', `body=${full}`], input.repoRoot);
   return { status: 'published' };
+}
+
+/** The PR's current HEAD on GitHub (orchestrator auth). */
+export async function remotePrHead(repoRoot: string, repo: string, number: number, run: CommandRunner = defaultCommandRunner): Promise<string> {
+  return (await run('gh', ['api', `repos/${repo}/pulls/${number}`, '--jq', '.head.sha'], repoRoot)).trim();
+}
+
+export interface PublishReviewRunInput {
+  repoRoot: string;
+  target: PrReviewTarget | undefined;
+  /** The review agent's FULL final text (never a truncated summary). */
+  text: string;
+  /** The model the review step actually ran with (`provider/model`). */
+  model?: string;
+  runner?: string;
+  dryRun?: boolean;
+  run?: CommandRunner;
+}
+
+export type PublishReviewRunResult =
+  | PublishPrReviewResult
+  | { status: 'stale'; remoteHead: string }
+  | { status: 'invalid'; reason: string };
+
+/**
+ * The `github.review-comment` node's work: validate the target and the review, refuse a stale
+ * review (the PR moved on since the analysed HEAD), then publish once per repo + PR + HEAD.
+ * Throws only on a gh/network failure.
+ */
+export async function publishReviewFromRun(input: PublishReviewRunInput): Promise<PublishReviewRunResult> {
+  const targetIssue = prReviewTargetIssue(input.target);
+  if (targetIssue) return { status: 'invalid', reason: targetIssue };
+  const target = input.target as PrReviewTarget;
+  const text = stripCezMarkers(input.text);
+  const review = checkReviewText(text);
+  if (!review.ok) return { status: 'invalid', reason: review.reason };
+  const run = input.run ?? defaultCommandRunner;
+  const remoteHead = await remotePrHead(input.repoRoot, target.repo, target.number, run);
+  if (remoteHead !== target.headSha) return { status: 'stale', remoteHead };
+  return publishPrReviewComment({
+    repoRoot: input.repoRoot,
+    repo: target.repo,
+    number: target.number,
+    headSha: target.headSha,
+    body: `${prReviewHeader(input.model, input.runner)}\n\n${text}`,
+    run,
+    ...(input.dryRun ? { dryRun: true } : {}),
+  });
 }
