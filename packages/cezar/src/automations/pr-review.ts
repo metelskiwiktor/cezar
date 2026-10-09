@@ -104,7 +104,7 @@ const RECOMMENDATION_RE = /^\s*\**\s*Recommendation\s*:?\s*\**\s*:?\s*(APPROVE|C
 
 // Fail closed: without a verified checkout-relative mapping, stripping a prefix could point
 // readers at a different file. Cover file URIs, Windows drives/UNC, Unix roots and home paths.
-const LOCAL_PATH_RE = /file:\/|\b[a-z]:[\\/]|\\\\[^\s\\]+\\|(?:^|[\s`"'(<\[=])(?:~[\\/]|\/{1,2}[^\s/])/im;
+const LOCAL_PATH_RE = /file:\/|\b[a-z]:[\\/]|\\\\[^\s\\]+\\|(?:^|[\s`"'(<\[=])(?:~[\\/]|\/{1,2}[^\s/`"'<>()[\]])/im;
 const LOCAL_PATH_REASON = 'the review contains a local path; use plain repo-relative path:line';
 
 /**

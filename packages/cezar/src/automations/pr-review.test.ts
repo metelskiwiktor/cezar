@@ -125,7 +125,7 @@ describe('publishPrReviewComment', () => {
   });
 
   it('keeps repo-relative references and web links intact', async () => {
-    const body = 'src/a.ts:12 and `docs/README.md:2`; https://github.com/o/r/pull/25';
+    const body = 'src/a.ts:12 and `docs/README.md:2`; https://github.com/o/r/pull/25; `ready-for-agent`/`ready-for-human`';
     const { run, posts } = fakeRun({});
     await publishPrReviewComment({ ...base, body, run });
     expect(posts[0]?.body).toBe(`${body}\n\n${prReviewMarker(25, HEAD)}`);
