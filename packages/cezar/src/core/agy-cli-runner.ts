@@ -8,6 +8,7 @@
  * `UiEvent`s alongside.
  */
 
+import { resolve } from 'node:path';
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
   AgentEvent,
@@ -35,6 +36,46 @@ export const DEFAULT_AGY_TIMEOUT_MS = 30 * 60_000;
 export const AGY_KILL_GRACE_MS = 10_000;
 export const DEFAULT_AGY_MODEL = 'gemini-3.8-flash-high';
 
+export const MUTATING_TOOL_NAMES = new Set([
+  'write',
+  'edit',
+  'write_to_file',
+  'replace_file_content',
+  'multi_replace_file_content',
+  'sed_file',
+  'notebook_edit',
+]);
+
+export const READ_INSPECTION_TOOL_NAMES = new Set([
+  'read',
+  'view_file',
+  'grep',
+  'grep_search',
+  'find_by_name',
+  'list_dir',
+  'read_url_content',
+  'read_browser_page',
+]);
+
+export const READ_ONLY_REVIEW_PROMPT =
+  'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools.';
+
+export function isReadOnlyTools(allowedTools?: string[]): boolean {
+  if (!allowedTools || allowedTools.length === 0) return false;
+  const lower = allowedTools.map((t) => t.toLowerCase());
+  return !lower.some((t) => MUTATING_TOOL_NAMES.has(t) || t === 'bash');
+}
+
+export function isPermissionError(result: string): boolean {
+  const lower = result.toLowerCase();
+  return (
+    lower.includes('user denied permission') ||
+    lower.includes('permission check failed') ||
+    lower.includes('soft-denying') ||
+    lower.includes('permission denied')
+  );
+}
+
 export interface AgyCliRunnerOptions {
   bin?: string;
   timeoutMs?: number;
@@ -46,11 +87,15 @@ export interface BuildAgyArgsInput {
   model?: string;
   sessionId?: string;
   resume?: boolean;
+  cwd?: string;
   additionalDirectories?: string[];
+  readOnly?: boolean;
+  allowedTools?: string[];
 }
 
 /** CLI argv for headless print mode. */
 export function buildAgyArgs(input: BuildAgyArgsInput): string[] {
+  const readOnly = input.readOnly === true || isReadOnlyTools(input.allowedTools);
   const args = ['--output-format', 'stream-json', '--mode', 'accept-edits'];
 
   const model = input.model?.trim() || DEFAULT_AGY_MODEL;
@@ -60,13 +105,25 @@ export function buildAgyArgs(input: BuildAgyArgsInput): string[] {
     args.push('--conversation', input.sessionId);
   }
 
+  const dirs = new Set<string>();
+  if (input.cwd?.trim()) dirs.add(resolve(input.cwd.trim()));
   if (input.additionalDirectories) {
     for (const dir of input.additionalDirectories) {
-      if (dir.trim()) args.push('--add-dir', dir.trim());
+      if (dir.trim()) dirs.add(resolve(dir.trim()));
     }
   }
+  for (const dir of dirs) {
+    args.push('--add-dir', dir);
+  }
 
-  const prompt = prependSystemPrompt(input.systemPrompt, input.userPrompt);
+  let systemPrompt = input.systemPrompt;
+  if (readOnly) {
+    systemPrompt = systemPrompt
+      ? `${systemPrompt}\n\n${READ_ONLY_REVIEW_PROMPT}`
+      : READ_ONLY_REVIEW_PROMPT;
+  }
+
+  const prompt = prependSystemPrompt(systemPrompt, input.userPrompt);
   args.push('-p', prompt);
 
   return args;
@@ -142,16 +199,7 @@ export class AgyCliRunner implements AgentRunner {
       }
     };
 
-    const emit = (event: AgentEvent) => {
-      if (event.type === 'text') textChunks.push(event.text);
-      if (event.type === 'tool-call') {
-        toolCalls.push({ id: event.id, name: event.tool, input: event.input });
-      }
-      if (event.type === 'session') sessionId = event.sessionId;
-      if (event.type === 'token-usage') tokensUsed = event.tokensUsed;
-      if (event.type === 'error') resultError = event.message;
-      onEvent?.(event);
-    };
+    const readOnly = isReadOnlyTools(spec.allowedTools);
 
     const limitMs = spec.timeoutMs ?? this.timeoutMs;
     let deadline: NodeJS.Timeout | undefined;
@@ -192,7 +240,10 @@ export class AgyCliRunner implements AgentRunner {
         model: spec.model,
         sessionId: resumeSessionId,
         resume: resumeSessionId !== undefined,
+        cwd: spec.cwd,
         additionalDirectories: spec.additionalDirectories,
+        readOnly,
+        allowedTools: spec.allowedTools,
       });
 
       const env = buildChildEnv({ backend: this.backend, extraEnv: spec.env });
@@ -211,6 +262,46 @@ export class AgyCliRunner implements AgentRunner {
 
       armTimeout(child);
 
+      let inspectionCalls = 0;
+      let inspectionErrors = 0;
+      let permissionDeniedError: string | null = null;
+      const callToolNames = new Map<string, string>();
+
+      const emit = (event: AgentEvent) => {
+        if (event.type === 'text') textChunks.push(event.text);
+        if (event.type === 'tool-call') {
+          callToolNames.set(event.id, event.tool);
+          toolCalls.push({ id: event.id, name: event.tool, input: event.input });
+
+          if (readOnly && MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
+            terminatedByCezar = true;
+            try {
+              child.kill('SIGTERM');
+            } catch {
+              /* ignore */
+            }
+            const violation = `Security policy violation: mutating tool "${event.tool}" is forbidden in read-only review mode`;
+            resultError = violation;
+            onEvent?.({ type: 'error', message: violation });
+            throw new Error(violation);
+          }
+        }
+        if (event.type === 'tool-result') {
+          const toolName = callToolNames.get(event.toolCallId)?.toLowerCase() ?? '';
+          if (READ_INSPECTION_TOOL_NAMES.has(toolName)) {
+            inspectionCalls++;
+            if (event.isError) inspectionErrors++;
+          }
+          if (event.isError && isPermissionError(event.result)) {
+            permissionDeniedError = event.result;
+          }
+        }
+        if (event.type === 'session') sessionId = event.sessionId;
+        if (event.type === 'token-usage') tokensUsed = event.tokensUsed;
+        if (event.type === 'error') resultError = event.message;
+        onEvent?.(event);
+      };
+
       try {
         for await (const line of readNdjson(child.stdout)) {
           let parsed: unknown;
@@ -222,9 +313,12 @@ export class AgyCliRunner implements AgentRunner {
           emitUi((state) => mapAgyMessage(parsed, state));
           for (const event of mapAgyStreamEvent(parsed)) emit(event);
         }
-      } catch {
-        if (!timedOut) {
+      } catch (err) {
+        if (!timedOut && !terminatedByCezar) {
           /* premature close */
+        }
+        if (terminatedByCezar && resultError) {
+          throw err;
         }
       } finally {
         clearTimers();
@@ -239,12 +333,28 @@ export class AgyCliRunner implements AgentRunner {
         return;
       }
 
+      if (terminatedByCezar && resultError) {
+        throw new Error(resultError);
+      }
+
       if (terminatedByCezar && isSignalTerminationExit(exitCode)) {
         onEvent?.({
           type: 'note',
           message: `Antigravity agent terminated by cezar (code ${exitCode})`,
         });
         return;
+      }
+
+      if (permissionDeniedError) {
+        const msg = `Tool permission error: ${permissionDeniedError}`;
+        onEvent?.({ type: 'error', message: msg });
+        throw new Error(msg);
+      }
+
+      if (readOnly && inspectionCalls > 0 && inspectionCalls === inspectionErrors) {
+        const msg = `Tool execution failure: all ${inspectionCalls} file inspection attempts failed. Cannot complete review without accessing files.`;
+        onEvent?.({ type: 'error', message: msg });
+        throw new Error(msg);
       }
 
       if (exitCode !== 0 && exitCode !== null) {

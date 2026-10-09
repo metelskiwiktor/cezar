@@ -60,6 +60,21 @@ function num(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+export function extractErrorMessage(err: unknown): string {
+  if (typeof err === 'string') return err;
+  if (isRecord(err)) {
+    if (typeof err.message === 'string') return err.message;
+    if (typeof err.error === 'string') return err.error;
+    if (typeof err.errorMessage === 'string') return err.errorMessage;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      return String(err);
+    }
+  }
+  return String(err);
+}
+
 /** Fold one parsed stream-json line into v2 events. Never throws. */
 export function mapAgyMessage(msg: unknown, state: AgyUiMapperState): AgyUiMapping {
   try {
@@ -227,7 +242,7 @@ function mapToolUpdate(update: Record<string, unknown>, state: AgyUiMapperState)
       item.output = typeof toolInfo.result === 'string' ? toolInfo.result : JSON.stringify(toolInfo.result);
     }
     if (toolInfo.error !== undefined) {
-      item.error = String(toolInfo.error);
+      item.error = extractErrorMessage(toolInfo.error);
     }
 
     const openTools = new Map(state.openTools);
@@ -356,7 +371,7 @@ export function mapAgyStreamEvent(raw: unknown): AgentEvent[] {
                 ? toolInfo.result
                 : JSON.stringify(toolInfo.result)
               : toolInfo.error !== undefined
-                ? String(toolInfo.error)
+                ? extractErrorMessage(toolInfo.error)
                 : '';
           return [{ type: 'tool-result', toolCallId: callId, result: resultStr, isError }];
         }

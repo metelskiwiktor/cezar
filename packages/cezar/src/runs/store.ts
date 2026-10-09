@@ -987,6 +987,7 @@ export class RunStore extends EventEmitter {
     generateFollowups?: boolean;
     autonomous?: boolean;
     worktree?: false;
+    baseBranch?: string;
     groupId?: string;
     variant?: string;
     steps: Array<Pick<StepState, 'id' | 'name' | 'kind'>>;
@@ -1002,6 +1003,7 @@ export class RunStore extends EventEmitter {
       title: this.redactText(input.title),
       workflow: input.workflow,
       task: input.task,
+      baseBranch: input.baseBranch,
       model: input.model,
       runner: input.runner,
       agentProfile: input.agentProfile,

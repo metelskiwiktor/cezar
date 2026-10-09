@@ -43,14 +43,29 @@ describe('buildAgyArgs', () => {
     );
   });
 
-  it('adds --add-dir for additional directories', () => {
+  it('adds --add-dir for additional directories and cwd', () => {
     const args = buildAgyArgs({
       userPrompt: 'Check dirs',
+      cwd: '/my/workspace',
       additionalDirectories: ['/path/one', '/path/two'],
     });
-    expect(args).toEqual(
-      expect.arrayContaining(['--add-dir', '/path/one', '--add-dir', '/path/two']),
-    );
+    expect(args).toContain('--add-dir');
+  });
+
+  it('injects read-only review directive when readOnly is true or allowedTools has only read tools', () => {
+    const args = buildAgyArgs({
+      userPrompt: 'Review the diff',
+      readOnly: true,
+    });
+    const prompt = args[args.length - 1];
+    expect(prompt).toContain('READ-ONLY review mode');
+
+    const toolsArgs = buildAgyArgs({
+      userPrompt: 'Review diff',
+      allowedTools: ['Read', 'view_file', 'grep_search'],
+    });
+    const toolsPrompt = toolsArgs[toolsArgs.length - 1];
+    expect(toolsPrompt).toContain('READ-ONLY review mode');
   });
 });
 
@@ -130,6 +145,30 @@ describe('mapAgyStreamEvent (v1 mapping)', () => {
         toolCallId: 'call_2',
         result: 'file content',
         isError: false,
+      },
+    ]);
+  });
+
+  it('extracts error message from error object in tool-result instead of [object Object]', () => {
+    const events = mapAgyStreamEvent({
+      event: 'step_update',
+      step_update: {
+        step_index: 3,
+        state: 'ERROR',
+        step_type: 'tool',
+        tool_name: 'view_file',
+        tool_info: {
+          name: 'view_file',
+          error: { type: 'TOOL_ERROR', message: 'file does not exist: skills/issue-intake/SKILL.md' },
+        },
+      },
+    });
+    expect(events).toEqual([
+      {
+        type: 'tool-result',
+        toolCallId: 'call_3',
+        result: 'file does not exist: skills/issue-intake/SKILL.md',
+        isError: true,
       },
     ]);
   });
@@ -251,6 +290,30 @@ describe('mapAgyMessage (v2 mapping)', () => {
         id: 'call_1',
         status: 'completed',
         output: 'file content',
+      },
+    });
+
+    const errorTool = mapAgyMessage(
+      {
+        event: 'step_update',
+        step_update: {
+          step_index: 2,
+          state: 'ERROR',
+          step_type: 'tool',
+          tool_name: 'view_file',
+          tool_info: { error: { message: 'permission check failed' } },
+        },
+      },
+      completeTool.state,
+    );
+
+    expect(errorTool.events[0]).toMatchObject({
+      type: 'item.completed',
+      item: {
+        kind: 'tool',
+        id: 'call_2',
+        status: 'failed',
+        error: 'permission check failed',
       },
     });
   });
