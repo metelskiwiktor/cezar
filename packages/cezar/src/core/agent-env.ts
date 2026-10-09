@@ -255,6 +255,15 @@ const GH_ALLOW_NAMES: ReadonlySet<string> = upperSet([
   'GH_CONFIG_DIR',
 ]);
 
+export const GH_CREDENTIAL_NAMES: ReadonlySet<string> = upperSet([
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'GH_ENTERPRISE_TOKEN',
+  'GITHUB_PAT',
+  'GH_PAT',
+  'COPILOT_GITHUB_TOKEN',
+]);
+
 /**
  * Claude Code can be pointed at Bedrock or Vertex instead of the Anthropic API
  * by `CLAUDE_CODE_USE_BEDROCK=1` / `CLAUDE_CODE_USE_VERTEX=1`. Those toggles
@@ -316,6 +325,8 @@ export interface BuildChildEnvOptions {
   extraEnv?: Record<string, string>;
   /** Source env; defaults to `process.env`. */
   source?: NodeJS.ProcessEnv;
+  /** When true, strips ALL GitHub credentials and enforces read-only environment isolation. */
+  readOnly?: boolean;
 }
 
 /**
@@ -325,6 +336,7 @@ export interface BuildChildEnvOptions {
 export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
   const source = opts.source ?? process.env;
   const extra = opts.extraEnv ?? {};
+  const isReadOnly = opts.readOnly === true;
 
   // Names `extra` is about to define, normalized. The host copy of a var the
   // per-run env overrides must be DROPPED, not merely shadowed: env names are
@@ -336,10 +348,8 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
   const overridden = upperSet(Object.keys(extra));
 
   // Escape hatch: restore legacy full-inheritance (opt-in, off by default).
-  // Parsed with the same `isTruthy` the Bedrock/Vertex toggles use (#456
-  // review) — an exact `=== '1'` made `CEZ_AGENT_ENV_FULL=true` silently do
-  // nothing, which is a confusing way to fail open-vs-closed.
-  if (isTruthy(readVar(source, 'CEZ_AGENT_ENV_FULL'))) {
+  // In readOnly mode, this escape hatch is disabled to prevent credential leakage.
+  if (!isReadOnly && isTruthy(readVar(source, 'CEZ_AGENT_ENV_FULL'))) {
     const full: NodeJS.ProcessEnv = {};
     for (const [name, value] of Object.entries(source)) {
       if (!overridden.has(name.toUpperCase())) full[name] = value;
@@ -377,19 +387,33 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
     if (allow(name)) out[name] = value;
   }
   // Per-run env last — it is cezar's own, never a host secret, and must win.
-  for (const [name, value] of Object.entries(extra)) out[name] = value;
+  for (const [name, value] of Object.entries(extra)) {
+    if (isReadOnly && GH_CREDENTIAL_NAMES.has(name.toUpperCase())) continue;
+    out[name] = value;
+  }
+
+  // Fail-closed verification: ensure no GitHub credentials leaked into read-only environment
+  if (isReadOnly) {
+    for (const key of Object.keys(out)) {
+      if (GH_CREDENTIAL_NAMES.has(key.toUpperCase())) {
+        throw new Error(`Security violation: GitHub credential "${key}" leaked into read-only environment`);
+      }
+    }
+  }
+
   return out;
 
   /** `name` is matched normalized; the caller keeps the original spelling. */
   function allow(name: string): boolean {
     const key = name.toUpperCase();
+    if (isReadOnly && GH_CREDENTIAL_NAMES.has(key)) return false;
     // cezar's own namespace (CEZ_DRY_RUN plumbing, mock hooks, run wiring).
     if (key.startsWith('CEZ_')) return true;
     // Backend auth + gh handoff + the cloud creds an active Bedrock/Vertex
     // toggle needs: forwarded even though they are secrets — the backend cannot
     // authenticate without them. They are still redacted before anything
     // reaches the on-disk NDJSON (see secret-redaction.ts).
-    if (GH_ALLOW_NAMES.has(key)) return true;
+    if (!isReadOnly && GH_ALLOW_NAMES.has(key)) return true;
     if (matchesPrefix(key, backendPrefixes)) return true;
     if (cloudNames.has(key) || matchesPrefix(key, cloudPrefixes)) return true;
     // Explicit opt-in passthrough.

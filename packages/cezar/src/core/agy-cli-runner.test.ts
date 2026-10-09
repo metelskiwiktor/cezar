@@ -6,7 +6,7 @@ import {
   DEFAULT_AGY_MODEL,
   MUTATING_TOOL_NAMES,
 } from './agy-cli-runner.ts';
-import { setupReadOnlyEnvironment } from './fs-readonly-lock.ts';
+import { prepareReadOnlyIsolation, verifyWorkspaceIntegrity } from './read-only-sandbox.ts';
 import {
   createAgyUiState,
   mapAgyMessage,
@@ -14,7 +14,7 @@ import {
 } from './agy-ui-mapper.ts';
 
 describe('buildAgyArgs', () => {
-  it('builds stream-json print mode args with default gemini-3.8-flash-low model', () => {
+  it('builds stream-json print mode args with default gemini-3.8-flash-high model', () => {
     const args = buildAgyArgs({ userPrompt: 'Hello Gemini' });
     expect(args).toEqual(
       expect.arrayContaining(['--output-format', 'stream-json', '--mode', 'accept-edits', '--model', DEFAULT_AGY_MODEL]),
@@ -331,20 +331,18 @@ describe('AgyCliRunner lifecycle', () => {
 });
 
 describe('AgyCliRunner security hardening', () => {
-  it('setupReadOnlyEnvironment strips tokens and sets isolated GH_CONFIG_DIR and disabled pushurl', () => {
-    const { env, cleanup } = setupReadOnlyEnvironment({
-      GITHUB_TOKEN: 'secret-token-123',
-      GH_TOKEN: 'secret-gh-token',
-      OTHER_VAR: 'preserved',
-    });
+  it('prepareReadOnlyIsolation allocates isolated GH_CONFIG_DIR, empty gitconfig and disabled credential helper without touching ACLs', () => {
+    const { env, cleanup } = prepareReadOnlyIsolation();
 
     try {
-      expect(env.GITHUB_TOKEN).toBeUndefined();
-      expect(env.GH_TOKEN).toBeUndefined();
-      expect(env.OTHER_VAR).toBe('preserved');
       expect(env.GH_CONFIG_DIR).toBeDefined();
-      expect(env.GIT_CONFIG_KEY_0).toBe('remote.origin.pushurl');
-      expect(env.GIT_CONFIG_VALUE_0).toBe('DISABLED_READ_ONLY_REVIEW');
+      expect(env.GIT_CONFIG_GLOBAL).toBeDefined();
+      expect(env.GIT_CONFIG_SYSTEM).toBeDefined();
+      expect(env.GIT_TERMINAL_PROMPT).toBe('0');
+      expect(env.GIT_CONFIG_KEY_0).toBe('credential.helper');
+      expect(env.GIT_CONFIG_VALUE_0).toBe('');
+      expect(env.GIT_CONFIG_KEY_1).toBe('remote.origin.pushurl');
+      expect(env.GIT_CONFIG_VALUE_1).toBe('DISABLED_READ_ONLY_REVIEW');
     } finally {
       cleanup();
     }

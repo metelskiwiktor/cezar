@@ -69,6 +69,33 @@ describe('buildChildEnv — least-privilege child env (#427)', () => {
     expect(env.CEZ_MOCK_ARGS_FILE).toBe('/tmp/args');
   });
 
+  it('drops GITHUB_TOKEN and all GH credentials when readOnly is true, even if host or full-env is set', () => {
+    const src = {
+      ...HOST,
+      GITHUB_TOKEN: 'gho_secret_from_host',
+      GH_TOKEN: 'gh_secret_token',
+      GH_ENTERPRISE_TOKEN: 'ghe_secret',
+      CEZ_AGENT_ENV_FULL: '1',
+    };
+    const env = buildChildEnv({ backend: 'agy', source: src, readOnly: true });
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.GH_TOKEN).toBeUndefined();
+    expect(env.GH_ENTERPRISE_TOKEN).toBeUndefined();
+    expect(env.PATH).toBe('/usr/bin:/bin');
+  });
+
+  it('ignores any GitHub credentials passed via extraEnv when readOnly is true', () => {
+    const src = { ...HOST };
+    const env = buildChildEnv({
+      backend: 'agy',
+      source: src,
+      extraEnv: { GITHUB_TOKEN: 'malicious_extra_token', OTHER_VAR: 'safe' },
+      readOnly: true,
+    });
+    expect(env.GITHUB_TOKEN).toBeUndefined();
+    expect(env.OTHER_VAR).toBe('safe');
+  });
+
   it('applies extraEnv (spec.env) last so per-run vars always win', () => {
     const env = buildChildEnv({
       backend: 'claude',

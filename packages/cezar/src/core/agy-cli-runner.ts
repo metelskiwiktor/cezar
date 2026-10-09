@@ -32,13 +32,14 @@ import {
   type AgyUiMapperState,
 } from './agy-ui-mapper.ts';
 import {
-  acquireFileSystemReadOnlyLock,
-  setupReadOnlyEnvironment,
-} from './fs-readonly-lock.ts';
+  prepareReadOnlyIsolation,
+  getWorkspaceGitSnapshot,
+  verifyWorkspaceIntegrity,
+} from './read-only-sandbox.ts';
 
 export const DEFAULT_AGY_TIMEOUT_MS = 30 * 60_000;
 export const AGY_KILL_GRACE_MS = 10_000;
-export const DEFAULT_AGY_MODEL = 'gemini-3.8-flash-low';
+export const DEFAULT_AGY_MODEL = 'gemini-3.8-flash-high';
 
 export const MUTATING_TOOL_NAMES = new Set([
   'write',
@@ -250,134 +251,128 @@ export class AgyCliRunner implements AgentRunner {
         allowedTools: spec.allowedTools,
       });
 
-      let releaseFsLock: (() => void) | undefined;
-      let cleanupRoEnv: (() => void) | undefined;
+      let isolationCleanup: (() => void) | undefined;
       let env: NodeJS.ProcessEnv;
 
       if (readOnly) {
-        const roEnvSetup = setupReadOnlyEnvironment(spec.env);
-        cleanupRoEnv = roEnvSetup.cleanup;
-        env = buildChildEnv({ backend: this.backend, extraEnv: roEnvSetup.env });
-        if (spec.cwd) {
-          releaseFsLock = acquireFileSystemReadOnlyLock(spec.cwd);
+        const isolation = prepareReadOnlyIsolation();
+        isolationCleanup = isolation.cleanup;
+        try {
+          env = buildChildEnv({
+            backend: this.backend,
+            extraEnv: { ...(spec.env ?? {}), ...isolation.env },
+            readOnly: true,
+          });
+        } catch (err) {
+          isolationCleanup();
+          throw err;
         }
       } else {
-        env = buildChildEnv({ backend: this.backend, extraEnv: spec.env });
+        env = buildChildEnv({ backend: this.backend, extraEnv: spec.env, readOnly: false });
       }
 
-      const [file, argv] = disclaimedCommand(this.bin, args, env);
-      const child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
-      currentChild = child;
+      const initialSnapshot = readOnly && spec.cwd ? getWorkspaceGitSnapshot(spec.cwd) : undefined;
 
-      let spawnFailed: Error | null = null;
-      child.on('error', (err: NodeJS.ErrnoException) => {
-        spawnFailed = wrapSpawnError(err, this.bin);
-      });
+      try {
+        const [file, argv] = disclaimedCommand(this.bin, args, env);
+        const child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
+        currentChild = child;
 
-      child.stderr.on('data', (buf: Buffer) => {
-        stderrChunks.push(buf.toString('utf8'));
-      });
+        let spawnFailed: Error | null = null;
+        child.on('error', (err: NodeJS.ErrnoException) => {
+          spawnFailed = wrapSpawnError(err, this.bin);
+        });
 
-      armTimeout(child);
+        child.stderr.on('data', (buf: Buffer) => {
+          stderrChunks.push(buf.toString('utf8'));
+        });
 
-      let inspectionCalls = 0;
-      let inspectionErrors = 0;
-      let permissionDeniedError: string | null = null;
-      const callToolNames = new Map<string, string>();
+        armTimeout(child);
 
-      const emit = (event: AgentEvent) => {
-        if (event.type === 'text') textChunks.push(event.text);
-        if (event.type === 'tool-call') {
-          callToolNames.set(event.id, event.tool);
-          toolCalls.push({ id: event.id, name: event.tool, input: event.input });
+        let inspectionCalls = 0;
+        let inspectionErrors = 0;
+        let permissionDeniedError: string | null = null;
+        const callToolNames = new Map<string, string>();
 
-          if (readOnly) {
-            const lowerTool = event.tool.toLowerCase();
-            if (MUTATING_TOOL_NAMES.has(lowerTool)) {
-              terminatedByCezar = true;
-              try {
-                child.kill('SIGTERM');
-              } catch {
-                /* ignore */
-              }
-              const violation = `Security policy violation: mutating tool "${event.tool}" is forbidden in read-only review mode`;
-              resultError = violation;
-              onEvent?.({ type: 'error', message: violation });
-              throw new Error(violation);
-            }
-            if (lowerTool === 'run_command' || lowerTool === 'bash') {
-              const cmd =
-                typeof event.input === 'object' && event.input !== null
-                  ? String((event.input as any).CommandLine || (event.input as any).command || '')
-                  : '';
-              if (/\b(git\s+(push|commit|checkout\s+-b)|gh\s+(pr|issue|release))\b/i.test(cmd)) {
+        const emit = (event: AgentEvent) => {
+          if (event.type === 'text') textChunks.push(event.text);
+          if (event.type === 'tool-call') {
+            callToolNames.set(event.id, event.tool);
+            toolCalls.push({ id: event.id, name: event.tool, input: event.input });
+
+            if (readOnly) {
+              const lowerTool = event.tool.toLowerCase();
+              if (MUTATING_TOOL_NAMES.has(lowerTool)) {
                 terminatedByCezar = true;
                 try {
                   child.kill('SIGTERM');
                 } catch {
                   /* ignore */
                 }
-                const violation = `Security policy violation: mutating command "${cmd}" is forbidden in read-only review mode`;
+                const violation = `Security policy violation: mutating tool "${event.tool}" is forbidden in read-only review mode`;
                 resultError = violation;
                 onEvent?.({ type: 'error', message: violation });
                 throw new Error(violation);
               }
+              if (lowerTool === 'run_command' || lowerTool === 'bash') {
+                const cmd =
+                  typeof event.input === 'object' && event.input !== null
+                    ? String((event.input as any).CommandLine || (event.input as any).command || '')
+                    : '';
+                if (/\b(git\s+(push|commit|checkout\s+-b|branch|tag|merge|rebase|reset)|gh\s+(pr|issue|release)|rm\s+|del\s+|remove-item|set-content|out-file)\b/i.test(cmd)) {
+                  terminatedByCezar = true;
+                  try {
+                    child.kill('SIGTERM');
+                  } catch {
+                    /* ignore */
+                  }
+                  const violation = `Security policy violation: mutating command "${cmd}" is forbidden in read-only review mode`;
+                  resultError = violation;
+                  onEvent?.({ type: 'error', message: violation });
+                  throw new Error(violation);
+                }
+              }
             }
           }
-        }
-        if (event.type === 'tool-result') {
-          const toolName = callToolNames.get(event.toolCallId)?.toLowerCase() ?? '';
-          if (READ_INSPECTION_TOOL_NAMES.has(toolName)) {
-            inspectionCalls++;
-            if (event.isError) inspectionErrors++;
+          if (event.type === 'tool-result') {
+            const toolName = callToolNames.get(event.toolCallId)?.toLowerCase() ?? '';
+            if (READ_INSPECTION_TOOL_NAMES.has(toolName)) {
+              inspectionCalls++;
+              if (event.isError) inspectionErrors++;
+            }
+            if (event.isError && isPermissionError(event.result)) {
+              permissionDeniedError = event.result;
+            }
           }
-          if (event.isError && isPermissionError(event.result)) {
-            permissionDeniedError = event.result;
-          }
-        }
-        if (event.type === 'session') sessionId = event.sessionId;
-        if (event.type === 'token-usage') tokensUsed = event.tokensUsed;
-        if (event.type === 'error') resultError = event.message;
-        onEvent?.(event);
-      };
+          if (event.type === 'session') sessionId = event.sessionId;
+          if (event.type === 'token-usage') tokensUsed = event.tokensUsed;
+          if (event.type === 'error') resultError = event.message;
+          onEvent?.(event);
+        };
 
-      try {
-        for await (const line of readNdjson(child.stdout)) {
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(line);
-          } catch {
-            continue;
+        try {
+          for await (const line of readNdjson(child.stdout)) {
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(line);
+            } catch {
+              continue;
+            }
+            emitUi((state) => mapAgyMessage(parsed, state));
+            for (const event of mapAgyStreamEvent(parsed)) emit(event);
           }
-          emitUi((state) => mapAgyMessage(parsed, state));
-          for (const event of mapAgyStreamEvent(parsed)) emit(event);
-        }
-      } catch (err) {
-        if (!timedOut && !terminatedByCezar) {
-          /* premature close */
-        }
-        if (terminatedByCezar && resultError) {
-          throw err;
-        }
-      } finally {
-        clearTimers();
-        if (releaseFsLock) {
-          try {
-            releaseFsLock();
-          } catch {
-            /* ignore */
+        } catch (err) {
+          if (!timedOut && !terminatedByCezar) {
+            /* premature close */
           }
-        }
-        if (cleanupRoEnv) {
-          try {
-            cleanupRoEnv();
-          } catch {
-            /* ignore */
+          if (terminatedByCezar && resultError) {
+            throw err;
           }
+        } finally {
+          clearTimers();
         }
-      }
 
-      const exitCode = await waitForExit(child);
+        const exitCode = await waitForExit(child);
       if (spawnFailed) throw spawnFailed;
 
       if (timedOut) {
@@ -418,8 +413,22 @@ export class AgyCliRunner implements AgentRunner {
         throw new Error(msg);
       }
 
+      if (readOnly && spec.cwd) {
+        const integrity = verifyWorkspaceIntegrity(spec.cwd, initialSnapshot);
+        if (!integrity.clean) {
+          const msg = `Security policy violation: workspace files were modified during read-only review: ${integrity.details}`;
+          onEvent?.({ type: 'error', message: msg });
+          throw new Error(msg);
+        }
+      }
+
       if (resultError) throw new Error(resultError);
-    };
+    } finally {
+      if (isolationCleanup) {
+        isolationCleanup();
+      }
+    }
+  };
 
     let turnQueue: Promise<void> = Promise.resolve();
 
