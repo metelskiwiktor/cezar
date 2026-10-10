@@ -60,6 +60,7 @@ import { materializeSkillDir } from '../skills-remote.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { readAgentModelProvider } from '../agent-config/models.ts';
 import { loadConfig, resolveWorktreeRetention } from '../config.ts';
+import { producesPullRequest, resolvePrForkBase, validatePrFork } from '../pr-fork.ts';
 import {
   autosaveCommit,
   chooseForkBase,
@@ -1285,6 +1286,7 @@ export class RunManager {
     // address it was not given (and never given an address it was not told about).
     const apiUrl = this.dispatchReachable() ? process.env.CEZ_API_URL : undefined;
     return {
+      ...this.prBaseEnv(runId),
       CEZ_HANDOFF_FILE: handoffPath(this.dataDir, runId),
       CEZ_TASK_ID: runId,
       CEZ_TODOS_FILE: generateFollowups ? todosPath(this.dataDir) : '',
@@ -1300,6 +1302,11 @@ export class RunManager {
       // The tree directory — brief, notes, inbox — for a run in a dispatch tree only.
       ...(dispatch ? { CEZ_TREE_DIR: treeDir(this.dataDir, dispatch.rootRunId) } : {}),
     };
+  }
+
+  private prBaseEnv(runId: string): Record<string, string> {
+    const base = this.store.getRun(runId)?.prForkBase;
+    return { CEZ_PR_BASE_SHA: base?.sha ?? '', CEZ_PR_BASE_BRANCH: base?.targetBranch ?? '' };
   }
 
   /**
@@ -1378,7 +1385,7 @@ export class RunManager {
       // A root started with the composer's Dispatch toggle always gets a worktree: children fork
       // its commits, and an in-place run has no branch to fork. Overridden on the INPUT, which is
       // what `execute()` reads, not only on the record.
-      ...(input.dispatchIntent && input.worktree === false ? { worktree: undefined } : {}),
+      ...((input.dispatchIntent || producesPullRequest(workflow)) && input.worktree === false ? { worktree: undefined } : {}),
     };
     const run = this.store.createRun({
       title: makeRunTitle(input.task, workflow) + (group ? ` (${group.variant})` : ''),
@@ -1403,7 +1410,7 @@ export class RunManager {
       autonomous: input.autonomous === true,
       // Persist the explicit opt-out so queued-run restart recovery and the
       // session Git routes can distinguish it from a removed isolated worktree.
-      worktree: !group && !input.dispatchIntent && input.worktree === false ? false : undefined,
+      worktree: !group && effectiveInput.worktree === false ? false : undefined,
       groupId: group?.groupId,
       variant: group?.variant,
       steps: workflow.graph
@@ -4277,6 +4284,13 @@ export class RunManager {
     // that requests isolation fails closed if the worktree cannot be
     // established; only explicit opt-out and non-Git modes run in place.
     const repo = await getRepoInfo(this.repoRoot);
+    if (!repo && producesPullRequest(workflow)) {
+      const error = 'PR pre-flight failed: a committed git repository with origin is required';
+      this.store.updateRun(runId, { status: 'failed', error, finishedAt: new Date().toISOString() });
+      emit({ type: 'lifecycle', message: error });
+      this.dropActive(runId, state);
+      return;
+    }
     if (state.cancelled) {
       this.dropActive(runId, state);
       return;
@@ -4295,26 +4309,37 @@ export class RunManager {
         type: 'note',
         message: `worktree on — using an isolated task worktree (${input.worktree === true ? 'explicit request' : 'default'})`,
       });
-      // Fork from the configured base branch (config.json `baseBranch`, e.g.
-      // `develop`) — also the target of the eventual draft PR. Unresolvable
-      // (typo, not fetched) → note + the currently checked-out branch. Either
-      // way the base goes through `resolveBaseRef` (`chooseForkBase`), which
-      // fetches origin first so a new task forks from the newest tip, never a
-      // stale local ref — while a checked-out branch that diverged from origin
-      // keeps the user's local work.
+      // PR graphs pin a freshly fetched remote commit and its publication target.
+      // Local workflows retain chooseForkBase's deliberate local-work behavior.
       //
       // A task that already recorded a fork point keeps it: its worktree is
       // reused as-is, and re-resolving against a since-changed config would
       // silently re-anchor the `merge-base` every diff/shortstat is measured
       // from, shifting "what did this task change" under an existing task.
-      const recorded = this.store.getRun(runId)?.baseBranch;
-      const base =
-        recorded ??
-        (await chooseForkBase(this.repoRoot, repo.branch, config.baseBranch, (message) =>
-          emit({ type: 'note', message }),
-        ));
       try {
+        const record = this.store.getRun(runId)!;
+        const freshFork = !record.branch && !record.worktreePath;
+        let base = record.baseBranch;
+        // Existing runs/branches keep their provenance. Controlled child dispatch is an
+        // intentional local fork; a caller's baseBranch alone is NOT that exception.
+        if (producesPullRequest(workflow) && !record.prForkBase && !record.branch && !record.worktreePath
+          && !record.dispatch?.parentRunId) {
+          const pinned = await resolvePrForkBase(this.repoRoot, record.baseBranch ?? config.baseBranch);
+          base = pinned.sha;
+          // Persist BEFORE worktree creation: queue/restart/retry cannot choose a new tip.
+          this.store.updateRun(runId, { baseBranch: base, prForkBase: pinned });
+          try {
+            this.store.flush({ throwOnError: true });
+          } catch (err) {
+            throw new Error(`PR pre-flight failed: could not persist pinned base: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        base = record.prForkBase?.sha ?? base ?? await chooseForkBase(this.repoRoot, repo.branch, config.baseBranch,
+          (message) => emit({ type: 'note', message }));
         const wt = await createWorktree(this.repoRoot, runId, base);
+        if (freshFork && this.store.getRun(runId)?.prForkBase && await getHeadCommit(wt.path) !== base) {
+          throw new Error('PR pre-flight failed: existing task branch does not match the pinned fork SHA; preserved for recovery');
+        }
         state.cwd = wt.path;
         this.store.updateRun(runId, {
           worktreePath: wt.path,
@@ -4778,7 +4803,7 @@ export class RunManager {
       } else {
         const rendered = nodeToStep(node);
         if (rendered.command) rendered.command = renderNodeRefs(rendered.command, outputs);
-        const { ok, output, exitCode } = await this.runCheckStep(state, rendered, emit);
+        const { ok, output, exitCode } = await this.runCheckStep(runId, state, rendered, emit);
         if (state.cancelled) return null;
         outputs.set(node.id, { exitCode, output });
         if (ok) {
@@ -5246,6 +5271,10 @@ export class RunManager {
           note('this task has no branch of its own to push (it runs in the repository working tree)', 'danger');
           return 'failed';
         }
+        if (run.prForkBase) {
+          try { await validatePrFork(state.cwd, run.branch, run.prForkBase); }
+          catch (err) { note(`PR scope blocked: ${err instanceof Error ? err.message : String(err)}`, 'danger'); return 'failed'; }
+        }
         await autosaveCommit(state.cwd, 'pre-PR');
         const res = await pushBranch(state.cwd, run.branch);
         if (!res.ok) {
@@ -5256,13 +5285,20 @@ export class RunManager {
         return 'done';
       }
       case 'git.sync-base': {
-        const base = record()?.baseBranch;
+        const run = record();
+        let base = run?.baseBranch;
         if (!base) {
           note('no base branch recorded for this task', 'danger');
           return 'failed';
         }
+        if (run?.prForkBase) {
+          // An explicit sync still merges the latest remote target. It does not rewrite
+          // the recorded fork or refetch a SHA as if it were a branch name.
+          try { base = await validatePrFork(state.cwd, run.branch ?? '', run.prForkBase); }
+          catch (err) { note(`PR scope blocked: ${err instanceof Error ? err.message : String(err)}`, 'danger'); return 'failed'; }
+        }
         await autosaveCommit(state.cwd, 'pre-PR');
-        const res = await syncWithBase(state.cwd, base);
+        const res = await syncWithBase(state.cwd, base, { fetch: !run?.prForkBase });
         if (res.result === 'done') {
           note(`merged the latest ${base}`);
           return 'done';
@@ -5481,7 +5517,7 @@ export class RunManager {
         return { result: compareValues(value, condition.op, condition.value), value };
       }
       case 'branch': {
-        const branch = run?.baseBranch ?? '';
+        const branch = run?.prForkBase?.targetBranch ?? run?.baseBranch ?? '';
         const result = condition.op === 'equals' ? branch === condition.value : globMatch(condition.value, branch);
         return { result, value: branch || '(none)' };
       }
@@ -6812,6 +6848,7 @@ export class RunManager {
   }
 
   private runCheckStep(
+    runId: string,
     state: ActiveRun,
     step: WorkflowStepDef,
     emit: (event: { type: string; stepId?: string; [k: string]: unknown }) => void,
@@ -6820,7 +6857,7 @@ export class RunManager {
     emit({ type: 'note', stepId: step.id, message: `$ ${command}` });
     return new Promise((resolve) => {
       // Check steps run in the same cwd as the agent steps — the worktree.
-      const child = spawn('bash', ['-lc', command], { cwd: state.cwd, env: process.env });
+      const child = spawn('bash', ['-lc', command], { cwd: state.cwd, env: { ...process.env, ...this.prBaseEnv(runId) } });
       state.interrupt = () => child.kill('SIGTERM');
 
       let output = '';

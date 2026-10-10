@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -34,16 +35,20 @@ describe('graph system nodes', () => {
     writeFileSync(join(repoRoot, '.gitignore'), '.ai/\n');
     await run('git', ['add', '-A'], { cwd: repoRoot });
     await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    // Network-free PR pre-flight uses explicitly seeded remote provenance.
+    await run('git', ['remote', 'add', 'origin', repoRoot], { cwd: repoRoot });
+    await run('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], { cwd: repoRoot });
+    await run('git', ['symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'], { cwd: repoRoot });
     store = RunStore.open(join(repoRoot, '.ai/cezar'));
     manager = new RunManager(store, repoRoot);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     manager.dispose();
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = savedDryRun;
     store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
+    await rm(repoRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
   const def = (graph: WorkflowGraph): WorkflowDef => {

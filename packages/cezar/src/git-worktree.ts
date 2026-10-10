@@ -657,11 +657,12 @@ export async function pushBranch(dir: string, branch: string): Promise<{ ok: tru
 export async function syncWithBase(
   dir: string,
   baseBranch: string,
+  opts: { fetch?: boolean } = {},
 ): Promise<{ result: 'done' } | { result: 'conflict'; files: string[] } | { result: 'failed'; error: string }> {
   if (!isSafeGitRef(baseBranch)) return { result: 'failed', error: `refusing option-like base: ${baseBranch}` };
   let ref = baseBranch;
   const remote = await git(dir, ['remote', 'get-url', 'origin']);
-  if (remote.ok && process.env.CEZ_DRY_RUN !== '1') {
+  if (opts.fetch !== false && remote.ok && process.env.CEZ_DRY_RUN !== '1') {
     await git(dir, ['fetch', 'origin', baseBranch]);
     const remoteRef = await git(dir, ['rev-parse', '--verify', '--quiet', `origin/${baseBranch}`]);
     if (remoteRef.ok) ref = `origin/${baseBranch}`;
