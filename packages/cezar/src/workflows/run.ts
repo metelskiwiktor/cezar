@@ -4134,6 +4134,7 @@ export class RunManager {
         sessionId: spawnSessionId,
         resume: sessionId !== undefined,
         readOnly: record?.readOnly === true,
+        prReview: record?.prReview,
         timeoutMs: 0,
       },
       onEvent,
@@ -6022,6 +6023,7 @@ export class RunManager {
           sessionId,
           resume: graphHooks?.resumeSessionId !== undefined,
           readOnly: (step as any).review === true || this.store.getRun(runId)?.readOnly === true || input.readOnly === true,
+          prReview: this.store.getRun(runId)?.prReview,
           // Interactive sessions have no wall clock — the idle timer rules.
           //
           // A non-final step keeps its wall clock (`DEFAULT_RUN_TIMEOUT_MS`)

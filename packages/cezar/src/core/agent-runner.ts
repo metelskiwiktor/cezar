@@ -80,6 +80,9 @@ export interface AgentRunSpec {
    * and environment sandboxing so the agent cannot modify files or push to remotes.
    */
   readOnly?: boolean;
+  /** Machine-owned reviewed refs, passed by the workflow rather than parsed
+   * from agent-controlled prompt text. Other backends may ignore this metadata. */
+  prReview?: { mergeBase: string; headSha: string };
 }
 
 /**

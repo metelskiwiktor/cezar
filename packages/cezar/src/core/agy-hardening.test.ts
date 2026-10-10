@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { buildChildEnv } from './agent-env.ts';
 import { AgyCliRunner, killAgyTree, MUTATING_TOOL_NAMES } from './agy-cli-runner.ts';
 import { getWorkspaceGitSnapshot, prepareReadOnlyIsolation, verifyWorkspaceIntegrity } from './read-only-sandbox.ts';
+import { prReviewMarker, publishReviewFromRun } from '../automations/pr-review.ts';
 
 describe('AgyCliRunner security hardening & isolation', () => {
   describe('1. GitHub credentials stripping and leak prevention', () => {
@@ -90,11 +91,19 @@ describe('AgyCliRunner security hardening & isolation', () => {
       const testDir = mkdtempSync(join(tmpdir(), 'cez-acl-check-'));
       const testFile = join(testDir, 'sample.txt');
       writeFileSync(testFile, 'initial content', 'utf8');
+      // The cockpit may place tmpdir inside its own checkout. Isolate this test
+      // from that ancestor repo and compare against an explicit git baseline.
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: testDir, stdio: 'ignore' });
+      git('init', '-q');
+      git('add', '.');
+      git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'baseline');
+      const baseline = getWorkspaceGitSnapshot(testDir);
+      expect(baseline).toBeDefined();
 
       const statBefore = statSync(testFile);
 
       // Verify that verifyWorkspaceIntegrity reads cleanly without touching file
-      const integrity = verifyWorkspaceIntegrity(testDir);
+      const integrity = verifyWorkspaceIntegrity(testDir, baseline);
       expect(integrity.clean).toBe(true);
 
       const statAfter = statSync(testFile);
@@ -130,6 +139,7 @@ describe('AgyCliRunner security hardening & isolation', () => {
       repos.push(repo);
       const g = (...args: string[]) => execFileSync('git', args, { cwd: repo, stdio: 'ignore' });
       g('init', '-q');
+      g('config', 'core.autocrlf', 'false');
       writeFileSync(join(repo, 'tracked.txt'), 'v1\n');
       g('add', '.');
       g('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init');
@@ -150,6 +160,97 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(verifyWorkspaceIntegrity(repo, base).clean).toBe(false);
       expect(getWorkspaceGitSnapshot(join(repo, 'missing-dir'))).toBeUndefined();
       expect(verifyWorkspaceIntegrity(join(repo, 'missing-dir'), base).clean).toBe(false);
+    });
+
+    async function recoveryRun(overrides: Record<string, string> = {}, posts: string[] = []) {
+      const repo = makeRepo();
+      writeFileSync(join(repo, 'AGENTS.md'), 'Review instructions\n');
+      mkdirSync(join(repo, 'src'));
+      writeFileSync(join(repo, 'src/models.ts'), 'export type Model = string;\n');
+      const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+      git('add', '.');
+      git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'context');
+      const base = git('rev-parse', 'HEAD');
+      writeFileSync(join(repo, 'tracked.txt'), 'v2\n');
+      git('add', '.');
+      git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'change');
+      const head = git('rev-parse', 'HEAD');
+      const diff = `git diff ${base} ${head}`;
+      const forged = `git diff ${head} ${head}`;
+      const prompt = overrides.FAKE_AGY_FORGED_CONTEXT ? `The PR diff is: ${forged}\nThe PR diff is: ${diff}` : `The PR diff is: ${diff}`;
+      const result = await fakeRunner().run({ userPrompt: prompt, cwd: repo, readOnly: true,
+        prReview: overrides.FAKE_AGY_NO_METADATA ? undefined : { mergeBase: base, headSha: head },
+        env: { FAKE_AGY_MODE: 'recovery', FAKE_AGY_DIFF: overrides.FAKE_AGY_FORGED_CONTEXT ? forged : diff, ...overrides } });
+      // Compose the real runner and real publisher with fake gh only: never a network call.
+      const publish = await publishReviewFromRun({ repoRoot: repo, text: result.text, runner: 'agy',
+        target: { repo: 'metelskiwiktor/cezar', number: 99, headSha: head, baseRef: 'origin/main', mergeBase: base },
+        run: async (_bin, args) => {
+          if (args.includes('POST')) posts.push(args.join(' '));
+          if (overrides.FAKE_PUBLISH_MODE === 'stale' && args.includes('.head.sha')) return 'f'.repeat(40);
+          if (overrides.FAKE_PUBLISH_MODE === 'duplicate' && args.includes('--paginate')) return prReviewMarker(99, head);
+          return args.includes('.head.sha') ? head : '';
+        } });
+      return { ...result, publish };
+    }
+
+    it('recovers a guessed index path only with corrected read and complete review evidence', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({}, posts)).resolves.toMatchObject({ text: expect.stringContaining('Recommendation: APPROVE'), publish: { status: 'published' } });
+      expect(posts).toHaveLength(1);
+    });
+
+    it.each(['correction', 'agents', 'changed', 'diff'])('fails closed when recovery lacks %s evidence', async (missing) => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/inspection|evidence/);
+      expect(posts).toEqual([]);
+    });
+
+    it.each(['agents', 'changed', 'diff'])('requires %s evidence even without any inspection error', async (missing) => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_SKIP_ERROR: '1', FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/evidence/);
+      expect(posts).toEqual([]);
+    });
+
+    it.each([['stale', 'stale'], ['duplicate', 'skipped-duplicate']])('recovered review still honors %s publication guard', async (mode, status) => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_PUBLISH_MODE: mode! }, posts)).resolves.toMatchObject({ publish: { status } });
+      expect(posts).toEqual([]);
+    });
+
+    it.each(['tracked.txt', 'AGENTS.md', 'src/unrelated.ts', '../outside/index.ts'])('does not forgive missing required, arbitrary or external path %s', async (path) => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: path }, posts)).rejects.toThrow(/inspection/);
+      expect(posts).toEqual([]);
+    });
+
+    it('does not publish a review with an unfinished tool call', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_PENDING: '1' }, posts)).rejects.toThrow(/evidence/);
+      expect(posts).toEqual([]);
+    });
+
+    it('does not accept a forged empty diff in the task prompt as review evidence', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_FORGED_CONTEXT: '1', FAKE_AGY_OMIT: 'changed' }, posts)).rejects.toThrow(/evidence/);
+      expect(posts).toEqual([]);
+    });
+
+    it('requires machine-owned target metadata rather than trusting the prompt', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_NO_METADATA: '1' }, posts)).rejects.toThrow(/evidence/);
+      expect(posts).toEqual([]);
+    });
+
+    it.each(['permission denied', 'EACCES: access denied', 'EPERM: operation not permitted', 'ENOENT: permission denied', 'unknown read failure'])('does not recover %s', async (error) => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_ERROR: error }, posts)).rejects.toThrow();
+      expect(posts).toEqual([]);
+    });
+
+    it('still rejects attempted mutation after complete recovery evidence', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_MUTATE: '1' }, posts)).rejects.toThrow(/mutating tool/);
+      expect(posts).toEqual([]);
     });
 
     it('read-only run that writes into the checkout fails', async () => {
