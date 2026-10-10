@@ -25,6 +25,7 @@ import { buildChildEnv } from './agent-env.ts';
 import { disclaimedCommand } from './disclaim-spawn.ts';
 import { readNdjson } from './ndjson.ts';
 import { resolveAgyBin } from './agy-bin.ts';
+import { AgyReviewEvidence } from './agy-review-evidence.ts';
 import {
   createAgyUiState,
   mapAgyMessage,
@@ -63,7 +64,7 @@ export const READ_INSPECTION_TOOL_NAMES = new Set([
 ]);
 
 export const READ_ONLY_REVIEW_PROMPT =
-  'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools.';
+  'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools. Discover repository paths before opening them; do not guess module/index paths. For a prepared PR checkout, successfully read AGENTS.md, run the exact full PR diff command from the context, and use view_file on every surviving changed file before concluding the review. Report missing required files or denied access as incomplete review, never as approval.';
 
 export function isReadOnlyTools(allowedTools?: string[]): boolean {
   if (!allowedTools || allowedTools.length === 0) return false;
@@ -77,7 +78,8 @@ export function isPermissionError(result: string): boolean {
     lower.includes('user denied permission') ||
     lower.includes('permission check failed') ||
     lower.includes('soft-denying') ||
-    lower.includes('permission denied')
+    lower.includes('permission denied') ||
+    /\b(eacces|eperm)\b|access (?:is )?denied|operation not permitted/.test(lower)
   );
 }
 
@@ -312,6 +314,8 @@ export class AgyCliRunner implements AgentRunner {
 
         let inspectionCalls = 0;
         let inspectionErrors = 0;
+        let recoverableErrors = 0;
+        const evidence = new AgyReviewEvidence(spec);
         let permissionDeniedError: string | null = null;
         const callToolNames = new Map<string, string>();
 
@@ -335,6 +339,7 @@ export class AgyCliRunner implements AgentRunner {
           if (event.type === 'tool-call') {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
+            evidence.call({ id: event.id, name: event.tool, input: event.input });
 
             // Best-effort tripwire, not a boundary: the event may arrive after the
             // tool already ran. The hard check is the workspace snapshot below.
@@ -346,6 +351,7 @@ export class AgyCliRunner implements AgentRunner {
             }
           }
           if (event.type === 'tool-result') {
+            if (evidence.result(event.toolCallId, event.isError === true, event.result)) recoverableErrors++;
             const toolName = callToolNames.get(event.toolCallId)?.toLowerCase() ?? '';
             if (READ_INSPECTION_TOOL_NAMES.has(toolName)) {
               inspectionCalls++;
@@ -420,8 +426,9 @@ export class AgyCliRunner implements AgentRunner {
         throw new Error(msg);
       }
 
-      if (readOnly && inspectionErrors > 0) {
-        const msg = `Tool execution failure: ${inspectionErrors} file inspection attempt(s) failed out of ${inspectionCalls}. Cannot complete review without unhindered file access.`;
+      if (readOnly && ((inspectionErrors > 0 && (inspectionErrors !== recoverableErrors || !evidence.complete())) ||
+          (evidence.hasContext && !evidence.complete()))) {
+        const msg = `Tool execution failure: ${inspectionErrors} file inspection attempt(s) failed out of ${inspectionCalls}. Cannot complete review without unhindered file access and complete review evidence.`;
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
       }
