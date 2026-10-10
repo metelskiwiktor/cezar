@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import type { Hono } from 'hono';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createWorktree } from '../git-worktree.ts';
+import { expectedDiskUsage } from '../disk-usage.testkit.ts';
 import { RunStore } from '../runs/store.ts';
 import type { RunManager } from '../workflows/run.ts';
 import { createApp } from './server.ts';
@@ -93,10 +94,17 @@ describe('the worktrees API', () => {
     expect(byRun[reviewId]!.reclaimable).toBe(false); // review is spared
     expect(byRun[runningId]!.reclaimable).toBe(false); // live work
 
-    // Shape + real du sizes on this (POSIX) host.
+    // Exact real-tool values, including the documented missing-du degradation.
     expect(byRun[doneId]!.branch).toMatch(/^cez\//);
-    expect(typeof byRun[doneId]!.sizeBytes).toBe('number');
-    expect(body.totalBytes).not.toBeNull();
+    const expectedSizes = await Promise.all([doneId, reviewId, runningId].map(async (id) => {
+      const path = store.getRun(id)!.worktreePath!;
+      const expected = await expectedDiskUsage(path);
+      expect(byRun[id]!.sizeBytes).toBe(expected);
+      return expected;
+    }));
+    expect(body.totalBytes).toBe(expectedSizes.includes(null)
+      ? null
+      : expectedSizes.reduce<number>((sum, size) => sum + size!, 0));
   });
 
   it('reflects the configured keep-limit', async () => {
