@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { expectedDiskUsage } from './disk-usage.testkit.ts';
 import {
   branchFor,
   chooseForkBase,
@@ -89,11 +90,10 @@ describe('parseShortstat', () => {
 });
 
 describe('worktreeSizeBytes (#483)', () => {
-  it('returns a positive byte count for a real directory', async () => {
+  it('matches real du usage, or returns null when the tool is unavailable', async () => {
     const repo = await fixtureRepo('cez-du-');
     const size = await worktreeSizeBytes(repo);
-    expect(size).not.toBeNull();
-    expect(size!).toBeGreaterThan(0);
+    expect(size).toBe(await expectedDiskUsage(repo));
   });
 
   it('degrades to null for a path that does not exist (du errors)', async () => {

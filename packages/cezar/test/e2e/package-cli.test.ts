@@ -9,7 +9,30 @@ import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+// npm scripts supply the real cli.js. Invoke it with Node, as check-pack.mjs does,
+// so Windows never tries to exec a .cmd file and paths remain separate argv entries.
+const npmExecpath = process.env.npm_execpath;
+assert.ok(npmExecpath, 'run this suite through npm run test:package');
+
+const runNpm = (args: string[], cwd: string) =>
+  execFile(process.execPath, [npmExecpath, ...args], { cwd, maxBuffer: 10 * 1024 * 1024 });
+
+test('npm packs a real fixture with spaces and shell metacharacters in its path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'cezar-npm-'));
+  try {
+    const fixture = join(root, 'package with spaces & symbols');
+    await mkdir(fixture);
+    await writeFile(join(fixture, 'package.json'), '{"name":"cezar-npm-fixture","version":"1.0.0"}\n');
+    await writeFile(join(fixture, 'marker.txt'), 'packed fixture\n');
+    const result = await runNpm(['pack', '--json', '--ignore-scripts'], fixture);
+    const [record] = JSON.parse(result.stdout) as Array<{ filename: string; files: Array<{ path: string }> }>;
+    assert.equal(record!.filename, 'cezar-npm-fixture-1.0.0.tgz');
+    assert.ok(record!.files.some(file => file.path === 'marker.txt'));
+    assert.ok((await readFile(join(fixture, record!.filename))).length > 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('the release tarball installs and runs the dry-run CLI workflow', { timeout: 120_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'cezar-package-e2e-'));
@@ -17,10 +40,9 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
   try {
     const packDir = join(root, 'pack');
     await mkdir(packDir);
-    const packed = await execFile(
-      npm,
+    const packed = await runNpm(
       ['pack', '--json', '--ignore-scripts', '--pack-destination', packDir],
-      { cwd: repoRoot, maxBuffer: 10 * 1024 * 1024 },
+      repoRoot,
     );
     const records = JSON.parse(packed.stdout) as Array<{
       filename: string;
@@ -40,10 +62,9 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     await mkdir(consumerDir);
     await writeFile(join(consumerDir, 'package.json'), '{"private":true}\n', 'utf8');
     const tarball = join(packDir, record.filename);
-    await execFile(
-      npm,
+    await runNpm(
       ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', tarball],
-      { cwd: consumerDir, maxBuffer: 10 * 1024 * 1024 },
+      consumerDir,
     );
 
     const packageRoot = join(consumerDir, 'node_modules', '@open-mercato', 'cezar');
