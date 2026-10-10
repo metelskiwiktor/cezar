@@ -18,12 +18,13 @@ export class AgyReviewEvidence {
   private readonly diff: string | undefined;
 
   constructor(private readonly spec: AgentRunSpec) {
-    this.diff = /(?:^|\n)The PR diff is: (git diff ([a-f0-9]{40}) ([a-f0-9]{40}))(?:\n|$)/.exec(spec.userPrompt)?.[1];
-    if (!this.diff || !spec.cwd) return;
-    const [, , base, head] = this.diff.split(' ');
+    const base = spec.prReview?.mergeBase;
+    const head = spec.prReview?.headSha;
+    if (!base || !head || !/^[a-f0-9]{40}$/.test(base) || !/^[a-f0-9]{40}$/.test(head) || !spec.cwd) return;
+    this.diff = `git diff ${base} ${head}`;
     const git = (args: string[]) => spawnSync('git', args, { cwd: spec.cwd, encoding: 'utf8', windowsHide: true, timeout: 10_000 });
     const current = git(['rev-parse', 'HEAD']);
-    const changed = git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', '--diff-filter=d', base!, head!]);
+    const changed = git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', '--diff-filter=d', base, head]);
     if (current.status !== 0 || current.stdout.trim() !== head || changed.status !== 0) return;
     this.required.add(resolve(spec.cwd, 'AGENTS.md'));
     for (const path of changed.stdout.split('\0').filter(Boolean)) this.required.add(resolve(spec.cwd, path));
@@ -73,5 +74,5 @@ export class AgyReviewEvidence {
       [...this.required].every((path) => existsSync(path) && this.reads.has(path));
   }
 
-  get hasContext(): boolean { return this.diff !== undefined; }
+  get hasContext(): boolean { return this.spec.prReview !== undefined || this.spec.userPrompt.includes('The PR diff is:'); }
 }

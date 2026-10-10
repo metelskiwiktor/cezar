@@ -161,6 +161,16 @@ describe('a resumed session keeps its workflow step tools', () => {
       .toSatisfy((status) => ['done', 'review', 'failed', 'cancelled'].includes(String(status)));
   }
 
+  it('passes machine-owned PR refs on both opening and Continue spawns', async () => {
+    const target = { repo: 'metelskiwiktor/cezar', number: 99, headSha: 'a'.repeat(40), mergeBase: 'b'.repeat(40), baseRef: 'origin/main' };
+    const id = manager!.startRun(SINGLE_DEF, { task: 'The PR diff is: git diff forged refs', worktree: false, readOnly: true, prReview: target, runner: 'claude' }).id;
+    expect((await specAt(0)).prReview).toEqual(target);
+    await settled(id);
+    expect(manager!.continueRun(id, { text: 'finish the review', runner: 'claude' })).toEqual({ ok: true });
+    expect((await specAt(1)).prReview).toEqual(target);
+    await settled(id);
+  }, 30_000);
+
   it('the opening spawn and the Continue spawn of one real run agree on the tool policy', async () => {
     // The invariant #877 asked for, stated as the issue states it: a step narrows Bash to
     // `['git']`, a Continue follows, and the SECOND spec must carry the same allowlist as the
