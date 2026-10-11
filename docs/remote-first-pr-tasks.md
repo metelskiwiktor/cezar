@@ -26,6 +26,19 @@ Legacy started runs retain their original provenance; they are not retrofitted.
 Controlled child dispatch deliberately keeps the committed parent branch as its
 local fork, rather than silently discarding the parent's work.
 
+Recovery validates stored pin syntax and commit availability before creating or
+reattaching a worktree. It flushes the pin again before creation: a failed earlier
+flush may have left provenance only in memory. A persistence failure stops before
+any task branch or workflow step; recovery from the last durable snapshot keeps
+its original SHA even if origin has advanced. Invalid provenance fails closed,
+without choosing local main or moving/deleting a surviving task branch.
+
+Slot-release broadcasts reconcile monitoring and usage-limit timers even when a
+project's queue is empty, but do not spawn Git for an unnecessary capacity check.
+This avoids an observed Windows cleanup race where a settled fixture is removed
+while that Git process still holds its working directory. It does not establish
+the cause of every historical Windows timeout or EBUSY failure.
+
 The publisher verifies pinned ancestry, task-branch HEAD and unchanged origin URL
 before autosave/push. A changed origin URL blocks publication; an advanced tip does
 not change the recorded base. It refreshes the target and blocks publication if a

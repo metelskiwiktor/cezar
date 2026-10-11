@@ -28,6 +28,19 @@ export function producesPullRequest(workflow: WorkflowDef): boolean {
   return workflow.graph?.nodes.some((n) => n.type === 'github.draft-pr') ?? false;
 }
 
+/** Recovery must validate stored provenance before creating or reattaching any branch. */
+export async function validateStoredPrForkBase(repoRoot: string, base: PrForkBase): Promise<void> {
+  if (!/^[0-9a-f]{40}$/.test(base.sha) || !isSafeGitRef(base.targetBranch) || !base.remoteUrl?.trim()) {
+    throw new Error('PR pre-flight failed: invalid pinned PR base');
+  }
+  try {
+    await git(repoRoot, ['check-ref-format', `refs/heads/${base.targetBranch}`]);
+    await git(repoRoot, ['cat-file', '-e', `${base.sha}^{commit}`]);
+  } catch {
+    throw new Error('PR pre-flight failed: invalid pinned PR base');
+  }
+}
+
 /** No local/HEAD fallback. Resolve once, before worktree creation or any agent/check. */
 export async function resolvePrForkBase(repoRoot: string, configured?: string): Promise<PrForkBase> {
   try {

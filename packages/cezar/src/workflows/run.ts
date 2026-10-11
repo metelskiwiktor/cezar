@@ -60,7 +60,7 @@ import { materializeSkillDir } from '../skills-remote.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { readAgentModelProvider } from '../agent-config/models.ts';
 import { loadConfig, resolveWorktreeRetention } from '../config.ts';
-import { producesPullRequest, resolvePrForkBase, validatePrFork } from '../pr-fork.ts';
+import { producesPullRequest, resolvePrForkBase, validatePrFork, validateStoredPrForkBase } from '../pr-fork.ts';
 import {
   autosaveCommit,
   chooseForkBase,
@@ -1577,6 +1577,13 @@ export class RunManager {
     try {
       do {
         this.pumpAgain = false;
+        // Slot-release broadcasts also reach empty queues. Reconciliation above
+        // still runs, but there is no capacity decision requiring git. Spawning
+        // it here races terminal repository cleanup on Windows (cwd EBUSY).
+        if (this.queue.length === 0) {
+          this.forceNextPump = false;
+          break;
+        }
         const repo = await getRepoInfo(this.repoRoot);
         const maxParallel = this.semaphore.maxParallel();
         // Per-project ceiling (spec 2026-07-22-per-project-concurrency): this
@@ -4328,6 +4335,11 @@ export class RunManager {
           base = pinned.sha;
           // Persist BEFORE worktree creation: queue/restart/retry cannot choose a new tip.
           this.store.updateRun(runId, { baseBranch: base, prForkBase: pinned });
+        }
+        if (record.prForkBase) {
+          await validateStoredPrForkBase(this.repoRoot, record.prForkBase);
+          // A prior failed flush can leave the pin only in memory. Retrying must
+          // cross the same durability boundary, even when resolution is skipped.
           try {
             this.store.flush({ throwOnError: true });
           } catch (err) {

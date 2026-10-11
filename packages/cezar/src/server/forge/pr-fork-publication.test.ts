@@ -64,3 +64,15 @@ it('changed origin blocks publication before autosave, push or gh', async () => 
   expect(git('rev-parse', 'HEAD')).toBe(before); expect(ghCalls).toEqual([]);
   expect(() => git('--git-dir', remote, 'rev-parse', '--verify', 'refs/heads/cez/task')).toThrow();
 });
+
+it('wrong HEAD blocks publication before autosave, push or gh and preserves task changes', async () => {
+  const payload = await input(); const before = git('rev-parse', 'HEAD');
+  git('checkout', '-q', 'develop');
+  const outcome = await createDraftPr(payload);
+  expect(outcome).toMatchObject({ ok: false, error: expect.stringContaining('HEAD is not the task branch') });
+  expect(git('rev-parse', 'HEAD')).toBe(before);
+  expect(git('rev-parse', 'refs/heads/cez/task')).toBe(before);
+  expect(git('status', '--short')).toContain('task.txt');
+  expect(ghCalls).toEqual([]);
+  expect(() => git('--git-dir', remote, 'rev-parse', '--verify', 'refs/heads/cez/task')).toThrow();
+});
