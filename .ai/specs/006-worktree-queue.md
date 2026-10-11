@@ -123,3 +123,12 @@ Hardening acceptance checks:
 - Two explicit worktree opt-out runs still serialize repository-root access by
   default; with `CEZ_DISABLE_REPO_LOCK=1`, two root runs may overlap and each
   emits a visible unsafe-mode note.
+
+## Remote-first PR forks (2026-10-10)
+
+New graphs containing `github.draft-pr` always isolate and pin a freshly fetched
+origin target SHA before any workflow step. Local/non-PR work and controlled child
+dispatch retain their explicit local fork behavior. The run persists the fork SHA,
+publication branch and origin URL; queue/restart/Continue never re-anchor an
+existing task. Fetch or provenance persistence errors fail pre-flight without a
+local/HEAD fallback. See [the contract and dependent guard migration](../../docs/remote-first-pr-tasks.md).

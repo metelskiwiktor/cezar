@@ -9,6 +9,13 @@ import { workflowDefSchema, workflowStepDefSchema } from './workflows.ts';
 // `contract-parity.runs.test.ts` cannot drift apart by construction.
 import { dispatchIntentSchema, dispatchSchema } from './dispatch.ts';
 
+/** Machine-owned PR provenance, pinned before the first workflow step. Never accepted as input. */
+export const prForkBaseSchema = z.object({
+  sha: z.string().regex(/^[0-9a-f]{40}$/),
+  targetBranch: z.string().min(1),
+  remoteUrl: z.string().min(1),
+});
+
 /**
  * The RUNS family of `/api/v1` — a task's record, its lifecycle mutations, and the artifacts
  * (queued prompt stack, commits, git actions) that hang off one run.
@@ -270,6 +277,7 @@ export const runRecordSchema = z.object({
   branch: z.string().optional(),
   /** Stable baseline for session git views: a worktree's fork ref, or an in-place run's starting commit. */
   baseBranch: z.string().optional(),
+  prForkBase: prForkBaseSchema.optional(),
   /** Set when count-based retention (#483) reclaimed the worktree DIRECTORY (the branch is
    *  kept): the dir is gone but recoverable. */
   worktreeReclaimedAt: z.string().optional(),

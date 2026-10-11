@@ -386,6 +386,12 @@ locks down. Nothing runs on a server you don't own.
 
 Useful environment variables:
 
+PR-producing workflow graphs pin their remote fork before any work starts; see
+[remote-first PR tasks and guard migration](remote-first-pr-tasks.md). Cezar injects
+`CEZ_PR_BASE_SHA` and `CEZ_PR_BASE_BRANCH` into agent and check processes from the
+run's machine-owned provenance. They are empty for legacy/local/controlled-child
+runs and must not be configured by the user.
+
 | Var | Effect |
 |---|---|
 | `CEZ_DRY_RUN=1` | Use the bundled mock instead of the real `claude` CLI — the entire cockpit works offline, for demos and development. |

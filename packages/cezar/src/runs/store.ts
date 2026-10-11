@@ -13,7 +13,7 @@ import { MAX_REF } from './task-refs.ts';
 import { workflowDefSchema } from '../workflows/types.ts';
 // A contract VALUE, like `workspaceUiStateSchema` in `workspace/migrations.ts`: the persisted
 // `dispatch` object and its wire half are literally the same schema, so they cannot drift.
-import { dispatchSchema, trackerAssociationSchema, trackerAutomationEventSchema } from '@open-mercato/cezar-contract';
+import { dispatchSchema, prForkBaseSchema, trackerAssociationSchema, trackerAutomationEventSchema } from '@open-mercato/cezar-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 
@@ -339,6 +339,8 @@ export const runRecordSchema = z.object({
   branch: z.string().optional(),
   /** Stable baseline for session git views: a worktree's fork ref, or an in-place run's starting commit. */
   baseBranch: z.string().optional(),
+  /** Immutable fork SHA and publication target for new PR-producing runs. */
+  prForkBase: prForkBaseSchema.optional(),
   /** Explicit read-only mode for review tasks. Enforces file system and environment sandbox. */
   readOnly: z.boolean().optional(),
   /** The PR a review run reviews (`github.review-comment` publishes there) — set by the

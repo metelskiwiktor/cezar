@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { z } from 'zod';
 import { REFERENCE_STATUS_MAX } from '@open-mercato/cezar-contract';
 import { autosaveCommit } from '../../git-worktree.ts';
+import { validatePrFork } from '../../pr-fork.ts';
 import type {
   DraftPrInput,
   DraftPrOutcome,
@@ -2462,6 +2463,13 @@ export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome
   if (!worktree || !branch) {
     return { ok: false, error: 'this task has no worktree/branch to publish' };
   }
+  if (run.prForkBase) {
+    try {
+      await validatePrFork(worktree, branch, run.prForkBase);
+    } catch (err) {
+      return { ok: false, error: `PR scope blocked: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
 
   // Final autosave: the branch must hold everything before it leaves the box.
   // This is the LAST flush — unlike the turn-end and run-finalize ones there is
@@ -2500,8 +2508,10 @@ export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome
   // --base, gh aims at the repo default (main) even when work started on
   // develop. `origin/x` normalizes to `x`; a raw sha (detached-HEAD fork
   // point) can't be a PR base, so gh falls back to the default branch.
-  const prBase = run.baseBranch?.replace(/^origin\//, '');
-  const baseArgs = prBase && !/^[0-9a-f]{7,40}$/i.test(prBase) ? ['--base', prBase] : [];
+  const prBase = run.prForkBase?.targetBranch ?? run.baseBranch?.replace(/^origin\//, '');
+  const baseArgs = run.prForkBase
+    ? ['--base', run.prForkBase.targetBranch]
+    : prBase && !/^[0-9a-f]{7,40}$/i.test(prBase) ? ['--base', prBase] : [];
   const pr = await execTool(
     ['pr', 'create', '--draft', '--head', branch, ...baseArgs, '--title', run.title, '--body', body],
     worktree,
