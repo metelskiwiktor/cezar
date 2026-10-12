@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentRunSpec, AgentToolCallRecord } from './agent-runner.ts';
 
@@ -17,6 +17,12 @@ export class AgyReviewEvidence {
   private validContext = false;
   private optionalMisses = 0;
   private readonly diff: string | undefined;
+  private trustedDiff = false;
+  private diffFile: string | undefined;
+  private diffLines = 0;
+  private readonly diffCoverage = new Set<number>();
+  private readonly checkFiles = new Map<string, { lines: number; coverage: Set<number> }>();
+  private readonly affected = new Set<string>();
 
   constructor(private readonly spec: AgentRunSpec) {
     const base = spec.prReview?.mergeBase;
@@ -26,9 +32,14 @@ export class AgyReviewEvidence {
     const git = (args: string[]) => spawnSync('git', args, { cwd: spec.cwd, encoding: 'utf8', windowsHide: true, timeout: 10_000 });
     const current = git(['rev-parse', 'HEAD']);
     const changed = git(['diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', '--diff-filter=d', base, head]);
-    if (current.status !== 0 || current.stdout.trim() !== head || changed.status !== 0) return;
+    const stats = git(['diff', '--no-ext-diff', '--no-textconv', '--numstat', '--no-renames', '-z', base, head]);
+    if (current.status !== 0 || current.stdout.trim() !== head || changed.status !== 0 || stats.status !== 0) return;
+    const binary = new Set(stats.stdout.split('\0').filter((row) => row.startsWith('-\t-\t')).map((row) => row.slice(4)));
     this.required.add(resolve(spec.cwd, 'AGENTS.md'));
-    for (const path of changed.stdout.split('\0').filter(Boolean)) this.required.add(resolve(spec.cwd, path));
+    for (const path of changed.stdout.split('\0').filter(Boolean)) {
+      this.required.add(resolve(spec.cwd, path));
+      if (!binary.has(path) && existsSync(resolve(spec.cwd, path)) && lstatSync(resolve(spec.cwd, path)).isFile()) this.affected.add(resolve(spec.cwd, path));
+    }
     this.validContext = true;
   }
 
@@ -37,9 +48,18 @@ export class AgyReviewEvidence {
     this.pending.add(record.id);
   }
 
+  /** Only the runner may record successful delivery of Cezar's bounded full diff. */
+  deliverTrustedDiff(file: string, lines: number): void {
+    this.trustedDiff = true;
+    this.diffFile = resolve(file);
+    this.diffLines = lines;
+  }
+  requireCheckResult(file: string, lines: number): void { this.checkFiles.set(resolve(file), { lines, coverage: new Set() }); }
+
   private file(input: unknown): string | undefined {
     if (!input || typeof input !== 'object' || !this.spec.cwd) return;
-    const path = (input as Record<string, unknown>).AbsolutePath;
+    const params = input as Record<string, unknown>;
+    const path = params.AbsolutePath ?? params.DirectoryPath ?? params.SearchPath ?? params.SearchDirectory ?? params.File;
     if (typeof path !== 'string' || !isAbsolute(path)) return;
     const absolute = resolve(path);
     const local = relative(this.spec.cwd, absolute);
@@ -56,7 +76,7 @@ export class AgyReviewEvidence {
   }
 
   allowsFileInspection(record: AgentToolCallRecord): boolean {
-    return record.name !== 'view_file' || this.file(record.input) !== undefined;
+    return !['view_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name'].includes(record.name.toLowerCase()) || this.file(record.input) !== undefined;
   }
 
   result(id: string, error: boolean, message: string): boolean {
@@ -70,6 +90,26 @@ export class AgyReviewEvidence {
     if (!error) {
       if (!existsSync(path)) return false;
       this.reads.add(path);
+      if (this.trustedDiff && path === this.diffFile) {
+        const input = call.input as Record<string, unknown>;
+        const start = input.StartLine;
+        const end = input.EndLine;
+        // Never infer completeness from a provider's default/truncated read.
+        if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && Number(start) >= 1 &&
+            Number(end) >= Number(start) && Number(end) - Number(start) < 500) {
+          for (let n = Number(start); n <= Math.min(Number(end), this.diffLines); n++) this.diffCoverage.add(n);
+        }
+        this.diffRead = this.diffCoverage.size === this.diffLines;
+      }
+      const check = this.checkFiles.get(path);
+      if (check) {
+        const input = call.input as Record<string, unknown>;
+        const start = Number(input.StartLine);
+        const end = Number(input.EndLine);
+        if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 1 && end >= start && end - start < 500) {
+          for (let n = start; n <= Math.min(end, check.lines); n++) check.coverage.add(n);
+        }
+      }
       // Only a subsequent read resolves the failed attempt.
       this.recoveries.delete(path);
       return false;
@@ -90,8 +130,14 @@ export class AgyReviewEvidence {
   }
 
   complete(): boolean {
+    const cwd = this.spec.cwd;
+    if (!cwd) return false;
     return this.validContext && this.diffRead && this.pending.size === 0 && this.recoveries.size === 0 &&
-      [...this.required].every((path) => existsSync(path) && this.reads.has(path));
+      [...this.checkFiles.values()].every((check) => check.coverage.size === check.lines) &&
+      (this.trustedDiff
+        ? this.reads.has(resolve(cwd, 'AGENTS.md')) &&
+          (this.affected.size === 0 || [...this.affected].some((path) => this.reads.has(path)))
+        : [...this.required].every((path) => existsSync(path) && this.reads.has(path)));
   }
 
   get hasContext(): boolean { return this.spec.prReview !== undefined || this.spec.userPrompt.includes('The PR diff is:'); }

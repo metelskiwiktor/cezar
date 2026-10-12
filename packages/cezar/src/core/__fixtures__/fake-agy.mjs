@@ -5,13 +5,28 @@ import { join } from 'node:path';
 
 const mode = process.env.FAKE_AGY_MODE ?? 'ok';
 const line = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
+const trustedDiffReads = (tool) => {
+  const prompt = process.argv.at(-1);
+  const file = prompt.match(/Cezar pinned diff file: (.+)\n/)?.[1];
+  const count = Number(prompt.match(/Diff lines: (\d+)/)?.[1]);
+  if (file && process.env.FAKE_AGY_OMIT !== 'trusted-diff') {
+    for (let StartLine = 1; StartLine <= count; StartLine += 500) tool('view_file', { AbsolutePath: file, StartLine, EndLine: Math.min(StartLine + 499, count) });
+  }
+  if (process.env.FAKE_AGY_OMIT !== 'check-result') {
+    for (const match of prompt.matchAll(/Cezar check result file: (.+)\nResult lines: (\d+)/g)) {
+      const count = Number(match[2]);
+      for (let StartLine = 1; StartLine <= count; StartLine += 500) tool('view_file', { AbsolutePath: match[1], StartLine, EndLine: Math.min(StartLine + 499, count) });
+    }
+  }
+  return file;
+};
 
 if (process.env.FAKE_AGY_ASSERT_PR_SCOPE) {
   const args = process.argv.slice(2);
-  if (!args.includes('--disable-slash-commands') || !args.includes('--sandbox') ||
+  if (!args.includes('--disable-slash-commands') || args.includes('--sandbox') || args.includes('--dangerously-skip-permissions') ||
       args[args.indexOf('--mode') + 1] !== 'plan' || args.filter((v) => v === '--add-dir').length !== 1 ||
-      args.at(-1).includes('MAIN_IMPLEMENTATION_SKILL') ||
-      ['CEZ_HANDOFF_FILE', 'CEZ_TODOS_FILE', 'CEZ_TREE_DIR', 'CEZ_BIN'].some((key) => process.env[key])) {
+      args.at(-1).includes('MAIN_IMPLEMENTATION_SKILL') || args.join(' ').length > 28000 ||
+      ['CEZ_HANDOFF_FILE', 'CEZ_TODOS_FILE', 'CEZ_TREE_DIR', 'CEZ_BIN', 'GH_TOKEN', 'EXPO_TOKEN', 'EAS_TOKEN', 'EAS_ACCESS_TOKEN'].some((key) => process.env[key])) {
     process.stderr.write('PR review leaked implementation context or external roots');
     process.exit(1);
   }
@@ -26,12 +41,13 @@ switch (mode) {
       line({ event: 'step_update', step_update: { step_index, state: error ? 'ERROR' : 'DONE', step_type: 'tool', tool_name, tool_info: error ? { error } : { result: '' } } });
     };
     const read = (path, error) => tool('view_file', { AbsolutePath: join(process.cwd(), path) }, error);
+    const suppliedDiff = trustedDiffReads(tool);
     if (!process.env.FAKE_AGY_SKIP_ERROR) read(process.env.FAKE_AGY_MISSING_PATH ?? 'src/models/index.ts', process.env.FAKE_AGY_ERROR ?? 'GetFileAttributesEx: The system cannot find the path specified.');
     for (let n = 0; n < Number(process.env.FAKE_AGY_EXTRA_MISSES ?? 0); n++) read(`docs/optional${n}/README.md`, 'ENOENT: no such file or directory');
     if (process.env.FAKE_AGY_OMIT !== 'correction') read('src/models.ts');
     if (process.env.FAKE_AGY_OMIT !== 'agents') read('AGENTS.md');
     if (process.env.FAKE_AGY_OMIT !== 'changed') read('tracked.txt');
-    if (process.env.FAKE_AGY_OMIT !== 'diff') tool('run_command', { CommandLine: process.env.FAKE_AGY_DIFF });
+    if (process.env.FAKE_AGY_OMIT !== 'diff' && !suppliedDiff) tool('run_command', { CommandLine: process.env.FAKE_AGY_DIFF });
     if (process.env.FAKE_AGY_MUTATE) tool('write_to_file', { TargetFile: 'tracked.txt' });
     if (process.env.FAKE_AGY_PENDING) line({ event: 'step_update', step_update: { step_index: ++id, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), 'tracked.txt') } } } });
     line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none. Reviewed AGENTS.md, the full diff and changed files; no correctness or regression issues found.\nRecommendation: APPROVE' } });
@@ -43,6 +59,37 @@ switch (mode) {
     await new Promise((resolve) => setTimeout(resolve, 1500));
     line({ event: 'step_update', step_update: { step_index: 2, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'attempt to bypass denial' } } } });
     break;
+  case 'windows-exebox': {
+    const diff = 'git diff --stat 03981fdebb98e7f9d40a73045487a61be13afdbe 4eeba07835719eedbea33e59155216451c179c72';
+    line({ event: 'step_update', step_update: { step_index: 1, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: diff } } } });
+    line({ event: 'step_update', step_update: { step_index: 1, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { error: 'exebox: sandboxing on Windows requires Windows 11 24H2 or later with the August 2026 or later update: process security environments are not supported: The specified module could not be found' } } });
+    line({ event: 'step_update', step_update: { step_index: 2, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { error: `permission check failed for unsandboxed ${diff}: user denied permission` } } });
+    break;
+  }
+  case 'broker': {
+    const prompt = process.argv.at(-1);
+    const args = process.argv.slice(2);
+    if (args.includes('--conversation') && args[args.indexOf('--conversation') + 1] !== 'review-fixture-local') process.exit(5);
+    if (prompt.includes('Cezar trusted check result:') && !args.includes('--conversation')) process.exit(6);
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 10;
+    const file = trustedDiffReads((tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    });
+    const { readFileSync } = await import('node:fs');
+    if (!file || !readFileSync(file, 'utf8').includes('+v2')) process.exit(4);
+    for (const [step_index, name] of [[1, 'AGENTS.md'], [2, 'tracked.txt']]) {
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), name) } } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name: 'view_file', tool_info: { result: '' } } });
+    }
+    const response = prompt.includes('Cezar trusted check result:') && !process.env.FAKE_AGY_REPEAT
+      ? `Findings: none. Full pinned diff and contracts inspected. Verification: ${JSON.parse(process.env.FAKE_AGY_CHECK).join(' ')} returned exit 0. Emulator skipped: no resource authorization.\nRecommendation: APPROVE`
+      : `CEZ_REVIEW_CHECK ${JSON.stringify({ args: JSON.parse(process.env.FAKE_AGY_CHECK), reason: 'inspect affected contract' })}`;
+    line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: response } });
+    break;
+  }
   case 'write':
     writeFileSync(join(process.cwd(), 'written-by-agent.txt'), 'ok\n');
     break;

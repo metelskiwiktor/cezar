@@ -230,7 +230,7 @@ describe('AgyCliRunner security hardening & isolation', () => {
       for (const overrides of cases) {
         await expect(recoveryRun(overrides)).rejects.toThrow(/evidence/);
       }
-    });
+    }, 20_000); // Three independent Git/CLI fixtures, including Windows process startup.
 
     it('stops immediately on permission denial before the agent can bypass it', async () => {
       const calls: string[] = [];
@@ -239,22 +239,26 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(calls).toEqual(['view_file']);
     });
 
-    it.each(['agents', 'changed', 'diff'])('optional ENOENT never substitutes for mandatory %s evidence', async (missing) => {
+    it.each(['agents', 'changed', 'trusted-diff'])('optional ENOENT never substitutes for mandatory %s evidence', async (missing) => {
       const posts: string[] = [];
       await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: 'docs/README.md', FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/evidence/);
       expect(posts).toEqual([]);
     });
 
-    it.each(['correction', 'agents', 'changed', 'diff'])('fails closed when recovery lacks %s evidence', async (missing) => {
+    it.each(['correction', 'agents', 'changed'])('fails closed when recovery lacks %s evidence', async (missing) => {
       const posts: string[] = [];
       await expect(recoveryRun({ FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/inspection|evidence/);
       expect(posts).toEqual([]);
     });
 
-    it.each(['agents', 'changed', 'diff'])('requires %s evidence even without any inspection error', async (missing) => {
+    it.each(['agents', 'changed'])('requires %s evidence even without any inspection error', async (missing) => {
       const posts: string[] = [];
       await expect(recoveryRun({ FAKE_AGY_SKIP_ERROR: '1', FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/evidence/);
       expect(posts).toEqual([]);
+    });
+
+    it('uses the Cezar-pinned complete diff instead of requiring a native Agy command', async () => {
+      await expect(recoveryRun({ FAKE_AGY_SKIP_ERROR: '1', FAKE_AGY_OMIT: 'diff' })).resolves.toMatchObject({ publish: { status: 'published' } });
     });
 
     it.each([['stale', 'stale'], ['duplicate', 'skipped-duplicate']])('recovered review still honors %s publication guard', async (mode, status) => {
