@@ -66,6 +66,15 @@ export const READ_INSPECTION_TOOL_NAMES = new Set([
 export const READ_ONLY_REVIEW_PROMPT =
   'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools. Discover repository paths before opening them; do not guess module/index paths. For a prepared PR checkout, successfully read AGENTS.md, run the exact full PR diff command from the context, and use view_file on every surviving changed file before concluding the review. Report missing required files or denied access as incomplete review, never as approval.';
 
+export const PR_REVIEW_SCOPE_PROMPT = [
+  READ_ONLY_REVIEW_PROMPT,
+  'The only allowed repository root is your working directory, the prepared PR checkout. Resolve repository references there, never in the main checkout.',
+  'Do not load implementation skills, retrospective skills, or global skills. Repository instructions about implementation, dispatch, committing, publication, and handoff do not apply to this read-only review.',
+  'Do not read or write run handoff, task journals or cockpit state; they are not review evidence. Do not guess their paths.',
+  'Use the full PR diff and checkout files as mandatory evidence. A missing optional checkout README may be noted only after all mandatory evidence is complete. Permission denial is fatal: stop, never retry through another tool.',
+  'Conclude with exactly one Recommendation: APPROVE or Recommendation: CHANGES REQUESTED line. Cite findings with plain repo-relative path:line. Describe local executable literals without reproducing absolute paths.',
+].join('\n');
+
 export function isReadOnlyTools(allowedTools?: string[]): boolean {
   if (!allowedTools || allowedTools.length === 0) return false;
   const lower = allowedTools.map((t) => t.toLowerCase());
@@ -100,12 +109,15 @@ export interface BuildAgyArgsInput {
   additionalDirectories?: string[];
   readOnly?: boolean;
   allowedTools?: string[];
+  /** Prepared PR reviews must not inherit implementation or external journal context. */
+  prReview?: boolean;
 }
 
 /** CLI argv for headless print mode. */
 export function buildAgyArgs(input: BuildAgyArgsInput): string[] {
-  const readOnly = input.readOnly === true || isReadOnlyTools(input.allowedTools);
-  const args = ['--output-format', 'stream-json', '--mode', 'accept-edits'];
+  const readOnly = input.prReview === true || input.readOnly === true || isReadOnlyTools(input.allowedTools);
+  const args = ['--output-format', 'stream-json', '--mode', input.prReview ? 'plan' : 'accept-edits'];
+  if (input.prReview) args.push('--disable-slash-commands', '--sandbox');
 
   const model = input.model?.trim() || DEFAULT_AGY_MODEL;
   args.push('--model', model);
@@ -116,7 +128,7 @@ export function buildAgyArgs(input: BuildAgyArgsInput): string[] {
 
   const dirs = new Set<string>();
   if (input.cwd?.trim()) dirs.add(resolve(input.cwd.trim()));
-  if (input.additionalDirectories) {
+  if (!input.prReview && input.additionalDirectories) {
     for (const dir of input.additionalDirectories) {
       if (dir.trim()) dirs.add(resolve(dir.trim()));
     }
@@ -125,8 +137,8 @@ export function buildAgyArgs(input: BuildAgyArgsInput): string[] {
     args.push('--add-dir', dir);
   }
 
-  let systemPrompt = input.systemPrompt;
-  if (readOnly) {
+  let systemPrompt = input.prReview ? PR_REVIEW_SCOPE_PROMPT : input.systemPrompt;
+  if (readOnly && !input.prReview) {
     systemPrompt = systemPrompt
       ? `${systemPrompt}\n\n${READ_ONLY_REVIEW_PROMPT}`
       : READ_ONLY_REVIEW_PROMPT;
@@ -232,7 +244,7 @@ export class AgyCliRunner implements AgentRunner {
       }
     };
 
-    const readOnly = spec.readOnly === true || isReadOnlyTools(spec.allowedTools);
+    const readOnly = spec.prReview !== undefined || spec.readOnly === true || isReadOnlyTools(spec.allowedTools);
 
     const limitMs = spec.timeoutMs ?? this.timeoutMs;
     let deadline: NodeJS.Timeout | undefined;
@@ -267,6 +279,7 @@ export class AgyCliRunner implements AgentRunner {
         additionalDirectories: spec.additionalDirectories,
         readOnly,
         allowedTools: spec.allowedTools,
+        prReview: spec.prReview !== undefined,
       });
 
       let isolationCleanup: (() => void) | undefined;
@@ -287,6 +300,11 @@ export class AgyCliRunner implements AgentRunner {
         }
       } else {
         env = buildChildEnv({ backend: this.backend, extraEnv: spec.env, readOnly: false });
+      }
+      if (spec.prReview) {
+        // These host/per-run variables advertise files outside the assigned checkout.
+        // Removing them is not a grant: the workspace still has only cwd as --add-dir.
+        for (const key of ['CEZ_HANDOFF_FILE', 'CEZ_TODOS_FILE', 'CEZ_TREE_DIR', 'CEZ_BIN']) delete env[key];
       }
 
       // Baseline of HEAD + every tracked/untracked change. Outside a git checkout
@@ -340,6 +358,12 @@ export class AgyCliRunner implements AgentRunner {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
             evidence.call({ id: event.id, name: event.tool, input: event.input });
+            if (spec.prReview && !evidence.allowsFileInspection({ id: event.id, name: event.tool, input: event.input })) {
+              terminatedByCezar = true;
+              resultError = 'Review evidence scope violation: file inspection must stay inside the assigned PR checkout. Stop; do not access the main checkout or external run files.';
+              onEvent?.({ type: 'error', message: resultError });
+              killAgyTree(child);
+            }
 
             // Best-effort tripwire, not a boundary: the event may arrive after the
             // tool already ran. The hard check is the workspace snapshot below.
@@ -359,6 +383,11 @@ export class AgyCliRunner implements AgentRunner {
             }
             if (event.isError && isPermissionError(event.result)) {
               permissionDeniedError = event.result;
+              if (readOnly) {
+                terminatedByCezar = true;
+                resultError = `Tool permission error: ${permissionDeniedError}. Review stopped; use accessible evidence inside the assigned PR checkout, never bypass a denial.`;
+                killAgyTree(child);
+              }
             }
           }
           if (event.type === 'session') sessionId = event.sessionId;
@@ -432,6 +461,7 @@ export class AgyCliRunner implements AgentRunner {
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
       }
+      if (recoverableErrors > 0) onEvent?.({ type: 'note', message: `Review continued after ${recoverableErrors} bounded missing optional/discovery read(s); mandatory checkout evidence is complete.` });
 
       if (exitCode !== 0 && exitCode !== null) {
         const stderr = stderrChunks.join('').trim();

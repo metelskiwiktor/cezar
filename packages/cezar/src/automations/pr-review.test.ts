@@ -164,6 +164,53 @@ describe('publishReviewFromRun', () => {
   const text = `${'P2: src/x.ts:1 long finding. '.repeat(200)}\n\nRecommendation: CHANGES REQUESTED`;
   const gh = (remoteHead: string, comments = '') => fakeRun({ 'gh api repos/metelskiwiktor/tabnote/pulls/25': `${remoteHead}\n`, 'gh api --paginate': comments });
 
+  it('preflights the observed executable literal once, preserving repo-relative findings and full body', async () => {
+    const { run, posts } = gh(HEAD);
+    const body = `${text}\n- Location: scripts/lib/prScopeGuard.test.js:13\n- Windows bash executable is hardcoded to \`'C:/Program Files/Git/bin/bash.exe'\`.\n`;
+    await expect(publishReviewFromRun({ repoRoot: '/r', target, text: body, run })).resolves.toEqual({ status: 'published' });
+    expect(posts).toHaveLength(1);
+    expect(posts[0]?.body).toContain('scripts/lib/prScopeGuard.test.js:13');
+    expect(posts[0]?.body).toContain('[local executable path omitted]');
+    expect(posts[0]?.body).not.toContain('C:/');
+    expect(posts[0]?.body.length).toBeGreaterThan(4000);
+  });
+
+  it.each(['C:\\repo\\src\\a.ts:12', '\\\\host\\share\\a.ts:12', '/home/me/a.ts:12', '../outside/a.ts:12', 'src/../../outside/a.ts:12', '.ai/cezar/runs/id.handoff.md:1', 'C:/bin/bash.exe:13'])('never repairs a finding location %s', async (path) => {
+    const { run, calls } = gh(HEAD);
+    expect((await publishReviewFromRun({ repoRoot: '/r', target, text: `${text}\nLocation: \`${path}\``, run })).status).toBe('invalid');
+    expect(calls).toEqual([]);
+  });
+
+  it('checks the complete header and body before any GitHub call', async () => {
+    const { run, calls } = gh(HEAD);
+    expect((await publishReviewFromRun({ repoRoot: '/r', target, text, model: 'C:/private/model', run })).status).toBe('invalid');
+    expect(calls).toEqual([]);
+    expect((await publishReviewFromRun({ repoRoot: '/r', target, text: 'Recommendation: APPROVE', run })).status).toBe('invalid');
+    expect(calls).toEqual([]);
+  });
+
+  it('accepts checkout-relative findings with either separator without changing them', async () => {
+    for (const path of ['src/a.ts:12', 'src\\a.ts:12']) {
+      const mock = gh(HEAD);
+      expect((await publishReviewFromRun({ repoRoot: '/r', target, text: `${text}\nLocation: ${path}`, run: mock.run })).status).toBe('published');
+      expect(mock.posts[0]?.body).toContain(path);
+    }
+  });
+
+  it('revalidates one repair; unrepairable paths still block, stale and dedup gates remain', async () => {
+    const literal = `${text}\nWindows bash executable is hardcoded to \`'C:/Git/bash.exe'\`.`;
+    const bad = gh(HEAD);
+    expect((await publishReviewFromRun({ repoRoot: '/r', target, text: `${literal}\n/home/me/private`, run: bad.run })).status).toBe('invalid');
+    expect(bad.calls).toEqual([]);
+    for (const [head, comments, status] of [[BASE, '', 'stale'], [HEAD, prReviewMarker(25, HEAD), 'skipped-duplicate']] as const) {
+      const mock = gh(head, comments);
+      let repairs = 0;
+      expect((await publishReviewFromRun({ repoRoot: '/r', target, text: literal, run: mock.run, onFormatRepair: () => repairs++ })).status).toBe(status);
+      expect(repairs).toBe(1);
+      expect(mock.posts).toEqual([]);
+    }
+  });
+
   it('posts the full text (> 4000 chars) to the target repo, headed by the model the step ran', async () => {
     for (const model of ['google/gemini-3.8-flash-low', 'google/gemini-3.8-flash-medium']) {
       const { run, calls, posts } = gh(HEAD);

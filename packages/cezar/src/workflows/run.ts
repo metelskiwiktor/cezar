@@ -5199,6 +5199,7 @@ export class RunManager {
             repoRoot: this.repoRoot,
             target,
             text,
+            onFormatRepair: () => note('review preflight: omitted a local executable literal in one formatting pass; the full body passed revalidation'),
             ...(model ? { model } : {}),
             ...(runner ? { runner } : {}),
             dryRun: process.env.CEZ_PR_REVIEW_DRY_RUN === '1',

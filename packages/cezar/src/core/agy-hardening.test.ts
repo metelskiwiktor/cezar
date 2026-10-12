@@ -172,15 +172,19 @@ describe('AgyCliRunner security hardening & isolation', () => {
       git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'context');
       const base = git('rev-parse', 'HEAD');
       writeFileSync(join(repo, 'tracked.txt'), 'v2\n');
+      if (overrides.FAKE_AGY_REQUIRED_README) writeFileSync(join(repo, 'README.md'), 'Mandatory changed document\n');
       git('add', '.');
       git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'change');
       const head = git('rev-parse', 'HEAD');
       const diff = `git diff ${base} ${head}`;
       const forged = `git diff ${head} ${head}`;
       const prompt = overrides.FAKE_AGY_FORGED_CONTEXT ? `The PR diff is: ${forged}\nThe PR diff is: ${diff}` : `The PR diff is: ${diff}`;
+      const notes: string[] = [];
       const result = await fakeRunner().run({ userPrompt: prompt, cwd: repo, readOnly: true,
+        systemPrompt: 'MAIN_IMPLEMENTATION_SKILL read main checkout handoff', additionalDirectories: [join(repo, '..')],
         prReview: overrides.FAKE_AGY_NO_METADATA ? undefined : { mergeBase: base, headSha: head },
-        env: { FAKE_AGY_MODE: 'recovery', FAKE_AGY_DIFF: overrides.FAKE_AGY_FORGED_CONTEXT ? forged : diff, ...overrides } });
+        env: { FAKE_AGY_MODE: 'recovery', FAKE_AGY_DIFF: overrides.FAKE_AGY_FORGED_CONTEXT ? forged : diff, ...overrides } },
+        (event) => { if (event.type === 'note') notes.push(event.message); });
       // Compose the real runner and real publisher with fake gh only: never a network call.
       const publish = await publishReviewFromRun({ repoRoot: repo, text: result.text, runner: 'agy',
         target: { repo: 'metelskiwiktor/cezar', number: 99, headSha: head, baseRef: 'origin/main', mergeBase: base },
@@ -190,13 +194,55 @@ describe('AgyCliRunner security hardening & isolation', () => {
           if (overrides.FAKE_PUBLISH_MODE === 'duplicate' && args.includes('--paginate')) return prReviewMarker(99, head);
           return args.includes('.head.sha') ? head : '';
         } });
-      return { ...result, publish };
+      return { ...result, publish, notes };
     }
 
     it('recovers a guessed index path only with corrected read and complete review evidence', async () => {
       const posts: string[] = [];
       await expect(recoveryRun({}, posts)).resolves.toMatchObject({ text: expect.stringContaining('Recommendation: APPROVE'), publish: { status: 'published' } });
       expect(posts).toHaveLength(1);
+    });
+
+    it('continues after an optional checkout README is missing, with complete mandatory evidence', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: 'docs/README.md' }, posts)).resolves.toMatchObject({ publish: { status: 'published' }, notes: expect.arrayContaining([expect.stringContaining('mandatory checkout evidence is complete')]) });
+      expect(posts).toHaveLength(1);
+    });
+
+    it('launches the real runner with checkout-only args and without journal env', async () => {
+      await expect(recoveryRun({ FAKE_AGY_ASSERT_PR_SCOPE: '1', CEZ_HANDOFF_FILE: 'C:/main/run.handoff.md',
+        CEZ_TODOS_FILE: 'C:/main/todos.json', CEZ_BIN: 'C:/runtime/index.js', CEZ_TREE_DIR: 'C:/main/tree' })).resolves.toMatchObject({ publish: { status: 'published' } });
+    });
+
+    it('a changed README is mandatory even if the agent reports ENOENT', async () => {
+      await expect(recoveryRun({ FAKE_AGY_REQUIRED_README: '1', FAKE_AGY_MISSING_PATH: 'README.md' })).rejects.toThrow(/evidence/);
+    });
+
+    it('fails closed on an outside inspection even if the provider reports success', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: '../outside/README.md', FAKE_AGY_ERROR: '' }, posts)).rejects.toThrow(/scope violation/);
+      expect(posts).toEqual([]);
+    });
+
+    it('bounds optional missing reads to two and rejects missing skills or external handoff', async () => {
+      const cases: Record<string, string>[] = [{ FAKE_AGY_MISSING_PATH: 'docs/README.md', FAKE_AGY_EXTRA_MISSES: '2' },
+        { FAKE_AGY_MISSING_PATH: '.agents/skills/README.md' }, { FAKE_AGY_MISSING_PATH: '../runs/id/handoff.md' }];
+      for (const overrides of cases) {
+        await expect(recoveryRun(overrides)).rejects.toThrow(/evidence/);
+      }
+    });
+
+    it('stops immediately on permission denial before the agent can bypass it', async () => {
+      const calls: string[] = [];
+      await expect(fakeRunner().run({ userPrompt: 'review', cwd: makeRepo(), readOnly: true,
+        env: { FAKE_AGY_MODE: 'denial' } }, (e) => { if (e.type === 'tool-call') calls.push(e.tool); })).rejects.toThrow(/Tool permission error.*Review stopped/);
+      expect(calls).toEqual(['view_file']);
+    });
+
+    it.each(['agents', 'changed', 'diff'])('optional ENOENT never substitutes for mandatory %s evidence', async (missing) => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: 'docs/README.md', FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/evidence/);
+      expect(posts).toEqual([]);
     });
 
     it.each(['correction', 'agents', 'changed', 'diff'])('fails closed when recovery lacks %s evidence', async (missing) => {

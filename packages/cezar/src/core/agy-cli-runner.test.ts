@@ -14,6 +14,17 @@ import {
 } from './agy-ui-mapper.ts';
 
 describe('buildAgyArgs', () => {
+  it('isolates prepared PR review from implementation skills and external run context', () => {
+    const args = buildAgyArgs({ userPrompt: 'Review PR', cwd: process.cwd(), prReview: true,
+      systemPrompt: 'Read C:\\main\\.agents\\skills\\retro-apply\\SKILL.md and write handoff',
+      additionalDirectories: ['C:/main/.ai/cezar/runs'], readOnly: true });
+    expect(args).toContain('--disable-slash-commands');
+    expect(args.filter((arg) => arg === '--add-dir')).toHaveLength(1);
+    expect(args.at(-1)).not.toContain('C:\\main');
+    expect(args.at(-1)).toContain('Do not load implementation skills');
+    expect(args.at(-1)).toContain('Do not read or write run handoff');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+  });
   it('builds stream-json print mode args with default gemini-3.8-flash-high model', () => {
     const args = buildAgyArgs({ userPrompt: 'Hello Gemini' });
     expect(args).toEqual(
