@@ -267,6 +267,56 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(posts).toEqual([]);
     });
 
+    describe('late provider "malformed function call" after a finished review (live run 2bb661b9)', () => {
+      it('accepts the finished review only with complete evidence, runs no check unasked, and publishes once', async () => {
+        const posts: string[] = [];
+        const run = await recoveryRun({ FAKE_AGY_RESULT_ERROR: 'malformed' }, posts);
+        expect(run).toMatchObject({ text: expect.stringContaining('Recommendation: APPROVE'), publish: { status: 'published' } });
+        expect(run.notes.some((n) => /late provider function-call format error.*accepted/.test(n))).toBe(true);
+        // No automatic `just test` (or any check) when the reviewer did not request one.
+        expect(run.notes.some((n) => n.includes('Exit:'))).toBe(false);
+        expect(posts).toHaveLength(1);
+      });
+
+      it.each([['stale', 'stale'], ['duplicate', 'skipped-duplicate']])('a recovered review still honors the %s publication guard', async (mode, status) => {
+        const posts: string[] = [];
+        await expect(recoveryRun({ FAKE_AGY_RESULT_ERROR: 'malformed', FAKE_PUBLISH_MODE: mode! }, posts)).resolves.toMatchObject({ publish: { status } });
+        expect(posts).toEqual([]);
+      });
+
+      it.each<[string, Record<string, string>, RegExp]>([
+        ['missing AGENTS.md evidence', { FAKE_AGY_OMIT: 'agents' }, /recovery refused: review evidence is incomplete/],
+        ['missing pinned diff reads', { FAKE_AGY_OMIT: 'trusted-diff' }, /recovery refused: review evidence is incomplete/],
+        ['an unfinished tool call', { FAKE_AGY_PENDING: '1' }, /recovery refused: review evidence is incomplete/],
+        ['a failed tool call', { FAKE_AGY_ERROR: 'unknown read failure' }, /recovery refused|inspection/],
+        ['no verdict line', { FAKE_AGY_FINAL_TEXT: 'Findings: none.' }, /recovery refused: the review text has 0 Recommendation lines/],
+        ['two verdict lines', { FAKE_AGY_FINAL_TEXT: 'Recommendation: APPROVE\nRecommendation: CHANGES REQUESTED' }, /recovery refused: the review text has 2 Recommendation lines/],
+        ['agy continuing after the error', { FAKE_AGY_AFTER_ERROR: '1' }, /recovery refused: agy continued after the error/],
+      ])('fails closed without a POST on %s', async (_name, overrides, error) => {
+        const posts: string[] = [];
+        await expect(recoveryRun({ FAKE_AGY_RESULT_ERROR: 'malformed', ...overrides }, posts)).rejects.toThrow(error);
+        expect(posts).toEqual([]);
+      });
+
+      it('never recovers a permission denial, even with the format error after it', async () => {
+        const posts: string[] = [];
+        await expect(recoveryRun({ FAKE_AGY_RESULT_ERROR: 'malformed', FAKE_AGY_ERROR: 'permission denied' }, posts)).rejects.toThrow(/permission/i);
+        expect(posts).toEqual([]);
+      });
+
+      it('never recovers a generic provider error', async () => {
+        const posts: string[] = [];
+        await expect(recoveryRun({ FAKE_AGY_RESULT_ERROR: 'Internal provider error: quota exhausted' }, posts)).rejects.toThrow(/quota exhausted/);
+        expect(posts).toEqual([]);
+      });
+
+      it('rejects a check request mixed into the final review instead of ignoring it', async () => {
+        const posts: string[] = [];
+        await expect(recoveryRun({ FAKE_AGY_FINAL_TEXT: 'CEZ_REVIEW_CHECK {"args":["just","test"],"reason":"x"}\nRecommendation: APPROVE' }, posts)).rejects.toThrow(/Invalid review check request/);
+        expect(posts).toEqual([]);
+      });
+    });
+
     it.each(['tracked.txt', 'AGENTS.md', 'src/unrelated.ts', '../outside/index.ts'])('does not forgive missing required, arbitrary or external path %s', async (path) => {
       const posts: string[] = [];
       await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: path }, posts)).rejects.toThrow(/inspection/);

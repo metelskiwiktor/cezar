@@ -5,6 +5,14 @@ import { join } from 'node:path';
 
 const mode = process.env.FAKE_AGY_MODE ?? 'ok';
 const line = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
+// Live run 2bb661b9: the final review text, then agy's own result error.
+const MALFORMED = 'Your previous response contained an improperly formatted function call: Malformed function call: Failed to parse function call: Function call is empty - no input to parse.\nPlease retry with a properly formatted function call\nRetries remaining: 3';
+const resultError = () => {
+  const error = process.env.FAKE_AGY_RESULT_ERROR === 'malformed' ? MALFORMED : process.env.FAKE_AGY_RESULT_ERROR;
+  if (!error) return;
+  line({ event: 'result', result: { status: 'ERROR', error } });
+  if (process.env.FAKE_AGY_AFTER_ERROR) line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Retrying.' } });
+};
 const trustedDiffReads = (tool) => {
   const prompt = process.argv.at(-1);
   const file = prompt.match(/Cezar pinned diff file: (.+)\n/)?.[1];
@@ -50,7 +58,8 @@ switch (mode) {
     if (process.env.FAKE_AGY_OMIT !== 'diff' && !suppliedDiff) tool('run_command', { CommandLine: process.env.FAKE_AGY_DIFF });
     if (process.env.FAKE_AGY_MUTATE) tool('write_to_file', { TargetFile: 'tracked.txt' });
     if (process.env.FAKE_AGY_PENDING) line({ event: 'step_update', step_update: { step_index: ++id, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), 'tracked.txt') } } } });
-    line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none. Reviewed AGENTS.md, the full diff and changed files; no correctness or regression issues found.\nRecommendation: APPROVE' } });
+    line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: process.env.FAKE_AGY_FINAL_TEXT ?? 'Findings: none. Reviewed AGENTS.md, the full diff and changed files; no correctness or regression issues found.\nRecommendation: APPROVE' } });
+    resultError();
     break;
   }
   case 'denial':
@@ -84,10 +93,26 @@ switch (mode) {
       line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), name) } } } });
       line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name: 'view_file', tool_info: { result: '' } } });
     }
-    const response = prompt.includes('Cezar trusted check result:') && !process.env.FAKE_AGY_REPEAT
+    const final = prompt.includes('Cezar trusted check result:') && !process.env.FAKE_AGY_REPEAT;
+    const response = final
       ? `Findings: none. Full pinned diff and contracts inspected. Verification: ${JSON.parse(process.env.FAKE_AGY_CHECK).join(' ')} returned exit 0. Emulator skipped: no resource authorization.\nRecommendation: APPROVE`
       : `CEZ_REVIEW_CHECK ${JSON.stringify({ args: JSON.parse(process.env.FAKE_AGY_CHECK), reason: 'inspect affected contract' })}`;
+    if (!final && process.env.FAKE_AGY_MIDTURN) {
+      // Live run 2bb661b9: the request is one message mid-turn, as deltas; Gemini keeps
+      // inspecting and concludes without the result unless Cezar stops the turn.
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Planning verification.\n' } });
+      line({ event: 'step_update', step_update: { step_index: 90, state: 'ACTIVE', step_type: 'tool', tool_name: 'list_dir', tool_info: { parameters: { DirectoryPath: process.cwd() } } } });
+      line({ event: 'step_update', step_update: { step_index: 90, state: 'DONE', step_type: 'tool', tool_name: 'list_dir', tool_info: { result: '' } } });
+      for (const text_delta of [response.slice(0, 9), response.slice(9), '\n']) line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta } });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      line({ event: 'step_update', step_update: { step_index: 91, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), 'tracked.txt') } } } });
+      line({ event: 'step_update', step_update: { step_index: 91, state: 'DONE', step_type: 'tool', tool_name: 'view_file', tool_info: { result: '' } } });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'UNCHECKED: Executed checks: None.\nRecommendation: APPROVE' } });
+      resultError();
+      break;
+    }
     line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: response } });
+    if (final) resultError();
     break;
   }
   case 'write':
