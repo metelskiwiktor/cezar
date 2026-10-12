@@ -15,8 +15,14 @@ import { AgyReviewEvidence } from './agy-review-evidence.ts';
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   const hasJust = actual.spawnSync('just', ['--version'], { windowsHide: true }).status === 0;
-  return { ...actual, spawn: (file: string, args: string[], opts: import('node:child_process').SpawnOptionsWithoutStdio) =>
-    file === 'just' && !hasJust ? actual.spawn(process.execPath, [join(String(opts.cwd), 'check.cjs')], opts) : actual.spawn(file, args, opts) };
+  const hasRg = actual.spawnSync('rg', ['--version'], { windowsHide: true }).status === 0;
+  return { ...actual, spawn: (file: string, args: string[], opts: import('node:child_process').SpawnOptionsWithoutStdio) => {
+    if (file === 'just' && !hasJust) return actual.spawn(process.execPath, [join(String(opts.cwd), 'check.cjs')], opts);
+    if (file === 'rg' && !hasRg && opts.env?.PATH !== 'C:/cezar-no-such-bin') {
+      return actual.spawn(process.execPath, ['-e', 'process.stdout.write(require("fs").readFileSync(process.argv[1],"utf8"))', args.at(-1) ?? ''], opts);
+    }
+    return actual.spawn(file, args, opts);
+  } };
 });
 
 const repos: string[] = [];
