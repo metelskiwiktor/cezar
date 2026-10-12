@@ -14,6 +14,12 @@ import {
 } from './agy-ui-mapper.ts';
 
 describe('buildAgyArgs', () => {
+  it('does not require Windows exebox or unrestricted permissions for brokered PR review', () => {
+    const args = buildAgyArgs({ userPrompt: 'Review', prReview: true });
+    expect(args).not.toContain('--sandbox');
+    expect(args).not.toContain('--dangerously-skip-permissions');
+    expect(args.at(-1)).toContain('CEZ_REVIEW_CHECK');
+  });
   it('isolates prepared PR review from implementation skills and external run context', () => {
     const args = buildAgyArgs({ userPrompt: 'Review PR', cwd: process.cwd(), prReview: true,
       systemPrompt: 'Read C:\\main\\.agents\\skills\\retro-apply\\SKILL.md and write handoff',

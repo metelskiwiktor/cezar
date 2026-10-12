@@ -263,6 +263,7 @@ export const GH_CREDENTIAL_NAMES: ReadonlySet<string> = upperSet([
   'GH_PAT',
   'COPILOT_GITHUB_TOKEN',
 ]);
+const READ_ONLY_CREDENTIAL_NAMES = upperSet([...GH_CREDENTIAL_NAMES, 'EXPO_TOKEN', 'EAS_TOKEN', 'EAS_ACCESS_TOKEN']);
 
 /**
  * Claude Code can be pointed at Bedrock or Vertex instead of the Anthropic API
@@ -388,14 +389,14 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
   }
   // Per-run env last — it is cezar's own, never a host secret, and must win.
   for (const [name, value] of Object.entries(extra)) {
-    if (isReadOnly && GH_CREDENTIAL_NAMES.has(name.toUpperCase())) continue;
+    if (isReadOnly && READ_ONLY_CREDENTIAL_NAMES.has(name.toUpperCase())) continue;
     out[name] = value;
   }
 
   // Fail-closed verification: ensure no GitHub credentials leaked into read-only environment
   if (isReadOnly) {
     for (const key of Object.keys(out)) {
-      if (GH_CREDENTIAL_NAMES.has(key.toUpperCase())) {
+      if (READ_ONLY_CREDENTIAL_NAMES.has(key.toUpperCase())) {
         throw new Error(`Security violation: GitHub credential "${key}" leaked into read-only environment`);
       }
     }
@@ -406,7 +407,7 @@ export function buildChildEnv(opts: BuildChildEnvOptions): NodeJS.ProcessEnv {
   /** `name` is matched normalized; the caller keeps the original spelling. */
   function allow(name: string): boolean {
     const key = name.toUpperCase();
-    if (isReadOnly && GH_CREDENTIAL_NAMES.has(key)) return false;
+    if (isReadOnly && READ_ONLY_CREDENTIAL_NAMES.has(key)) return false;
     // cezar's own namespace (CEZ_DRY_RUN plumbing, mock hooks, run wiring).
     if (key.startsWith('CEZ_')) return true;
     // Backend auth + gh handoff + the cloud creds an active Bedrock/Vertex
