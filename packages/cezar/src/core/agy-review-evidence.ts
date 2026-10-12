@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentRunSpec, AgentToolCallRecord } from './agent-runner.ts';
 
 /** Narrow recovery for the observed module/index.ts -> module.ts discovery mistake.
@@ -15,6 +15,7 @@ export class AgyReviewEvidence {
   private readonly required = new Set<string>();
   private diffRead = false;
   private validContext = false;
+  private optionalMisses = 0;
   private readonly diff: string | undefined;
 
   constructor(private readonly spec: AgentRunSpec) {
@@ -43,7 +44,19 @@ export class AgyReviewEvidence {
     const absolute = resolve(path);
     const local = relative(this.spec.cwd, absolute);
     if (local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local)) return;
+    // A lexically local path can still traverse a checkout symlink/junction.
+    // Resolve its nearest existing ancestor, including for optional missing files.
+    let ancestor = absolute;
+    while (!existsSync(ancestor) && dirname(ancestor) !== ancestor) ancestor = dirname(ancestor);
+    try {
+      const actual = relative(realpathSync(this.spec.cwd), realpathSync(ancestor));
+      if (actual === '..' || actual.startsWith(`..${sep}`) || isAbsolute(actual)) return;
+    } catch { return; }
     return absolute;
+  }
+
+  allowsFileInspection(record: AgentToolCallRecord): boolean {
+    return record.name !== 'view_file' || this.file(record.input) !== undefined;
   }
 
   result(id: string, error: boolean, message: string): boolean {
@@ -63,6 +76,13 @@ export class AgyReviewEvidence {
     }
     if (!/\bENOENT\b|The system cannot find (?:the path|the file) specified\.|no such file or directory/i.test(message)) return false;
     if (existsSync(path) || this.required.has(path)) return false;
+    // Only a known optional checkout README, never an arbitrary missing source,
+    // skill or external handoff. Success still requires the diff + all required reads.
+    const local = relative(this.spec.cwd, path);
+    if (basename(path) === 'README.md' && (local === 'README.md' || local.startsWith(`docs${sep}`)) && this.optionalMisses < 2) {
+      this.optionalMisses++;
+      return true;
+    }
     const extension = extname(path);
     if (!['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(extension) || !path.endsWith(`${sep}index${extension}`)) return false;
     this.recoveries.add(`${dirname(path)}${extension}`);

@@ -107,8 +107,9 @@ const RECOMMENDATION_RE = /^\s*\**\s*Recommendation\s*:?\s*\**\s*:?\s*(APPROVE|C
 // Leading `/^.../` is a common regex literal in reviews, not a Unix path.
 // Require the first filesystem path-segment character to look like a path name;
 // continue rejecting real absolute paths, drive paths and file:// URLs.
-const LOCAL_PATH_RE = /file:\/|\b[a-z]:[\\/]|\\\\[^\s\\]+\\|(?:^|[\s`"'(<\[=])(?:~[\\/]|\/{1,2}[A-Za-z0-9._~-])/im;
+const LOCAL_PATH_RE = /file:\/|\b[a-z]:[\\/]|\\\\[^\s\\]+\\|(?:^|[\s`"'(<\[=])(?:\.\.[\\/]|~[\\/]|\/{1,2}[A-Za-z0-9._~-])/im;
 const LOCAL_PATH_REASON = 'the review contains a local path; use plain repo-relative path:line';
+const PRIVATE_OR_TRAVERSAL_PATH_RE = /(?:^|[\s`"'(<\[=\/\\])\.\.[\/\\]|\.ai[\/\\]cezar[\/\\](?:runs|worktrees|node-text)[\/\\]/im;
 
 /**
  * Whether an agent's final text is a complete review: non-blank, more than a bare
@@ -119,6 +120,7 @@ export function checkReviewText(text: string): { ok: true; recommendation: 'APPR
   const body = text.trim();
   if (!body) return { ok: false, reason: 'the review is empty' };
   if (LOCAL_PATH_RE.test(body)) return { ok: false, reason: LOCAL_PATH_REASON };
+  if (PRIVATE_OR_TRAVERSAL_PATH_RE.test(body)) return { ok: false, reason: 'the review contains an external or private run path; cite only PR checkout files' };
   const found = [...body.matchAll(RECOMMENDATION_RE)].map((m) => (m[1] as string).toUpperCase());
   if (found.length === 0) return { ok: false, reason: 'the review has no "Recommendation: APPROVE" or "Recommendation: CHANGES REQUESTED" line' };
   if (found.length > 1) return { ok: false, reason: `the review has ${found.length} recommendation lines (${found.join(', ')}); exactly one is required` };
@@ -133,6 +135,26 @@ const CEZ_MARKER_LINE_RE = /^[ \t]*CEZ:(?:DONE|MONITORING|ASK|VERDICT|PR|ISSUE|T
 
 export function stripCezMarkers(text: string): string {
   return text.replace(CEZ_MARKER_LINE_RE, '').trim();
+}
+
+/** One deterministic formatting pass, not an agent retry or a path-prefix rewrite.
+ * Only standalone inline executable literals in prose can be omitted. Finding
+ * locations, source paths, links, command snippets and ambiguous output fail closed.
+ * Always revalidate the ENTIRE resulting body with the publisher's own validator.
+ */
+export function preflightReviewText(text: string): { text: string; repaired: boolean } {
+  const original = stripCezMarkers(text);
+  if (checkReviewText(original).ok) return { text: original, repaired: false };
+  let fenced = false;
+  const repaired = original.split('\n').map((line) => {
+    if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; return line; }
+    if (fenced) return line;
+    if (/location\s*:|^\s*(?:[-*]\s*)?(?:\[P[0-3]\]|P[0-3])\b/i.test(line)) return line;
+    if (!/\b(?:executable|binary)\b.*\b(?:hardcoded|configured|set)\b/i.test(line)) return line;
+    return line.replace(/`(['"]?)([A-Za-z]:[\\/][^`\r\n]+?\.(?:exe|cmd|bat))\1`/g,
+      '`[local executable path omitted]`');
+  }).join('\n');
+  return checkReviewText(repaired).ok ? { text: repaired, repaired: repaired !== original } : { text: original, repaired: false };
 }
 
 /** The comment's header — the model is what the review step actually ran with. */
@@ -168,6 +190,7 @@ export async function publishPrReviewComment(input: PublishPrReviewInput): Promi
   const body = input.body.trim();
   if (!body) throw new Error('refusing to publish an empty review');
   if (LOCAL_PATH_RE.test(body)) throw new Error(`refusing to publish: ${LOCAL_PATH_REASON}`);
+  if (PRIVATE_OR_TRAVERSAL_PATH_RE.test(body)) throw new Error('refusing to publish an external or private run path');
   const marker = prReviewMarker(input.number, input.headSha);
   const existing = await run(
     'gh',
@@ -205,6 +228,8 @@ export interface PublishReviewRunInput {
   runner?: string;
   dryRun?: boolean;
   run?: CommandRunner;
+  /** Safe feedback without echoing the rejected local path. */
+  onFormatRepair?: () => void;
 }
 
 export type PublishReviewRunResult =
@@ -221,9 +246,13 @@ export async function publishReviewFromRun(input: PublishReviewRunInput): Promis
   const targetIssue = prReviewTargetIssue(input.target);
   if (targetIssue) return { status: 'invalid', reason: targetIssue };
   const target = input.target as PrReviewTarget;
-  const text = stripCezMarkers(input.text);
-  const review = checkReviewText(text);
+  const { text, repaired } = preflightReviewText(input.text);
+  const assessment = checkReviewText(text);
+  if (!assessment.ok) return { status: 'invalid', reason: assessment.reason };
+  const body = `${prReviewHeader(input.model, input.runner)}\n\n${text}`;
+  const review = checkReviewText(body);
   if (!review.ok) return { status: 'invalid', reason: review.reason };
+  if (repaired) input.onFormatRepair?.();
   const run = input.run ?? defaultCommandRunner;
   const remoteHead = await remotePrHead(input.repoRoot, target.repo, target.number, run);
   if (remoteHead !== target.headSha) return { status: 'stale', remoteHead };
@@ -232,7 +261,7 @@ export async function publishReviewFromRun(input: PublishReviewRunInput): Promis
     repo: target.repo,
     number: target.number,
     headSha: target.headSha,
-    body: `${prReviewHeader(input.model, input.runner)}\n\n${text}`,
+    body,
     run,
     ...(input.dryRun ? { dryRun: true } : {}),
   });
