@@ -26,7 +26,7 @@ import { disclaimedCommand } from './disclaim-spawn.ts';
 import { readNdjson } from './ndjson.ts';
 import { resolveAgyBin } from './agy-bin.ts';
 import { AgyReviewEvidence } from './agy-review-evidence.ts';
-import { CHECK_MARKER, executeReviewCheck, parseReviewCheck, prepareReviewDiff, reviewSourceFingerprint } from './review-checks.ts';
+import { CHECK_MARKER, executeReviewCheck, parseReviewCheck, prepareReviewDiff, reviewSourceFingerprint, type ReviewCheck } from './review-checks.ts';
 import { killAgyTree } from './kill-process-tree.ts';
 export { killAgyTree } from './kill-process-tree.ts';
 import {
@@ -75,7 +75,7 @@ export const PR_REVIEW_SCOPE_PROMPT = [
   'Do not load implementation skills, retrospective skills, or global skills. Repository instructions about implementation, dispatch, committing, publication, and handoff do not apply to this read-only review.',
   'Do not read or write run handoff, task journals or cockpit state; they are not review evidence. Do not guess their paths.',
   'Cezar supplies a checkout-local complete pinned diff file. Read ALL its lines using view_file with explicit StartLine and EndLine ranges (at most 500 lines per read). Read AGENTS.md and inspect relevant checkout files with view_file, grep_search, list_dir. Do not mechanically view every generated/binary file; account for the full diff and inspect affected contracts. Do not use run_command or any other terminal tool: plan-mode command approvals are unavailable headlessly on Windows.',
-  'To request a justified check, end the turn with ONLY one line: CEZ_REVIEW_CHECK {"args":["just","test","file","src/example.test.ts"],"reason":"affected contract"}. Cezar executes this without a shell and returns the result in another turn. Allowed: git diff [--stat] BASE_SHA HEAD_SHA; git log; git grep PATTERN LOCAL_PATH; rg PATTERN LOCAL_PATH; just check; just test; just test file LOCAL_PATH... . No arbitrary shell, flags, external paths, installs or publication. At most 6 requests and 5 minutes per command within the run timeout. UI/emulator commands require separate resource authorization and are currently skipped. Never request all tests or an emulator by default.',
+  'To request a justified check, send a message whose last line is ONLY: CEZ_REVIEW_CHECK {"args":["just","test","file","src/example.test.ts"],"reason":"affected contract"}. Cezar stops the turn there, executes it without a shell and returns the result in another turn; do not continue the review in the same turn. Allowed: git diff [--stat] BASE_SHA HEAD_SHA; git log; git grep PATTERN LOCAL_PATH; rg PATTERN LOCAL_PATH; just check; just test; just test file LOCAL_PATH... . No arbitrary shell, flags, external paths, installs or publication. At most 6 requests and 5 minutes per command within the run timeout. UI/emulator commands require separate resource authorization and are currently skipped. Never request all tests or an emulator by default.',
   'Choose proportionate checks under checkout AGENTS.md and time budgets. Report commands, results and duration, and checks skipped with reasons. Tests execute repository code as the owner, without an OS sandbox. Only new coverage/, .cache/ and .cezar-review-tmp/ artifacts are cleaned by Cezar; existing files and source changes fail integrity. Permission denial is fatal: stop, never retry through another tool or executor.',
   'For shared/symlinked node_modules, use a Cezar rg check on a node_modules/package/... path, never native file tools. Only this Git repository\'s main dependency cache and versions matching the checkout package-lock.json are admitted; arbitrary external paths and nested links to host files are rejected. No external --add-dir is granted.',
   'Conclude only after analysis and completed check results, with exactly one Recommendation: APPROVE or Recommendation: CHANGES REQUESTED line. Findings must use plain repo-relative path:line and P1/P2/P3 priorities. Describe local executable literals without reproducing absolute paths. No marketing text.',
@@ -96,6 +96,34 @@ export function isPermissionError(result: string): boolean {
     lower.includes('permission denied') ||
     /\b(eacces|eperm)\b|access (?:is )?denied|operation not permitted/.test(lower)
   );
+}
+
+/** Agy's own report that the MODEL produced an unparsable (e.g. empty) function call.
+ * It is a provider format error, not a tool, permission or timeout failure. */
+export function isProviderFormatError(message: string): boolean {
+  return /improperly formatted function call|Malformed function call/i.test(message);
+}
+
+/** A trusted check request inside ONE agent message. Gemini may send it mid-turn and
+ * keep working (agy does not end the turn on text), so it is recognized per message.
+ * Only the last line may be the request; a marker anywhere else, or beside a verdict,
+ * is an invalid request (fail closed), never a silently ignored note. */
+export function parseReviewCheckMessage(text: string): ReviewCheck | undefined {
+  const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
+  const markers = lines.filter((line) => line.startsWith(CHECK_MARKER.trim()));
+  if (markers.length === 0) return;
+  if (markers.length !== 1 || !lines.at(-1)!.startsWith(CHECK_MARKER) || lines.some((line) => /\bRecommendation:/i.test(line))) {
+    throw new Error('Invalid review check request');
+  }
+  return parseReviewCheck(lines.at(-1)!);
+}
+
+/** Why a finished review text must not be accepted as the final verdict, if it must not. */
+export function reviewVerdictRefusal(text: string): string | undefined {
+  const lines = text.split('\n').filter((line) => /\bRecommendation:/i.test(line));
+  if (lines.length !== 1) return `the review text has ${lines.length} Recommendation lines, expected exactly one`;
+  if (!/Recommendation:\W*(APPROVE|CHANGES REQUESTED)\b/i.test(lines[0]!)) return 'the Recommendation line is neither APPROVE nor CHANGES REQUESTED';
+  return undefined;
 }
 
 export interface AgyCliRunnerOptions {
@@ -233,6 +261,7 @@ export class AgyCliRunner implements AgentRunner {
     let inspectionCalls = 0;
     let inspectionErrors = 0;
     let recoverableErrors = 0;
+    let toolErrors = 0;
     const startedAt = Date.now();
     let checkRequests = 0;
     let turnText = '';
@@ -266,7 +295,8 @@ export class AgyCliRunner implements AgentRunner {
       if (killTimer) clearTimeout(killTimer);
     };
 
-    const runTurn = async (userPrompt: string, systemPrompt?: string, resumeSessionId?: string): Promise<void> => {
+    /** Resolves to the trusted check the reviewer requested in this turn, if any. */
+    const runTurn = async (userPrompt: string, systemPrompt?: string, resumeSessionId?: string): Promise<ReviewCheck | undefined> => {
       const tokensBeforeTurn = tokensUsed;
       turnText = '';
       const args = buildAgyArgs({
@@ -334,6 +364,15 @@ export class AgyCliRunner implements AgentRunner {
 
         let permissionDeniedError: string | null = null;
         const callToolNames = new Map<string, string>();
+        // A check request ends the turn HERE: everything agy streams after it belongs to a
+        // review that has not seen the result yet (live run 2bb661b9 approved "Executed
+        // checks: None" four minutes after asking for one).
+        let requestedCheck: ReviewCheck | undefined;
+        let checkStop = false;
+        // Agy's late "malformed function call" is held back, not forwarded as a fatal error,
+        // until the turn can be judged: see the recovery gate after the exit.
+        let formatError: string | undefined;
+        let afterFormatError = false;
 
         // agy streams text as deltas, but a `text` event is one whole message to the engine
         // (it joins them with newlines): buffer consecutive deltas and forward them as one
@@ -343,10 +382,31 @@ export class AgyCliRunner implements AgentRunner {
           if (!pendingText) return;
           const text = pendingText;
           pendingText = '';
-          if (spec.prReview && text.split('\n').some((line) => line.trimStart().startsWith(CHECK_MARKER))) onEvent?.({ type: 'note', message: `Reviewer requested a trusted check: ${text}` });
-          else onEvent?.({ type: 'text', text });
+          if (spec.prReview && text.split('\n').some((line) => line.trimStart().startsWith(CHECK_MARKER))) {
+            onEvent?.({ type: 'note', message: `Reviewer requested a trusted check: ${text}` });
+            try {
+              requestedCheck = parseReviewCheckMessage(text);
+            } catch (err) {
+              terminatedByCezar = true;
+              resultError ??= `${err instanceof Error ? err.message : String(err)}: the request must be the last line of its message, without a verdict`;
+            }
+            checkStop = true;
+            killAgyTree(child);
+            const hard = setTimeout(() => killAgyTree(child, 'SIGKILL'), AGY_KILL_GRACE_MS);
+            hard.unref?.();
+            child.once('exit', () => clearTimeout(hard));
+          } else onEvent?.({ type: 'text', text });
         };
         const emit = (event: AgentEvent) => {
+          if (checkStop) {
+            // The rest of the turn is discarded, but a denial or a real provider error in
+            // it still fails the review. A format error there judges no review text: the
+            // turn after the check result does.
+            if (event.type === 'tool-result' && event.isError && isPermissionError(event.result)) permissionDeniedError ??= event.result;
+            if (event.type === 'error' && !isProviderFormatError(event.message)) resultError ??= event.message;
+            return;
+          }
+          if (formatError && event.type !== 'token-usage' && event.type !== 'turn-end' && event.type !== 'session') afterFormatError = true;
           if (event.type === 'text') {
             turnText += event.text;
             textChunks.push(event.text);
@@ -354,6 +414,7 @@ export class AgyCliRunner implements AgentRunner {
             return;
           }
           flushText();
+          if (checkStop) return;
           if (event.type === 'tool-call') {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
@@ -380,6 +441,7 @@ export class AgyCliRunner implements AgentRunner {
             }
           }
           if (event.type === 'tool-result') {
+            if (event.isError) toolErrors++;
             if (evidence.result(event.toolCallId, event.isError === true, event.result)) recoverableErrors++;
             const toolName = callToolNames.get(event.toolCallId)?.toLowerCase() ?? '';
             if (READ_INSPECTION_TOOL_NAMES.has(toolName)) {
@@ -404,7 +466,13 @@ export class AgyCliRunner implements AgentRunner {
             onEvent?.({ ...event, tokensUsed });
             return;
           }
-          if (event.type === 'error') resultError = event.message;
+          if (event.type === 'error' && spec.prReview && !formatError && !resultError && isProviderFormatError(event.message)) {
+            formatError = event.message;
+            return;
+          }
+          // The first fatal reason wins: a provider error streamed after Cezar stopped the
+          // turn (e.g. on a permission denial) must not replace the reason it stopped.
+          if (event.type === 'error') resultError ??= event.message;
           onEvent?.(event);
         };
 
@@ -474,13 +542,45 @@ export class AgyCliRunner implements AgentRunner {
         throw new Error(msg);
       }
 
-      if (readOnly && ((inspectionErrors > 0 && (inspectionErrors !== recoverableErrors || !evidence.complete())) ||
-          (evidence.hasContext && !evidence.complete()))) {
+      if (formatError) {
+        // A recognized late provider FORMAT error after a finished review text. Accept the
+        // text only when it would have passed as a clean final turn: the same evidence the
+        // normal path requires, no other error, no pending check. Publication then runs its
+        // own validation (paths, HEAD gate, dedup) exactly as for any review.
+        const refusal = checkStop ? 'a trusted check request is pending'
+          : afterFormatError ? 'agy continued after the error'
+          : resultError ? `another provider error: ${resultError}`
+          : isSignalTerminationExit(exitCode) ? `agy was terminated (code ${exitCode})`
+          : toolErrors !== recoverableErrors ? 'a tool call failed'
+          : !evidence.complete() ? 'review evidence is incomplete (pinned diff, AGENTS.md, changed files, trusted check results, finished tool calls)'
+          : reviewVerdictRefusal(turnText);
+        if (refusal) {
+          const msg = `Agy provider function-call format error after the review text; recovery refused: ${refusal}. Nothing is published; the review text is kept in the run log for manual review. Provider error: ${formatError}`;
+          onEvent?.({ type: 'error', message: msg });
+          throw new Error(msg);
+        }
+        onEvent?.({ type: 'note', message: `Agy reported a late provider function-call format error after a complete review; accepted the finished review only because the pinned diff, mandatory evidence and every trusted check result were verified. Provider error: ${formatError.split('\n')[0]}` });
+        return undefined;
+      }
+
+      // A turn stopped for a trusted check is not a conclusion: its evidence may still be
+      // incomplete, and the final turn must complete it. A failed read never passes.
+      if (readOnly && ((inspectionErrors > 0 && (inspectionErrors !== recoverableErrors || (!checkStop && !evidence.complete()))) ||
+          (!checkStop && evidence.hasContext && !evidence.complete()))) {
         const msg = `Tool execution failure: ${inspectionErrors} file inspection attempt(s) failed out of ${inspectionCalls}. Cannot complete review without unhindered file access and complete review evidence.`;
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
       }
       if (recoverableErrors > 0 && evidence.complete()) onEvent?.({ type: 'note', message: `Review continued after ${recoverableErrors} bounded missing optional/discovery read(s); mandatory checkout evidence is complete.` });
+
+      if (checkStop) {
+        // Cezar killed agy at the request, so its exit code says nothing. The engine
+        // still needs the turn boundary it would have seen, so the text streamed before
+        // the request never joins the final review.
+        if (resultError) throw new Error(resultError);
+        onEvent?.({ type: 'turn-end' });
+        return requestedCheck;
+      }
 
       if (exitCode !== 0 && exitCode !== null) {
         const stderr = stderrChunks.join('').trim();
@@ -491,6 +591,9 @@ export class AgyCliRunner implements AgentRunner {
       }
 
       if (resultError) throw new Error(resultError);
+      // Fallback for a request split across stream events: a turn that is ONLY a request
+      // is still one; a request mixed with other text is invalid (fail closed).
+      return spec.prReview ? parseReviewCheck(turnText) : undefined;
     } finally {
       clearTimers();
       if (isolationCleanup) {
@@ -514,8 +617,7 @@ export class AgyCliRunner implements AgentRunner {
           const textStart = textChunks.length;
           // Never inherit implementation history. Resume only the conversation
           // the CLI opened for THIS review, so findings survive check rounds.
-          await runTurn(spec.userPrompt, spec.systemPrompt, spec.prReview ? reviewSessionId : spec.sessionId);
-          const check = spec.prReview ? parseReviewCheck(turnText) : undefined;
+          const check = await runTurn(spec.userPrompt, spec.systemPrompt, spec.prReview ? reviewSessionId : spec.sessionId);
           if (!check) break;
           if (terminatedByCezar) throw new Error('PR review cancelled; no check may start');
           const reviewCwd = spec.cwd;
@@ -536,7 +638,7 @@ export class AgyCliRunner implements AgentRunner {
           onEvent?.({ type: 'note', message: checkResult });
           const resultFile = reviewDiff.resultFile(checkRequests, checkResult);
           evidence.requireCheckResult(resultFile.path, resultFile.lines);
-          reviewTranscript += `\nPrevious check request: ${turnText}\nCezar trusted check result: read ALL lines of the file before concluding.\nCezar check result file: ${resultFile.path}\nResult lines: ${resultFile.lines}\n`;
+          reviewTranscript += `\nPrevious check request: ${CHECK_MARKER}${JSON.stringify(check)}\nCezar trusted check result: read ALL lines of the file before concluding.\nCezar check result file: ${resultFile.path}\nResult lines: ${resultFile.lines}\n`;
           textChunks.splice(textStart);
         } while (true);
       } finally {

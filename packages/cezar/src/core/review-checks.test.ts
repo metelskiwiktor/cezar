@@ -80,6 +80,44 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     } })).rejects.toThrow(/request budget exceeded/);
   }, 20_000);
 
+  it('executes a mid-turn check request exactly once, stops that turn and concludes only after the result (live run 2bb661b9)', async () => {
+    const r = repo('console.log("targeted contract passed")');
+    const notes: string[] = [];
+    const texts: string[] = [];
+    const order: string[] = [];
+    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+      FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECK: JSON.stringify(['just', 'test', 'file', 'tracked.txt']), FAKE_AGY_MIDTURN: '1',
+    } }, (e) => {
+      if (e.type === 'note') notes.push(e.message);
+      if (e.type === 'text') { texts.push(e.text); order.push('text'); }
+      if (e.type === 'turn-end') order.push('turn-end');
+    });
+    expect(notes.filter((n) => n.includes('Exit: 0; duration:'))).toHaveLength(1);
+    expect(notes.join('\n')).toContain('targeted contract passed');
+    expect(result.text).toContain('Recommendation: APPROVE');
+    expect(result.text).toContain('just test file tracked.txt returned exit 0');
+    expect(result.text).not.toMatch(/UNCHECKED|Planning verification|CEZ_REVIEW_CHECK/);
+    expect(texts.join('\n')).not.toContain('UNCHECKED');
+    // The engine sees the stopped turn end before the final review begins.
+    expect(order).toEqual(['text', 'turn-end', 'text']);
+  });
+
+  it('does not accept a late format error when the requested check result was never read', async () => {
+    const r = repo();
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+      FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECK: JSON.stringify(['git', 'log']), FAKE_AGY_OMIT: 'check-result', FAKE_AGY_RESULT_ERROR: 'malformed',
+    } })).rejects.toThrow(/recovery refused: review evidence is incomplete.*nothing is published|recovery refused: review evidence is incomplete/i);
+  });
+
+  it('accepts a late format error after the requested check ran and its result was read', async () => {
+    const r = repo();
+    const notes: string[] = [];
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+      FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECK: JSON.stringify(['git', 'log']), FAKE_AGY_MIDTURN: '1', FAKE_AGY_RESULT_ERROR: 'malformed',
+    } }, (e) => { if (e.type === 'note') notes.push(e.message); })).resolves.toMatchObject({ text: expect.stringContaining('Recommendation: APPROVE') });
+    expect(notes.filter((n) => n.includes('Exit: 0; duration:'))).toHaveLength(1);
+  });
+
   it('does not approve without reading trusted check results', async () => {
     const r = repo();
     await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
