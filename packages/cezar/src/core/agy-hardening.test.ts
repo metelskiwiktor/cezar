@@ -209,6 +209,12 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(posts).toHaveLength(1);
     });
 
+    it('continues after an optional checkout ADR document is missing, with complete mandatory evidence (run 2ac98267)', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: 'docs/adr/0018-shared-preview-ota-state.md' }, posts)).resolves.toMatchObject({ publish: { status: 'published' } });
+      expect(posts).toHaveLength(1);
+    });
+
     it('launches the real runner with checkout-only args and without journal env', async () => {
       await expect(recoveryRun({ FAKE_AGY_ASSERT_PR_SCOPE: '1', CEZ_HANDOFF_FILE: 'C:/main/run.handoff.md',
         CEZ_TODOS_FILE: 'C:/main/todos.json', CEZ_BIN: 'C:/runtime/index.js', CEZ_TREE_DIR: 'C:/main/tree' })).resolves.toMatchObject({ publish: { status: 'published' } });

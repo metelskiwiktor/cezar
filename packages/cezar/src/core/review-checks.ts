@@ -3,6 +3,7 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { killAgyTree } from './kill-process-tree.ts';
 import { getWorkspaceGitSnapshot, verifyWorkspaceIntegrity } from './read-only-sandbox.ts';
@@ -35,6 +36,40 @@ export function pinnedReviewDiff(cwd: string, base: string, head: string): strin
   return git(cwd, ['diff', '--no-ext-diff', '--no-textconv', base, head]);
 }
 
+export interface ReviewDiffPart {
+  file: string;
+  lines: number;
+}
+
+export const CHUNK_MAX_LINES = 500;
+export const CHUNK_MAX_BYTES = 32_000;
+
+export function splitTextChunks(text: string, maxLines = CHUNK_MAX_LINES, maxBytes = CHUNK_MAX_BYTES): string[] {
+  const lines = text.split('\n');
+  if (lines.length <= maxLines && Buffer.byteLength(text, 'utf8') <= maxBytes) {
+    return [text];
+  }
+  const chunks: string[] = [];
+  let current: string[] = [];
+  let currentBytes = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const lineBytes = Buffer.byteLength(line, 'utf8') + 1;
+    if (current.length > 0 && (current.length >= maxLines || currentBytes + lineBytes > maxBytes)) {
+      chunks.push(current.join('\n') + '\n');
+      current = [line];
+      currentBytes = lineBytes;
+    } else {
+      current.push(line);
+      currentBytes += lineBytes;
+    }
+  }
+  if (current.length > 0) {
+    chunks.push(current.join('\n'));
+  }
+  return chunks;
+}
+
 /** A checkout-local file avoids the Windows argv limit. It is machine-owned,
  * never overwrites a repository file, and is removed on every session exit. */
 export function prepareReviewDiff(cwd: string, base: string, head: string) {
@@ -47,22 +82,51 @@ export function prepareReviewDiff(cwd: string, base: string, head: string) {
   const rootActual = realpathSync(root);
   const dirActual = realpathSync(dir);
   const file = join(dir, 'full.diff');
-  const runtimeDir = join(dir, 'runtime');
-  mkdirSync(runtimeDir);
+  // Runtime dir is placed in OS tmpdir so child tests never inherit .ai/cezar/worktrees in TMPDIR:
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'cez-check-rt-'));
+  const runtimeDirActual = realpathSync(runtimeDir);
   try { writeFileSync(file, diff, { encoding: 'utf8', flag: 'wx' }); }
-  catch (err) { rmSync(dir, { recursive: true, force: true }); if (created) rmdirSync(root); throw err; }
-  const lines = (text: string) => Math.max(1, text.split('\n').length - (text.endsWith('\n') ? 1 : 0));
-  return { file, runtimeDir, lines: lines(diff), resultFile: (n: number, result: string) => {
-    if (realpathSync(dir) !== dirActual) throw new Error('Review artifact directory changed');
-    const path = join(dir, `check-${n}.txt`);
-    writeFileSync(path, result, { encoding: 'utf8', flag: 'wx' });
-    return { path, lines: lines(result) };
-  }, cleanup: () => {
-    // Fixed machine-created directory; never traverse user-supplied cleanup paths.
-    if (realpathSync(root) !== rootActual || lstatSync(dir).isSymbolicLink() || realpathSync(dir) !== dirActual) throw new Error('Unsafe review artifact cleanup refused');
+  catch (err) {
+    try { rmSync(runtimeDir, { recursive: true, force: true }); } catch { /* ignore */ }
     rmSync(dir, { recursive: true, force: true });
-    if (created) { try { rmdirSync(root); } catch { /* leave other artifacts for diagnosis */ } }
-  } };
+    if (created) rmdirSync(root);
+    throw err;
+  }
+  const lines = (text: string) => Math.max(1, text.split('\n').length - (text.endsWith('\n') ? 1 : 0));
+  const totalLines = lines(diff);
+  const chunks = splitTextChunks(diff, CHUNK_MAX_LINES, CHUNK_MAX_BYTES);
+  const parts: ReviewDiffPart[] = [];
+  if (chunks.length <= 1) {
+    parts.push({ file, lines: totalLines });
+  } else {
+    for (let i = 0; i < chunks.length; i++) {
+      const partFile = join(dir, `diff-part-${i + 1}.diff`);
+      writeFileSync(partFile, chunks[i]!, { encoding: 'utf8', flag: 'wx' });
+      parts.push({ file: partFile, lines: lines(chunks[i]!) });
+    }
+  }
+  return {
+    file,
+    parts,
+    runtimeDir,
+    lines: totalLines,
+    resultFile: (n: number, result: string) => {
+      if (realpathSync(dir) !== dirActual) throw new Error('Review artifact directory changed');
+      const path = join(dir, `check-${n}.txt`);
+      writeFileSync(path, result, { encoding: 'utf8', flag: 'wx' });
+      return { path, lines: lines(result) };
+    },
+    cleanup: () => {
+      try {
+        if (existsSync(runtimeDir) && realpathSync(runtimeDir) === runtimeDirActual) {
+          rmSync(runtimeDir, { recursive: true, force: true });
+        }
+      } catch { /* best-effort cleanup */ }
+      if (realpathSync(root) !== rootActual || lstatSync(dir).isSymbolicLink() || realpathSync(dir) !== dirActual) throw new Error('Unsafe review artifact cleanup refused');
+      rmSync(dir, { recursive: true, force: true });
+      if (created) { try { rmdirSync(root); } catch { /* leave other artifacts for diagnosis */ } }
+    },
+  };
 }
 
 function localPath(cwd: string, path: string, allowSharedDependency = false): boolean {
@@ -113,8 +177,92 @@ export function reviewCommand(cwd: string, args: string[]): [string, string[]] {
   const path = rest[0];
   if (bin === 'git' && action === 'diff' && rest.length === 2 && rest.every((v) => /^[a-f0-9]{40}$/.test(v))) return ['git', ['diff', '--no-ext-diff', '--no-textconv', ...rest]];
   if (bin === 'git' && action === 'diff' && rest[0] === '--stat' && rest.length === 3 && rest.slice(1).every((v) => /^[a-f0-9]{40}$/.test(v))) return ['git', ['diff', '--no-ext-diff', '--no-textconv', '--stat', ...rest.slice(1)]];
-  if (bin === 'git' && action === 'log' && rest.length === 0) return ['git', ['log', '--oneline', '-20']];
-  if (bin === 'git' && action === 'grep' && rest.length === 2 && rest[0] !== undefined && rest[1] && localPath(cwd, rest[1])) return ['git', ['grep', '-n', '-e', rest[0], '--', rest[1]]];
+  if (bin === 'git' && action === 'log') {
+    let limit = 20;
+    let oneline = rest.length === 0;
+    let revRange: string | undefined;
+    const grepArgs: string[] = [];
+    const extraFlags: string[] = [];
+    for (let i = 0; i < rest.length; i++) {
+      const arg = rest[i];
+      if (arg === undefined) continue;
+      if (arg === '--oneline') {
+        oneline = true;
+        continue;
+      }
+      const next = rest[i + 1];
+      if (arg === '-n' && typeof next === 'string' && /^\d+$/.test(next)) {
+        limit = Math.min(100, Math.max(1, parseInt(next, 10)));
+        i++;
+        continue;
+      }
+      if (typeof arg === 'string' && /^-\d+$/.test(arg)) {
+        limit = Math.min(100, Math.max(1, parseInt(arg.slice(1), 10)));
+        continue;
+      }
+      if (arg.startsWith('--grep=')) {
+        grepArgs.push(arg);
+        continue;
+      }
+      if (arg === '--grep' && typeof next === 'string') {
+        grepArgs.push(`--grep=${next}`);
+        i++;
+        continue;
+      }
+      if (arg === '-i' || arg === '--stat' || arg === '--name-only' || arg === '--name-status' || arg === '--reverse') {
+        extraFlags.push(arg);
+        continue;
+      }
+      if (typeof arg === 'string' && !arg.startsWith('-') && /^[a-zA-Z0-9_\-./]+(\.\.[a-zA-Z0-9_\-./]+)?$/.test(arg)) {
+        revRange = arg;
+        continue;
+      }
+      throw new Error('Review command rejected: use git log [--oneline] [-n <N>] [--grep=...] [<commit>|<base>..<head>]');
+    }
+    const logArgs = ['log'];
+    if (oneline) logArgs.push('--oneline');
+    logArgs.push(`-${limit}`, ...grepArgs, ...extraFlags);
+    if (revRange) logArgs.push(revRange);
+    return ['git', logArgs];
+  }
+  if (bin === 'git' && action === 'grep') {
+    const flags: string[] = ['-n'];
+    let pattern: string | undefined;
+    let targetPath: string | undefined;
+    for (let i = 0; i < rest.length; i++) {
+      const tok = rest[i];
+      if (tok === undefined) continue;
+      if (tok === '--') {
+        if (i + 1 < rest.length) {
+          targetPath = rest[i + 1];
+          break;
+        }
+        continue;
+      }
+      if (tok === '-n' || tok === '-i' || tok === '-F' || tok === '-E' || tok === '-w') {
+        if (!flags.includes(tok)) flags.push(tok);
+        continue;
+      }
+      if (tok === '-e' && i + 1 < rest.length) {
+        pattern = rest[++i];
+        continue;
+      }
+      if (!pattern && !tok.startsWith('-')) {
+        pattern = tok;
+        continue;
+      }
+      if (pattern && !tok.startsWith('-')) {
+        targetPath = tok;
+        continue;
+      }
+      throw new Error('Review command rejected: use git grep [-n] [-i] [-F] [-E] [-w] pattern [local-path]');
+    }
+    if (!pattern) throw new Error('Review command rejected: git grep requires a pattern');
+    if (targetPath && !localPath(cwd, targetPath)) throw new Error('Review command rejected: git grep path must be local');
+    const outArgs = ['grep', ...flags, '-e', pattern];
+    if (targetPath) outArgs.push('--', targetPath);
+    return ['git', outArgs];
+  }
   if (bin === 'rg' && action && !action.startsWith('-') && !/[\r\n]/.test(action) && rest.length === 1 && path && localPath(cwd, path, true)) return ['rg', ['-n', '--', action, path]];
   if (bin === 'just' && ((action === 'check' && rest.length === 0) || (action === 'test' && rest.length === 0) ||
       (action === 'test' && rest[0] === 'file' && rest.length > 1 && rest.slice(1).every((p) => localPath(cwd, p))))) return ['just', [action, ...rest]];
@@ -126,8 +274,8 @@ export function reviewCommand(cwd: string, args: string[]): [string, string[]] {
 // files, tracked files (even ignored), source changes and symlinks fail closed.
 const ARTIFACT = /^(?:coverage|\.cache|\.cezar-review-tmp)\//;
 function files(cwd: string): Map<string, string> {
-  const paths = git(cwd, ['ls-files', '-z', '--cached', '--others', '--exclude-standard']).split('\0').filter(Boolean);
-  const ignored = git(cwd, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', '.', ':(exclude)node_modules', ':(exclude)**/node_modules/**']).split('\0').filter(Boolean);
+  const paths = git(cwd, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.', ':(exclude).cezar-review-tmp', ':(exclude).cezar-review-tmp/**']).split('\0').filter(Boolean);
+  const ignored = git(cwd, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', '.', ':(exclude)node_modules', ':(exclude)**/node_modules/**', ':(exclude).cezar-review-tmp', ':(exclude).cezar-review-tmp/**']).split('\0').filter(Boolean);
   return new Map([...new Set([...paths, ...ignored])].map((p) => {
     const abs = resolve(cwd, p);
     return [p, !existsSync(abs) ? 'missing' : lstatSync(abs).isSymbolicLink() ? 'symlink' : createHash('sha256').update(readFileSync(abs)).digest('hex')];

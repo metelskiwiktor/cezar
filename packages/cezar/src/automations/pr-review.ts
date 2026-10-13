@@ -104,12 +104,11 @@ const RECOMMENDATION_RE = /^\s*\**\s*Recommendation\s*:?\s*\**\s*:?\s*(APPROVE|C
 
 // Fail closed: without a verified checkout-relative mapping, stripping a prefix could point
 // readers at a different file. Cover file URIs, Windows drives/UNC, Unix roots and home paths.
-// Leading `/^.../` is a common regex literal in reviews, not a Unix path.
-// Require the first filesystem path-segment character to look like a path name;
-// continue rejecting real absolute paths, drive paths and file:// URLs.
-const LOCAL_PATH_RE = /file:\/|\b[a-z]:[\\/]|\\\\[^\s\\]+\\|(?:^|[\s`"'(<\[=])(?:\.\.[\\/]|~[\\/]|\/{1,2}[A-Za-z0-9._~-])/im;
-const LOCAL_PATH_REASON = 'the review contains a local path; use plain repo-relative path:line';
-const PRIVATE_OR_TRAVERSAL_PATH_RE = /(?:^|[\s`"'(<\[=\/\\])\.\.[\/\\]|\.ai[\/\\]cezar[\/\\](?:runs|worktrees|node-text)[\/\\]/im;
+// Leading `/^.../` or gitignore root anchors like `/.ai/...` are not absolute host paths.
+// Reject real absolute paths (Unix roots /Users, /home, /tmp, etc.), Windows drives, UNC, home paths and file:// URLs.
+export const LOCAL_PATH_RE = /file:\/|\b[a-z]:[\\/]|\\\\[^\s\\]+\\|(?:^|[\s`"'(<\[=])\/\/[^\s\/]+[\\/][^\s\/]+|(?:^|[\s`"'(<\[=])~[\\/]|(?:^|[\s`"'(<\[=])\/(?:Users|home|tmp|private|var|etc|usr|opt|root|bin|sbin|lib|dev|proc|sys|mnt|Volumes)(?:[\\/]|$|[\s`"'\)>\]:,])/im;
+export const LOCAL_PATH_REASON = 'the review contains a local path; use plain repo-relative path:line';
+export const PRIVATE_OR_TRAVERSAL_PATH_RE = /(?:^|[\s`"'(<\[=\/\\])\.\.[\/\\]|\.ai[\/\\]cezar[\/\\](?:runs|worktrees|node-text|tmp)[\/\\][^\s`"'\)>\]\/\\]+/im;
 
 /**
  * Whether an agent's final text is a complete review: non-blank, more than a bare

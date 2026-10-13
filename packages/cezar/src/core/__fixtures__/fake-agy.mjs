@@ -17,13 +17,32 @@ const trustedDiffReads = (tool) => {
   const prompt = process.argv.at(-1);
   const file = prompt.match(/Cezar pinned diff file: (.+)\n/)?.[1];
   const count = Number(prompt.match(/Diff lines: (\d+)/)?.[1]);
+  const parts = [...prompt.matchAll(/Part \d+: (.+) \((\d+) lines\)/g)];
   if (file && process.env.FAKE_AGY_OMIT !== 'trusted-diff') {
-    for (let StartLine = 1; StartLine <= count; StartLine += 500) tool('view_file', { AbsolutePath: file, StartLine, EndLine: Math.min(StartLine + 499, count) });
+    if (process.env.FAKE_AGY_DIFF_VIEW_MODE === 'no-range') {
+      tool('view_file', { AbsolutePath: file });
+    } else if (process.env.FAKE_AGY_DIFF_VIEW_MODE === 'parts-only') {
+      for (const p of parts) tool('view_file', { AbsolutePath: p[1] });
+    } else if (process.env.FAKE_AGY_DIFF_VIEW_MODE === 'partial-parts') {
+      if (parts[0]) tool('view_file', { AbsolutePath: parts[0][1] });
+    } else {
+      for (let StartLine = 1; StartLine <= count; StartLine += 500) {
+        tool('view_file', { AbsolutePath: file, StartLine, EndLine: Math.min(StartLine + 499, count) });
+      }
+      for (const p of parts) tool('view_file', { AbsolutePath: p[1] });
+    }
   }
   if (process.env.FAKE_AGY_OMIT !== 'check-result') {
     for (const match of prompt.matchAll(/Cezar check result file: (.+)\nResult lines: (\d+)/g)) {
-      const count = Number(match[2]);
-      for (let StartLine = 1; StartLine <= count; StartLine += 500) tool('view_file', { AbsolutePath: match[1], StartLine, EndLine: Math.min(StartLine + 499, count) });
+      const checkFile = match[1];
+      const checkCount = Number(match[2]);
+      if (process.env.FAKE_AGY_CHECK_VIEW_MODE === 'no-range') {
+        tool('view_file', { AbsolutePath: checkFile });
+      } else {
+        for (let StartLine = 1; StartLine <= checkCount; StartLine += 500) {
+          tool('view_file', { AbsolutePath: checkFile, StartLine, EndLine: Math.min(StartLine + 499, checkCount) });
+        }
+      }
     }
   }
   return file;
@@ -95,7 +114,7 @@ switch (mode) {
     }
     const final = prompt.includes('Cezar trusted check result:') && !process.env.FAKE_AGY_REPEAT;
     const response = final
-      ? `Findings: none. Full pinned diff and contracts inspected. Verification: ${JSON.parse(process.env.FAKE_AGY_CHECK).join(' ')} returned exit 0. Emulator skipped: no resource authorization.\nRecommendation: APPROVE`
+      ? (process.env.FAKE_AGY_VERDICT ?? `Findings: none. Full pinned diff and contracts inspected. Verification: ${JSON.parse(process.env.FAKE_AGY_CHECK).join(' ')} returned exit 0. Emulator skipped: no resource authorization.\nRecommendation: APPROVE`)
       : `CEZ_REVIEW_CHECK ${JSON.stringify({ args: JSON.parse(process.env.FAKE_AGY_CHECK), reason: 'inspect affected contract' })}`;
     if (!final && process.env.FAKE_AGY_MIDTURN) {
       // Live run 2bb661b9: the request is one message mid-turn, as deltas; Gemini keeps

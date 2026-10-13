@@ -80,7 +80,7 @@ function git(cwd: string, args: string[]): string {
 export function getWorkspaceGitSnapshot(cwd: string): string | undefined {
   try {
     const head = git(cwd, ['rev-parse', 'HEAD']);
-    const status = git(cwd, ['status', '--porcelain', '--untracked-files=all']);
+    const status = git(cwd, ['status', '--porcelain', '--untracked-files=all', '--', '.', ':(exclude).cezar-review-tmp', ':(exclude).cezar-review-tmp/**']);
     return `HEAD ${head}\n${status}`;
   } catch {
     return undefined;

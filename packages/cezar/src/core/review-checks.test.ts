@@ -155,6 +155,99 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     } })).resolves.toMatchObject({ text: expect.stringContaining('Recommendation: APPROVE') });
     expect(existsSync(join(r.cwd, '.cezar-review-tmp'))).toBe(false);
   }, 20_000);
+
+  it('accepts unranged view_file on diff and check result for single-view reviews (live run 2ac98267 pattern)', async () => {
+    const r = repo('console.log("contract check passed")');
+    const notes: string[] = [];
+    const result = await runner().run({
+      cwd: r.cwd,
+      userPrompt: 'Review',
+      prReview: { mergeBase: r.base, headSha: r.head },
+      env: {
+        FAKE_AGY_MODE: 'broker',
+        FAKE_AGY_CHECK: JSON.stringify(['just', 'test']),
+        FAKE_AGY_DIFF_VIEW_MODE: 'no-range',
+        FAKE_AGY_CHECK_VIEW_MODE: 'no-range',
+      },
+    }, (e) => { if (e.type === 'note') notes.push(e.message); });
+    expect(result.text).toContain('Recommendation: APPROVE');
+    expect(notes.some((n) => n.includes('Exit: 0'))).toBe(true);
+    expect(existsSync(join(r.cwd, '.cezar-review-tmp'))).toBe(false);
+  });
+
+  it('delivers large diff via split parts and requires inspecting all parts', async () => {
+    const r = repo();
+    writeFileSync(join(r.cwd, 'tracked.txt'), 'v2\n' + 'contract\n'.repeat(1200));
+    execFileSync('git', ['add', '.'], { cwd: r.cwd });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'chunked diff'], { cwd: r.cwd });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: r.cwd, encoding: 'utf8' }).trim();
+
+    // 1. All parts inspected via parts-only view -> succeeds
+    await expect(runner().run({
+      cwd: r.cwd,
+      userPrompt: 'Review',
+      prReview: { mergeBase: r.base, headSha: head },
+      env: {
+        FAKE_AGY_MODE: 'broker',
+        FAKE_AGY_CHECK: JSON.stringify(['git', 'log']),
+        FAKE_AGY_DIFF_VIEW_MODE: 'parts-only',
+      },
+    })).resolves.toMatchObject({ text: expect.stringContaining('Recommendation: APPROVE') });
+
+    // 2. Partial parts inspected -> fails closed (incomplete evidence)
+    await expect(runner().run({
+      cwd: r.cwd,
+      userPrompt: 'Review',
+      prReview: { mergeBase: r.base, headSha: head },
+      env: {
+        FAKE_AGY_MODE: 'broker',
+        FAKE_AGY_CHECK: JSON.stringify(['git', 'log']),
+        FAKE_AGY_DIFF_VIEW_MODE: 'partial-parts',
+      },
+    })).rejects.toThrow(/evidence/);
+  }, 30_000);
+
+  it('reproduces and completes live run 2ac98267 scenario: 320-line diff, no range view_file, test exit 1, CHANGES REQUESTED', async () => {
+    const r = repo('console.error("test assertion failed: expected null but received agent worktree"); process.exit(1)');
+    writeFileSync(join(r.cwd, 'tracked.txt'), 'v2\n' + 'line\n'.repeat(318));
+    execFileSync('git', ['add', '.'], { cwd: r.cwd });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', '320 lines PR'], { cwd: r.cwd });
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: r.cwd, encoding: 'utf8' }).trim();
+
+    const verdict = 'Findings:\nP1 scripts/lib/previewPublishGuard.test.js:8: Test failed with exit 1: test assertion failed.\nP2 scripts/preview.mjs:15: Unhandled null return.\nRecommendation: CHANGES REQUESTED';
+    const notes: string[] = [];
+    const result = await runner().run({
+      cwd: r.cwd,
+      userPrompt: 'Review',
+      prReview: { mergeBase: r.base, headSha: head },
+      env: {
+        FAKE_AGY_MODE: 'broker',
+        FAKE_AGY_CHECK: JSON.stringify(['just', 'test']),
+        FAKE_AGY_DIFF_VIEW_MODE: 'no-range',
+        FAKE_AGY_CHECK_VIEW_MODE: 'no-range',
+        FAKE_AGY_VERDICT: verdict,
+      },
+    }, (e) => { if (e.type === 'note') notes.push(e.message); });
+
+    expect(result.text).toContain('Recommendation: CHANGES REQUESTED');
+    expect(result.text).toContain('P1 scripts/lib/previewPublishGuard.test.js');
+    expect(notes.some((n) => n.includes('Exit: 1'))).toBe(true);
+    expect(existsSync(join(r.cwd, '.cezar-review-tmp'))).toBe(false);
+  });
+
+  it('isolates check runtimeDir in OS tmpdir and never places it inside .ai/cezar/worktrees', () => {
+    const r = repo();
+    const diff = prepareReviewDiff(r.cwd, r.base, r.head);
+    try {
+      expect(diff.runtimeDir).not.toContain('.ai');
+      expect(diff.runtimeDir).not.toContain('cezar');
+      expect(diff.runtimeDir).not.toContain(r.cwd);
+      expect(existsSync(diff.runtimeDir)).toBe(true);
+    } finally {
+      diff.cleanup();
+      expect(existsSync(diff.runtimeDir)).toBe(false);
+    }
+  });
 });
 
 describe('trusted check policy and source integrity', { timeout: 30_000 }, () => {
@@ -208,7 +301,7 @@ describe('trusted check policy and source integrity', { timeout: 30_000 }, () =>
     symlinkSync(privateDir, join(pkg, 'leak'), 'dir');
     expect(() => reviewCommand(worktree, ['rg', '.', 'node_modules/demo/leak/secret.txt'])).toThrow();
   });
-  it('requires full explicit diff coverage and can inspect binary-only changes through their diff metadata', () => {
+  it('confirms diff delivery via default read for <= 800 lines and requires full coverage for larger diffs', () => {
     const r = repo();
     writeFileSync(join(r.cwd, 'asset.bin'), Buffer.from([0, 1, 2]));
     execFileSync('git', ['add', '.'], { cwd: r.cwd });
@@ -216,20 +309,27 @@ describe('trusted check policy and source integrity', { timeout: 30_000 }, () =>
     const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: r.cwd, encoding: 'utf8' }).trim();
     const diff = prepareReviewDiff(r.cwd, r.head, head);
     try {
-      const evidence = new AgyReviewEvidence({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.head, headSha: head } });
-      evidence.deliverTrustedDiff(diff.file, diff.lines);
-      const read = (id: string, path: string, range = {}) => {
+      const read = (evidence: AgyReviewEvidence, id: string, path: string, range = {}) => {
         evidence.call({ id, name: 'view_file', input: { AbsolutePath: path, ...range } });
         evidence.result(id, false, '');
       };
-      read('agents', join(r.cwd, 'AGENTS.md'));
-      read('default', diff.file);
-      expect(evidence.complete()).toBe(false);
-      read('partial', diff.file, { StartLine: 1, EndLine: diff.lines - 1 });
-      expect(evidence.complete()).toBe(false);
-      read('full', diff.file, { StartLine: 1, EndLine: diff.lines });
-      expect(evidence.complete()).toBe(true);
-      expect(evidence.allowsFileInspection({ id: 'outside', name: 'list_dir', input: { DirectoryPath: join(r.cwd, '..') } })).toBe(false);
+      // 1. Single view diff (<= 800 lines): unranged view_file completes it
+      const ev1 = new AgyReviewEvidence({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.head, headSha: head } });
+      ev1.deliverTrustedDiff(diff.file, diff.lines, diff.parts);
+      read(ev1, 'agents', join(r.cwd, 'AGENTS.md'));
+      read(ev1, 'default', diff.file);
+      expect(ev1.complete()).toBe(true);
+
+      // 2. Large diff (> 800 lines): unranged view_file alone does not complete it
+      const ev2 = new AgyReviewEvidence({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.head, headSha: head } });
+      ev2.deliverTrustedDiff(diff.file, 1000);
+      read(ev2, 'agents', join(r.cwd, 'AGENTS.md'));
+      read(ev2, 'default', diff.file);
+      expect(ev2.complete()).toBe(false);
+      read(ev2, 'rem', diff.file, { StartLine: 801, EndLine: 1000 });
+      expect(ev2.complete()).toBe(true);
+
+      expect(ev1.allowsFileInspection({ id: 'outside', name: 'list_dir', input: { DirectoryPath: join(r.cwd, '..') } })).toBe(false);
     } finally { diff.cleanup(); }
   });
   it('cleans only new temporary artifacts and preserves sources', async () => {

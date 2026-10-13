@@ -131,6 +131,20 @@ describe('publishPrReviewComment', () => {
     await expect(publishPrReviewComment({ ...base, body, run })).resolves.toEqual({ status: 'published' });
     expect(posts[0]?.body).toContain('`/^\\.ai\\//`');
   });
+  it('accepts code literals and gitignore patterns like /.ai/cezar/worktrees/ and function references', async () => {
+    const body = [
+      'P2: .gitignore:10 Adds `/.ai/cezar/worktrees/` and `/.ai/cezar/runs/` to ignore local task worktrees.',
+      'scripts/lib/previewPublishGuard.cjs:15 Implements `isAgentPath(path)` detecting `.ai/cezar/worktrees/`.',
+      '',
+      'Recommendation: APPROVE',
+    ].join('\n');
+    expect(checkReviewText(body)).toEqual({ ok: true, recommendation: 'APPROVE' });
+    const { run, posts } = fakeRun({});
+    await expect(publishPrReviewComment({ ...base, body, run })).resolves.toEqual({ status: 'published' });
+    expect(posts[0]?.body).toContain('`/.ai/cezar/worktrees/`');
+    expect(posts[0]?.body).toContain('isAgentPath(path)');
+  });
+
   it('keeps repo-relative references and web links intact', async () => {
     const body = 'src/a.ts:12 and `docs/README.md:2`; https://github.com/o/r/pull/25; `ready-for-agent`/`ready-for-human`';
     const { run, posts } = fakeRun({});
@@ -175,7 +189,7 @@ describe('publishReviewFromRun', () => {
     expect(posts[0]?.body.length).toBeGreaterThan(4000);
   });
 
-  it.each(['C:\\repo\\src\\a.ts:12', '\\\\host\\share\\a.ts:12', '/home/me/a.ts:12', '../outside/a.ts:12', 'src/../../outside/a.ts:12', '.ai/cezar/runs/id.handoff.md:1', 'C:/bin/bash.exe:13'])('never repairs a finding location %s', async (path) => {
+  it.each(['C:\\repo\\src\\a.ts:12', '\\\\host\\share\\a.ts:12', '/home/me/a.ts:12', '../outside/a.ts:12', 'src/../../outside/a.ts:12', '.ai/cezar/runs/id.handoff.md:1', '.ai/cezar/worktrees/833b4d38/src/a.ts:12', 'C:/bin/bash.exe:13'])('never repairs a finding location %s', async (path) => {
     const { run, calls } = gh(HEAD);
     expect((await publishReviewFromRun({ repoRoot: '/r', target, text: `${text}\nLocation: \`${path}\``, run })).status).toBe('invalid');
     expect(calls).toEqual([]);

@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, realpathSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import type { AgentRunSpec, AgentToolCallRecord } from './agent-runner.ts';
+import type { ReviewDiffPart } from './review-checks.ts';
 
 /** Narrow recovery for the observed module/index.ts -> module.ts discovery mistake.
  * Successful tool lifecycle events are evidence even when cortex omits result text.
@@ -20,8 +21,10 @@ export class AgyReviewEvidence {
   private trustedDiff = false;
   private diffFile: string | undefined;
   private diffLines = 0;
+  private readonly diffParts = new Map<string, number>();
+  private readonly partsRead = new Set<string>();
   private readonly diffCoverage = new Set<number>();
-  private readonly checkFiles = new Map<string, { lines: number; coverage: Set<number> }>();
+  private readonly checkFiles = new Map<string, { lines: number; read: boolean; coverage: Set<number> }>();
   private readonly affected = new Set<string>();
 
   constructor(private readonly spec: AgentRunSpec) {
@@ -49,12 +52,23 @@ export class AgyReviewEvidence {
   }
 
   /** Only the runner may record successful delivery of Cezar's bounded full diff. */
-  deliverTrustedDiff(file: string, lines: number): void {
+  deliverTrustedDiff(file: string, lines: number, parts?: ReviewDiffPart[]): void {
     this.trustedDiff = true;
     this.diffFile = resolve(file);
     this.diffLines = lines;
+    this.diffParts.clear();
+    this.partsRead.clear();
+    this.diffCoverage.clear();
+    if (parts && parts.length > 0) {
+      for (const p of parts) this.diffParts.set(resolve(p.file), p.lines);
+    } else {
+      this.diffParts.set(resolve(file), lines);
+    }
   }
-  requireCheckResult(file: string, lines: number): void { this.checkFiles.set(resolve(file), { lines, coverage: new Set() }); }
+
+  requireCheckResult(file: string, lines: number): void {
+    this.checkFiles.set(resolve(file), { lines, read: false, coverage: new Set() });
+  }
 
   private file(input: unknown): string | undefined {
     if (!input || typeof input !== 'object' || !this.spec.cwd) return;
@@ -90,50 +104,104 @@ export class AgyReviewEvidence {
     if (!error) {
       if (!existsSync(path)) return false;
       this.reads.add(path);
-      if (this.trustedDiff && path === this.diffFile) {
-        const input = call.input as Record<string, unknown>;
-        const start = input.StartLine;
-        const end = input.EndLine;
-        // Never infer completeness from a provider's default/truncated read.
-        if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && Number(start) >= 1 &&
-            Number(end) >= Number(start) && Number(end) - Number(start) < 500) {
-          for (let n = Number(start); n <= Math.min(Number(end), this.diffLines); n++) this.diffCoverage.add(n);
+      if (this.trustedDiff) {
+        const input = (call.input ?? {}) as Record<string, unknown>;
+        const start = input.StartLine !== undefined ? Number(input.StartLine) : undefined;
+        const end = input.EndLine !== undefined ? Number(input.EndLine) : undefined;
+        const hasRange = start !== undefined && end !== undefined && Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 1 && end >= start;
+
+        // 1. Check if the read was on full.diff:
+        if (path === this.diffFile) {
+          if (!hasRange) {
+            // Unranged view_file: provider delivers up to 800 lines.
+            // If the whole file has <= 800 lines, 100% of the diff is delivered.
+            if (this.diffLines <= 800) {
+              for (let n = 1; n <= this.diffLines; n++) this.diffCoverage.add(n);
+              this.diffRead = true;
+            } else {
+              for (let n = 1; n <= Math.min(800, this.diffLines); n++) this.diffCoverage.add(n);
+            }
+          } else {
+            for (let n = start!; n <= Math.min(end!, this.diffLines); n++) this.diffCoverage.add(n);
+            if (this.diffCoverage.size >= this.diffLines) {
+              this.diffRead = true;
+            }
+          }
         }
-        this.diffRead = this.diffCoverage.size === this.diffLines;
+
+        // 2. Check if the read was on a split diff part:
+        const partLines = this.diffParts.get(path);
+        if (partLines !== undefined) {
+          if (!hasRange) {
+            if (partLines <= 800) this.partsRead.add(path);
+          } else if (start! === 1 && end! >= partLines) {
+            this.partsRead.add(path);
+          }
+          if (this.diffParts.size > 0 && this.partsRead.size === this.diffParts.size) {
+            this.diffRead = true;
+          }
+        }
       }
+
       const check = this.checkFiles.get(path);
       if (check) {
-        const input = call.input as Record<string, unknown>;
-        const start = Number(input.StartLine);
-        const end = Number(input.EndLine);
-        if (Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 1 && end >= start && end - start < 500) {
-          for (let n = start; n <= Math.min(end, check.lines); n++) check.coverage.add(n);
+        const input = (call.input ?? {}) as Record<string, unknown>;
+        const start = input.StartLine !== undefined ? Number(input.StartLine) : undefined;
+        const end = input.EndLine !== undefined ? Number(input.EndLine) : undefined;
+        const hasRange = start !== undefined && end !== undefined && Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 1 && end >= start;
+        if (!hasRange) {
+          if (check.lines <= 800) {
+            check.read = true;
+            for (let n = 1; n <= check.lines; n++) check.coverage.add(n);
+          } else {
+            for (let n = 1; n <= Math.min(800, check.lines); n++) check.coverage.add(n);
+          }
+        } else {
+          for (let n = start!; n <= Math.min(end!, check.lines); n++) check.coverage.add(n);
+          if (check.coverage.size >= check.lines) {
+            check.read = true;
+          }
         }
       }
+
       // Only a subsequent read resolves the failed attempt.
       this.recoveries.delete(path);
       return false;
     }
     if (!/\bENOENT\b|The system cannot find (?:the path|the file) specified\.|no such file or directory/i.test(message)) return false;
     if (existsSync(path) || this.required.has(path)) return false;
-    // Only a known optional checkout README, never an arbitrary missing source,
+    // Only a known optional checkout doc, never an arbitrary missing source,
     // skill or external handoff. Success still requires the diff + all required reads.
     const local = relative(this.spec.cwd, path);
-    if (basename(path) === 'README.md' && (local === 'README.md' || local.startsWith(`docs${sep}`)) && this.optionalMisses < 2) {
+    const extension = extname(path);
+    if ((local === 'README.md' || (local.startsWith(`docs${sep}`) && (extension === '.md' || extension === ''))) && this.optionalMisses < 2) {
       this.optionalMisses++;
       return true;
     }
-    const extension = extname(path);
-    if (!['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'].includes(extension) || !path.endsWith(`${sep}index${extension}`)) return false;
-    this.recoveries.add(`${dirname(path)}${extension}`);
-    return true;
+    const codeExtensions = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs'];
+    if (!codeExtensions.includes(extension)) return false;
+    if (path.endsWith(`${sep}index${extension}`)) {
+      this.recoveries.add(`${dirname(path)}${extension}`);
+      return true;
+    }
+    const dot = local.lastIndexOf('.');
+    if (dot > 0) {
+      const stem = path.slice(0, path.length - extension.length);
+      for (const alt of codeExtensions) {
+        if (alt !== extension && existsSync(`${stem}${alt}`)) {
+          this.recoveries.add(`${stem}${alt}`);
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   complete(): boolean {
     const cwd = this.spec.cwd;
     if (!cwd) return false;
     return this.validContext && this.diffRead && this.pending.size === 0 && this.recoveries.size === 0 &&
-      [...this.checkFiles.values()].every((check) => check.coverage.size === check.lines) &&
+      [...this.checkFiles.values()].every((check) => check.read || check.coverage.size >= check.lines) &&
       (this.trustedDiff
         ? this.reads.has(resolve(cwd, 'AGENTS.md')) &&
           (this.affected.size === 0 || [...this.affected].some((path) => this.reads.has(path)))
