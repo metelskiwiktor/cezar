@@ -124,7 +124,7 @@ test('listRemoteSkills clones a local repo, pins the SHA, and refuses a bad ref'
     '---\nname: demo\ndescription: a demo skill\n---\nbody text\n',
   );
   // A directory skill needs SKILL.md under a directory to be named after it.
-  execFileSync('mkdir', ['-p', join(srcDir, 'greeter')]);
+  mkdirSync(join(srcDir, 'greeter'), { recursive: true });
   writeFileSync(join(srcDir, 'greeter', 'SKILL.md'), '---\ndescription: hi\n---\nsay hi\n');
   g(['add', '-A']);
   g(['commit', '-m', 'init']);
