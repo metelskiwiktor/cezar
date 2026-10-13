@@ -31,7 +31,7 @@ describe('buildAgyArgs', () => {
     expect(args.at(-1)).toContain('Do not read or write run handoff');
     expect(args).not.toContain('--dangerously-skip-permissions');
   });
-  it('builds stream-json print mode args with default gemini-3.8-flash-high model', () => {
+  it('builds stream-json print mode args with default gemini-3.8-flash-medium model', () => {
     const args = buildAgyArgs({ userPrompt: 'Hello Gemini' });
     expect(args).toEqual(
       expect.arrayContaining(['--output-format', 'stream-json', '--mode', 'accept-edits', '--model', DEFAULT_AGY_MODEL]),

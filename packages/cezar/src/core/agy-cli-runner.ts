@@ -1,7 +1,7 @@
 /**
  * Antigravity CLI runner (`agy`) — headless print mode over `stream-json`.
  *
- * Runs Google Antigravity CLI with Gemini models (defaulting to `gemini-3.8-flash-high`)
+ * Runs Google Antigravity CLI with Gemini models (defaulting to `gemini-3.8-flash-medium`)
  * under the user's Google AI Pro subscription without requiring a paid Gemini API key.
  *
  * Emits v1 `AgentEvent`s and, when `opts.onUiEvent` is set, protocol v2
@@ -43,7 +43,7 @@ import {
 
 export const DEFAULT_AGY_TIMEOUT_MS = 30 * 60_000;
 export const AGY_KILL_GRACE_MS = 10_000;
-export const DEFAULT_AGY_MODEL = 'gemini-3.8-flash-high';
+export const DEFAULT_AGY_MODEL = 'gemini-3.8-flash-medium';
 
 export const MUTATING_TOOL_NAMES = new Set([
   'write',
