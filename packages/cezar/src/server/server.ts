@@ -657,6 +657,8 @@ const startRunSchema = z
     baseBranch: z.string().trim().min(1).max(200).optional(),
     /** Explicit read-only mode for review tasks. Enforces file system and environment sandbox. */
     readOnly: z.boolean().optional(),
+    // Optional pull request number targeted by this run
+    prNumber: z.number().int().positive().optional(),
     // Autonomous mode (#autonomous): the run never parks at `waiting` — it
     // auto-continues until the agent signals done. No "needs you" is raised.
     autonomous: z.boolean().optional(),
@@ -4283,6 +4285,7 @@ export function createApp(deps: ServerDeps) {
         worktree: parsed.data.worktree,
         baseBranch: parsed.data.baseBranch,
         readOnly: parsed.data.readOnly,
+        prNumber: parsed.data.prNumber,
         autonomous: parsed.data.autonomous,
         // Opt-in inbox (#471): the capability is the ceiling, so a client asking
         // for follow-ups on a server that has them off gets a plain `false`

@@ -54,7 +54,14 @@ import type { AgentEvent, ContentBlock } from '../core/agent-runner.ts';
 import { discoverSkills, type Skill } from '../skills.ts';
 import { automationsReachable } from '../automations/builtin-skill.ts';
 import { AUTOMATIONS_PROMPT } from '../automations/prompts.ts';
-import { publishReviewFromRun, type CommandRunner } from '../automations/pr-review.ts';
+import {
+  defaultCommandRunner,
+  preparePrReviewCheckout,
+  publishReviewFromRun,
+  renderPrReviewContext,
+  type CommandRunner,
+  type PrReviewTarget,
+} from '../automations/pr-review.ts';
 import { readNodeText, writeNodeText } from './node-text.ts';
 import { materializeSkillDir } from '../skills-remote.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
@@ -76,6 +83,7 @@ import {
 import { commentOnIssue, commentOnPr, fetchGithubChecks, updatePr } from '../server/forge/github.ts';
 import { createDraftPr } from '../server/pr.ts';
 import { getHeadCommit, getRepoInfo } from '../server/git.ts';
+import { parseRemote } from '../server/forge/index.ts';
 import { loadWorkflows } from './load.ts';
 import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/store.ts';
 // Task dispatch (spec 2026-09-10-dispatch). Every import below is inert unless the feature is
@@ -134,6 +142,7 @@ import {
   retryableExit,
   stepKind,
   isReadOnlyWorkflow,
+  reviewsPullRequest,
   type WorkflowDef,
   type WorkflowStepDef,
 } from './types.ts';
@@ -712,6 +721,8 @@ export interface StartRunInput {
   baseBranch?: string;
   /** Explicit read-only review mode: blocks file mutations and isolates credentials. */
   readOnly?: boolean;
+  /** Optional pull request number targeted by this run. */
+  prNumber?: number;
   /** The PR a review run reviews — orchestrator data for `github.review-comment`. */
   prReview?: RunRecord['prReview'];
   /** Autonomous mode (#autonomous): the run never parks at `waiting` for the
@@ -1386,7 +1397,8 @@ export class RunManager {
       // A root started with the composer's Dispatch toggle always gets a worktree: children fork
       // its commits, and an in-place run has no branch to fork. Overridden on the INPUT, which is
       // what `execute()` reads, not only on the record.
-      ...((input.dispatchIntent || producesPullRequest(workflow)) && input.worktree === false ? { worktree: undefined } : {}),
+      ...((input.dispatchIntent || producesPullRequest(workflow) || reviewsPullRequest(workflow)) && input.worktree === false ? { worktree: undefined } : {}),
+      ...(reviewsPullRequest(workflow) ? { readOnly: true } : {}),
     };
     const run = this.store.createRun({
       title: makeRunTitle(input.task, workflow) + (group ? ` (${group.variant})` : ''),
@@ -1395,8 +1407,8 @@ export class RunManager {
       baseBranch: input.baseBranch,
       model: effectiveInput.model,
       runner: input.runner,
-      // A read-only workflow (`analysis`) makes the whole run read-only, Continue included.
-      readOnly: isReadOnlyWorkflow(workflow) ? true : input.readOnly,
+      // A read-only workflow (`analysis`) or PR review workflow (`pr-review`) makes the whole run read-only, Continue included.
+      readOnly: isReadOnlyWorkflow(workflow) || reviewsPullRequest(workflow) ? true : input.readOnly,
       prReview: input.prReview,
       // The composer's per-task account (spec 2026-07-29-agent-profiles). Persisted at creation
       // so a queued run picks it up at dequeue and every later resume reads the same answer.
@@ -1445,9 +1457,11 @@ export class RunManager {
     // numbers persist immediately; the namer may add the kind it verified later.
     const skillHint = workflow.steps.find((s) => stepKind(s) === 'agent' && s.skill)?.skill?.trim();
     const refs = refineTaskRefs(extractTaskRefs(input.task), skillHint);
-    if (refs.prNumber !== undefined || refs.issueNumber !== undefined) {
+    const prNumber = input.prNumber ?? refs.prNumber ?? (reviewsPullRequest(workflow) ? refs.ambiguousNumber : undefined);
+    if (prNumber !== undefined) effectiveInput.prNumber = prNumber;
+    if (prNumber !== undefined || refs.issueNumber !== undefined) {
       this.store.updateRun(run.id, {
-        ...(refs.prNumber !== undefined ? { prNumber: refs.prNumber } : {}),
+        ...(prNumber !== undefined ? { prNumber } : {}),
         ...(refs.issueNumber !== undefined ? { issueNumber: refs.issueNumber } : {}),
       });
     }
@@ -4293,7 +4307,7 @@ export class RunManager {
     // that requests isolation fails closed if the worktree cannot be
     // established; only explicit opt-out and non-Git modes run in place.
     const repo = await getRepoInfo(this.repoRoot);
-    if (!repo && producesPullRequest(workflow)) {
+    if (!repo && (producesPullRequest(workflow) || reviewsPullRequest(workflow))) {
       const error = 'PR pre-flight failed: a committed git repository with origin is required';
       this.store.updateRun(runId, { status: 'failed', error, finishedAt: new Date().toISOString() });
       emit({ type: 'lifecycle', message: error });
@@ -4348,11 +4362,47 @@ export class RunManager {
             throw new Error(`PR pre-flight failed: could not persist pinned base: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
+        if (reviewsPullRequest(workflow) && !record.prReview && freshFork) {
+          const targetPrNumber = record.prNumber ?? input.prNumber;
+          if (!targetPrNumber) {
+            throw new Error('PR review pre-flight failed: no pull request number identified for review');
+          }
+          const runner = this.prReviewCommandRunner ?? defaultCommandRunner;
+          const checkout = await preparePrReviewCheckout(this.repoRoot, targetPrNumber, runner);
+          let repoSlug = repo?.remote ? parseRemote(repo.remote) : null;
+          let repoName = repoSlug ? `${repoSlug.owner}/${repoSlug.repo}` : '';
+          if (!repoName) {
+            try {
+              const raw = await runner('gh', ['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner'], this.repoRoot);
+              repoName = raw.trim();
+            } catch {
+              // ignore
+            }
+          }
+          if (!repoName) {
+            throw new Error(`PR review pre-flight failed: could not resolve repository owner/name for PR #${targetPrNumber}`);
+          }
+          const prReview: PrReviewTarget = { repo: repoName, ...checkout };
+          base = checkout.headSha;
+          input.task = `${record.task}\n\n${renderPrReviewContext(checkout)}`;
+          input.readOnly = true;
+          input.prReview = prReview;
+          this.store.updateRun(runId, {
+            baseBranch: base,
+            readOnly: true,
+            prReview,
+            task: input.task,
+          });
+          emit({ type: 'note', message: `PR review target prepared: ${repoName}#${targetPrNumber} @ ${checkout.headSha.slice(0, 8)} (base ${checkout.baseRef})` });
+        }
         base = record.prForkBase?.sha ?? base ?? await chooseForkBase(this.repoRoot, repo.branch, config.baseBranch,
           (message) => emit({ type: 'note', message }));
         const wt = await createWorktree(this.repoRoot, runId, base);
         if (freshFork && this.store.getRun(runId)?.prForkBase && await getHeadCommit(wt.path) !== base) {
           throw new Error('PR pre-flight failed: existing task branch does not match the pinned fork SHA; preserved for recovery');
+        }
+        if (freshFork && this.store.getRun(runId)?.prReview && base === this.store.getRun(runId)?.prReview?.headSha && await getHeadCommit(wt.path) !== base) {
+          throw new Error('PR review pre-flight failed: task branch does not match the pinned review SHA');
         }
         state.cwd = wt.path;
         this.store.updateRun(runId, {

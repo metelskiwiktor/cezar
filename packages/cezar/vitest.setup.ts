@@ -40,6 +40,10 @@ beforeEach(pinSandboxHome)
 // after a case's `afterEach` has deleted the pin.
 afterEach(pinSandboxHome)
 afterAll(() => {
-  rmSync(sandboxHome, { recursive: true, force: true })
-  rmSync(sandboxUserHome, { recursive: true, force: true })
+  try {
+    rmSync(sandboxHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+    rmSync(sandboxUserHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  } catch {
+    // Windows: background process exiting may hold handle
+  }
 })
