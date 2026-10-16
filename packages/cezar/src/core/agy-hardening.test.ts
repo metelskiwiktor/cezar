@@ -240,6 +240,25 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(posts).toHaveLength(1);
     }, 20_000);
 
+    it('does not emit the mandatory checkout evidence note on a plain read-only analysis run without PR review context', async () => {
+      const repo = makeRepo();
+      const notes: string[] = [];
+      await expect(
+        fakeRunner().run(
+          {
+            userPrompt: 'analyze how models work',
+            cwd: repo,
+            readOnly: true,
+            env: { FAKE_AGY_MODE: 'recovery', FAKE_AGY_MISSING_PATH: 'docs/README.md' },
+          },
+          (event) => {
+            if (event.type === 'note') notes.push(event.message);
+          },
+        ),
+      ).resolves.toBeDefined();
+      expect(notes.some((n) => n.includes('mandatory checkout evidence is complete'))).toBe(false);
+    });
+
     it('fails closed on an outside inspection even if the provider reports success', async () => {
       const posts: string[] = [];
       await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: '../outside/README.md', FAKE_AGY_ERROR: '' }, posts)).rejects.toThrow(/scope violation/);

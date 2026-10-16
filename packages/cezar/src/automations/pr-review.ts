@@ -104,7 +104,9 @@ export function renderPrReviewContext(checkout: PrReviewCheckout): string {
 export const INLINE_COMMENTS_TAG = 'cez-inline-comments';
 export const INLINE_COMMENTS_MAX = 30;
 const INLINE_BODY_MAX = 4_000;
-const INLINE_BLOCK_RE = new RegExp(`^[ \\t]*\`\`\`[ \\t]*${INLINE_COMMENTS_TAG}[ \\t]*\\r?\\n([\\s\\S]*?)^[ \\t]*\`\`\`[ \\t]*$`, 'gm');
+const INLINE_BLOCK_RE = new RegExp(`^([ \\t]*)(?:(\`{3,})|(~{3,}))[ \\t]*${INLINE_COMMENTS_TAG}(?:[ \\t]+[^\\r\\n]*)?\\r?\\n([\\s\\S]*?)^[ \\t]*(?:\\2|\\3)[ \\t]*$`, 'gm');
+const UNCLOSED_INLINE_BLOCK_RE = new RegExp(`^[ \\t]*(?:\`{3,}|~{3,})[ \\t]*${INLINE_COMMENTS_TAG}\\b[\\s\\S]*$`, 'm');
+const STRAY_INLINE_TAG_RE = new RegExp(`(?:^|\\s)(?:\`{3,}|~{3,})[ \\t]*${INLINE_COMMENTS_TAG}\\b`, 'i');
 
 /** One comment anchored to a line of the PR's HEAD (`side: RIGHT`). */
 export interface InlineReviewComment {
@@ -122,10 +124,10 @@ export interface InlineReviewComment {
 export function extractInlineComments(text: string): { text: string; comments: InlineReviewComment[]; dropped: number } {
   const comments: InlineReviewComment[] = [];
   let dropped = 0;
-  const rest = text.replace(INLINE_BLOCK_RE, (_all, json: string) => {
+  const closed = text.replace(INLINE_BLOCK_RE, (_all, _indent: string, _ticks: string, _tildes: string, json: string) => {
     let items: unknown;
     try {
-      items = JSON.parse(json);
+      items = JSON.parse(json.trim());
     } catch {
       dropped++;
       return '';
@@ -135,6 +137,10 @@ export function extractInlineComments(text: string): { text: string; comments: I
       if (c && comments.length < INLINE_COMMENTS_MAX) comments.push(c);
       else dropped++;
     }
+    return '';
+  });
+  const rest = closed.replace(UNCLOSED_INLINE_BLOCK_RE, () => {
+    dropped++;
     return '';
   });
   return { text: rest.trim(), comments, dropped };
@@ -180,6 +186,7 @@ export const PRIVATE_OR_TRAVERSAL_PATH_RE = /(?:^|[\s`"'(<\[=\/\\])\.\.[\/\\]|\.
 export function checkReviewText(text: string): { ok: true; recommendation: 'APPROVE' | 'CHANGES REQUESTED' } | { ok: false; reason: string } {
   const body = text.trim();
   if (!body) return { ok: false, reason: 'the review is empty' };
+  if (STRAY_INLINE_TAG_RE.test(body)) return { ok: false, reason: `the review contains an unparsed ${INLINE_COMMENTS_TAG} block` };
   if (LOCAL_PATH_RE.test(body)) return { ok: false, reason: LOCAL_PATH_REASON };
   if (PRIVATE_OR_TRAVERSAL_PATH_RE.test(body)) return { ok: false, reason: 'the review contains an external or private run path; cite only PR checkout files' };
   const found = [...body.matchAll(RECOMMENDATION_RE)].map((m) => (m[1] as string).toUpperCase());
@@ -275,21 +282,33 @@ export async function publishPrReviewComment(input: PublishPrReviewInput): Promi
     let full = `${body}\n\n${marker}`;
     let anchored = 0;
     if (inline.length) {
-      // Line comments go first, as one review pinned to the reviewed commit. A line outside
-      // the diff makes GitHub refuse the whole review (422): the comments then ride in the
-      // main comment instead — a misplaced anchor never costs the review itself.
-      const file = join(dir, 'review.json');
-      await writeFile(file, JSON.stringify({
-        commit_id: input.headSha,
-        event: 'COMMENT',
-        body: `Inline comments for the automated review of ${input.headSha.slice(0, 12)}.`,
-        comments: inline.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT', body: c.body })),
-      }), 'utf8');
-      try {
-        await run('gh', ['api', '--method', 'POST', `repos/${input.repo}/pulls/${input.number}/reviews`, '--input', file], input.repoRoot);
+      // Line comments go first, as one review pinned to the reviewed commit and stamped with
+      // `marker`. If a previous attempt posted the inline review and failed before posting the
+      // main comment, the review already carries `marker` — skip reposting the inline review
+      // and finish by posting only the missing main comment.
+      const existingReviews = await run(
+        'gh',
+        ['api', '--paginate', `repos/${input.repo}/pulls/${input.number}/reviews`, '--jq', '.[].body'],
+        input.repoRoot,
+      );
+      if (existingReviews.includes(marker)) {
         anchored = inline.length;
-      } catch {
-        full = `${body}\n\n${renderInlineFallback(inline)}\n\n${marker}`;
+      } else {
+        // A line outside the diff makes GitHub refuse the whole review (422): the comments then
+        // ride in the main comment instead — a misplaced anchor never costs the review itself.
+        const file = join(dir, 'review.json');
+        await writeFile(file, JSON.stringify({
+          commit_id: input.headSha,
+          event: 'COMMENT',
+          body: `Inline comments for the automated review of ${input.headSha.slice(0, 12)}.\n\n${marker}`,
+          comments: inline.map((c) => ({ path: c.path, line: c.line, side: 'RIGHT', body: c.body })),
+        }), 'utf8');
+        try {
+          await run('gh', ['api', '--method', 'POST', `repos/${input.repo}/pulls/${input.number}/reviews`, '--input', file], input.repoRoot);
+          anchored = inline.length;
+        } catch {
+          full = `${body}\n\n${renderInlineFallback(inline)}\n\n${marker}`;
+        }
       }
     }
     const file = join(dir, 'comment.json');

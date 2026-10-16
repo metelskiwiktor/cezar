@@ -6326,7 +6326,7 @@ export class RunManager {
       // Titles are the namer's job (task auto-naming spec) — turn text is
       // deliberately NEVER a title source; see maybeRefreshTitle below. The
       // one exception is an explicit CEZ:TITLE declaration (applied above).
-      if (run.worktreePath && existsSync(run.worktreePath)) {
+      if (run.worktreePath && existsSync(run.worktreePath) && !run.readOnly) {
         // `taskBranch` + `runStartedAt` are what keep this number *this task's* (#751): a
         // review/QA run repoints the worktree onto the branch under review, and without the
         // branch to compare HEAD against and the moment it was checked out, the stat would
@@ -6448,7 +6448,7 @@ export class RunManager {
   /** Whether settling this run now would park it at the review gate (#489). */
   private async reviewGateApplies(runId: string): Promise<boolean> {
     const run = this.store.getRun(runId);
-    if (!run?.worktreePath || !existsSync(run.worktreePath)) return false;
+    if (!run?.worktreePath || !existsSync(run.worktreePath) || run.readOnly) return false;
     const diff = await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD');
     const hasDiff = diff.trim().length > 0 && !diff.startsWith('(diff failed');
     const config = await loadConfig(this.repoRoot);

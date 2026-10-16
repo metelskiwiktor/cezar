@@ -4,6 +4,9 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createDraftPr } from '../server/forge/github.ts';
+import { apiRequest } from '../server/loopback-request.testkit.ts';
+import { createApp } from '../server/server.ts';
 import { producesPullRequest } from '../pr-fork.ts';
 import { RunStore, type RunRecord } from '../runs/store.ts';
 import { graphIssues, type WorkflowGraph } from './graph.ts';
@@ -113,10 +116,11 @@ describe('lightweight workflow runs (mock agent)', () => {
     expect(notes.some((m) => /draft PR/.test(m))).toBe(false);
   });
 
-  it('analysis: read-only run — read tools only, nothing committed, no PR', async () => {
-    const { store, manager, base } = fixture();
+  it('analysis: read-only run — read tools only, nothing committed, never enters review gate, no PR', async () => {
+    vi.stubEnv('CEZ_REVIEW_GATE', '1');
+    const { store, manager, base, repo } = fixture();
     const final = await settle(store, manager.startRun(ANALYSIS, { task: 'why is X slow? mock:done' }).id);
-    expect(final.status).not.toBe('failed');
+    expect(final.status).toBe('done');
     expect(final.readOnly).toBe(true);
     expect(final.pullRequestUrl).toBeUndefined();
     const worktree = final.worktreePath as string;
@@ -124,9 +128,25 @@ describe('lightweight workflow runs (mock agent)', () => {
     expect(existsSync(argsFile)).toBe(true);
     const argv = JSON.parse(readFileSync(argsFile, 'utf8').trim().split('\n')[0] as string) as string[];
     expect(argv[argv.indexOf('--allowedTools') + 1]).toBe('Read,Grep,Glob,WebFetch,WebSearch');
-    // The file the agent left is NOT autosave-committed: the branch still sits on the base.
+    // The file the agent left is NOT autosave-committed and NOT staged via git add -N:
+    // the branch still sits on the base and untracked files remain `??`, never intent-to-add (` A`).
     expect(git(worktree, 'rev-parse', 'HEAD')).toBe(base);
-    expect(git(worktree, 'status', '--porcelain')).toContain('mock-args.ndjson');
+    const statusLines = git(worktree, 'status', '--porcelain').split('\n');
+    expect(statusLines).toContain('?? mock-args.ndjson');
+    expect(statusLines.every((l) => l.startsWith('?? '))).toBe(true);
+    // Direct PR creation and the public HTTP endpoint are both refused for read-only runs.
+    await expect(createDraftPr({ repoRoot: repo, run: final, handoffText: '' })).resolves.toEqual({
+      ok: false,
+      error: 'read-only runs cannot open a pull request',
+    });
+    const app = createApp({ store, manager, repoRoot: repo, version: '0.0.0-test' });
+    const res = await apiRequest(app, `/api/v1/runs/${final.id}/pr`, {
+      method: 'POST',
+      headers: { origin: 'http://127.0.0.1:4321' },
+    });
+    expect(res.status).toBe(409);
+    await expect(res.json()).resolves.toMatchObject({ error: 'read-only runs cannot open a pull request' });
+    expect(store.getRun(final.id)?.pullRequestUrl).toBeUndefined();
   });
 
   it('guard: an ordinary task still autosave-commits what the agent left', async () => {

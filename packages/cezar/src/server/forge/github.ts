@@ -2458,6 +2458,9 @@ const PROGRESS_LINES_MAX = 10;
 
 export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome> {
   const { run } = input;
+  if (run.readOnly) {
+    return { ok: false, error: 'read-only runs cannot open a pull request' };
+  }
   const worktree = run.worktreePath;
   const branch = run.branch;
   if (!worktree || !branch) {

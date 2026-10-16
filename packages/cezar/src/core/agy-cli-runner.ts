@@ -580,7 +580,7 @@ export class AgyCliRunner implements AgentRunner {
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
       }
-      if (inspectionErrors > 0 && !checkStop) onEvent?.({ type: 'note', message: `Review continued after ${inspectionErrors} failed non-mandatory read(s); mandatory checkout evidence is complete.` });
+      if (inspectionErrors > 0 && !checkStop && evidence.hasContext) onEvent?.({ type: 'note', message: `Review continued after ${inspectionErrors} failed non-mandatory read(s); mandatory checkout evidence is complete.` });
 
       if (checkStop) {
         // Cezar killed agy at the request, so its exit code says nothing. The engine
