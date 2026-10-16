@@ -212,7 +212,7 @@ import { checkoutRepo, type CloneRunner } from './checkout.ts';
 import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
-import { agentHomePaths, cezarHomeDir, expandTilde, isAbsolutePath } from '../paths.ts';
+import { agentHomePaths, assertCezarHomeWriteIsSandboxed, cezarHomeDir, expandTilde, isAbsolutePath } from '../paths.ts';
 import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
@@ -3279,8 +3279,9 @@ export function createApp(deps: ServerDeps) {
     .post('/workspace/branding-logo', multipartZodValidator(() => brandingLogoUploadSchema), async (c) => {
       const { file } = c.req.valid('form');
       const bytes = Buffer.from(await file.arrayBuffer());
-      await mkdir(cezarHomeDir(), { recursive: true, mode: 0o700 });
       const path = join(cezarHomeDir(), BRANDING_LOGO_FILE);
+      assertCezarHomeWriteIsSandboxed(path);
+      await mkdir(cezarHomeDir(), { recursive: true, mode: 0o700 });
       const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
       try {
         await writeFile(tmp, bytes, { mode: 0o600, flag: 'wx' });
@@ -3292,6 +3293,7 @@ export function createApp(deps: ServerDeps) {
       return c.json(workspaceBrandingLogoResponseSchema.parse({ logoUrl: logoAssetUrl() }));
     })
     .delete('/workspace/branding-logo', async (c) => {
+      assertCezarHomeWriteIsSandboxed(join(cezarHomeDir(), BRANDING_LOGO_FILE));
       await Promise.all([BRANDING_LOGO_FILE, ...BRANDING_LOGO_EXTENSIONS.map((ext) => `${BRANDING_LOGO_FILE}${ext}`)]
         .map((filename) => unlink(join(cezarHomeDir(), filename)).catch(() => {})));
       return c.json(workspaceBrandingLogoResponseSchema.parse({ logoUrl: null }));

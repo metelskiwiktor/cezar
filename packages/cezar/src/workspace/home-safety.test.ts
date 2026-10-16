@@ -19,9 +19,15 @@ import { atomicWriteJsonSync, loadWorkspaceConfig, mergeWriteWorkspaceConfig } f
 describe('cezar home write safety', () => {
   const originalCezHome = process.env.CEZ_HOME;
   const originalHome = process.env.HOME;
+  const originalUserProfile = process.env.USERPROFILE;
   let pinned: string;
   let elsewhere: string;
   let fakeUserHome: string;
+
+  const setFakeUserHome = (dir: string): void => {
+    process.env.HOME = dir;
+    process.env.USERPROFILE = dir;
+  };
 
   beforeEach(() => {
     const base = realpathSync(tmpdir());
@@ -36,6 +42,8 @@ describe('cezar home write safety', () => {
     else process.env.CEZ_HOME = originalCezHome;
     if (originalHome === undefined) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = originalUserProfile;
     for (const dir of [pinned, elsewhere, fakeUserHome]) rmSync(dir, { recursive: true, force: true });
   });
 
@@ -76,7 +84,7 @@ describe('cezar home write safety', () => {
   });
 
   it('refuses a write into the real cezar home while running under vitest', () => {
-    process.env.HOME = fakeUserHome;
+    setFakeUserHome(fakeUserHome);
     delete process.env.CEZ_HOME;
     const target = workspaceConfigPath();
 
@@ -86,7 +94,7 @@ describe('cezar home write safety', () => {
   });
 
   it('leaves an existing real-home registry byte-for-byte intact when a leaked write is refused', () => {
-    process.env.HOME = fakeUserHome;
+    setFakeUserHome(fakeUserHome);
     delete process.env.CEZ_HOME;
     const target = workspaceConfigPath();
     const existing = '{"projects":[{"id":"real","root":"/repos/real"}]}\n';
@@ -112,14 +120,14 @@ describe('cezar home write safety', () => {
     // not touch the user's registry. The per-layer cases above are what fail if
     // any single defence is removed.
     const packageRoot = fileURLToPath(new URL('../..', import.meta.url));
-    const vitestBin = join(packageRoot, '..', '..', 'node_modules', '.bin', 'vitest');
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: fakeUserHome };
+    const vitestCli = join(packageRoot, '..', '..', 'node_modules', 'vitest', 'vitest.mjs');
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: fakeUserHome, USERPROFILE: fakeUserHome };
     delete env.CEZ_HOME;
     delete env.VITEST;
 
     const run = spawnSync(
-      vitestBin,
-      ['run', 'src/workspace/projects-cli.test.ts', '--testTimeout=15', '-t', 'remove'],
+      process.execPath,
+      [vitestCli, 'run', 'src/workspace/projects-cli.test.ts', '--testTimeout=15', '-t', 'remove'],
       { cwd: packageRoot, env, encoding: 'utf8' },
     );
 
@@ -130,7 +138,7 @@ describe('cezar home write safety', () => {
   }, 180_000);
 
   it('allows writes outside the real cezar home, and is inert outside vitest', () => {
-    process.env.HOME = fakeUserHome;
+    setFakeUserHome(fakeUserHome);
     const sandboxed = join(pinned, 'config.json');
 
     expect(() => assertCezarHomeWriteIsSandboxed(sandboxed)).not.toThrow();

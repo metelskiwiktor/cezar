@@ -23,10 +23,11 @@ import type { FsBrowseResponse } from './fs-browse.ts';
  */
 describe('GET /api/v1/fs/browse (step 4.1)', () => {
   const savedHome = process.env.HOME;
+  const savedUserProfile = process.env.USERPROFILE;
   const savedCezHome = process.env.CEZ_HOME;
   const savedRemote = process.env.CEZ_REMOTE;
   const savedBrowseRoot = process.env.CEZ_BROWSE_ROOT;
-  /** Stands in for the operator's `$HOME` — `os.homedir()` honors it on posix. */
+  /** Stands in for the operator's `$HOME` — `os.homedir()` honors `HOME` on posix and `USERPROFILE` on win32. */
   let home: string;
   /** A real directory that is NOT under `home`: the escape target. */
   let outside: string;
@@ -37,6 +38,7 @@ describe('GET /api/v1/fs/browse (step 4.1)', () => {
     home = realpathSync(mkdtempSync(join(tmpdir(), 'cez-fs-browse-home-')));
     outside = realpathSync(mkdtempSync(join(tmpdir(), 'cez-fs-browse-outside-')));
     process.env.HOME = home;
+    process.env.USERPROFILE = home;
     process.env.CEZ_HOME = join(home, '.cezar');
     delete process.env.CEZ_REMOTE; // local mode is the default under test
     delete process.env.CEZ_BROWSE_ROOT;
@@ -65,6 +67,7 @@ describe('GET /api/v1/fs/browse (step 4.1)', () => {
     store.flush();
     for (const [key, value] of [
       ['HOME', savedHome],
+      ['USERPROFILE', savedUserProfile],
       ['CEZ_HOME', savedCezHome],
       ['CEZ_REMOTE', savedRemote],
       ['CEZ_BROWSE_ROOT', savedBrowseRoot],

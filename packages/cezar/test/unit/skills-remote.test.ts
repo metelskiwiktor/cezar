@@ -106,10 +106,14 @@ test('listRemoteSkills clones a local repo, pins the SHA, and refuses a bad ref'
   const home = mkdtempSync(join(tmpdir(), 'cez-home-'));
   const srcDir = mkdtempSync(join(tmpdir(), 'cez-src-'));
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = home; // redirect the ~/.cache/cez skills cache into temp
+  process.env.USERPROFILE = home;
   t.after(() => {
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
     rmSync(home, { recursive: true, force: true });
     rmSync(srcDir, { recursive: true, force: true });
   });
@@ -124,7 +128,7 @@ test('listRemoteSkills clones a local repo, pins the SHA, and refuses a bad ref'
     '---\nname: demo\ndescription: a demo skill\n---\nbody text\n',
   );
   // A directory skill needs SKILL.md under a directory to be named after it.
-  execFileSync('mkdir', ['-p', join(srcDir, 'greeter')]);
+  mkdirSync(join(srcDir, 'greeter'), { recursive: true });
   writeFileSync(join(srcDir, 'greeter', 'SKILL.md'), '---\ndescription: hi\n---\nsay hi\n');
   g(['add', '-A']);
   g(['commit', '-m', 'init']);
@@ -156,11 +160,15 @@ test('listRemoteSkills clones a local repo, pins the SHA, and refuses a bad ref'
 test('team-skills cache is keyed by repoRoot — projects never see each other\'s skills', async (t) => {
   const home = mkdtempSync(join(tmpdir(), 'cez-home-'));
   const prevHome = process.env.HOME;
+  const prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = home; // redirect the ~/.cache/cez skills cache into temp
+  process.env.USERPROFILE = home;
   const dirs: string[] = [home];
   t.after(() => {
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
+    if (prevUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevUserProfile;
     for (const d of dirs) rmSync(d, { recursive: true, force: true });
   });
 

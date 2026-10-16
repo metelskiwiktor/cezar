@@ -194,6 +194,19 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
     expect(tokenCall?.env?.NGROK_AUTHTOKEN).toBe('SECRET-TOKEN');
   });
 
+  function withFakeHome<T>(fn: () => Promise<T>): Promise<T> {
+    const oldHome = process.env.HOME;
+    const oldUserProfile = process.env.USERPROFILE;
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
+    return fn().finally(() => {
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+      if (oldUserProfile === undefined) delete process.env.USERPROFILE;
+      else process.env.USERPROFILE = oldUserProfile;
+    });
+  }
+
   it('writes the credential-bearing plist 0600', async () => {
     const runner: Runner = {
       capture: async (_p, args) => {
@@ -202,20 +215,13 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
       },
       interactive: async () => 0,
     };
-    // point HOME-based plist path into the temp dir via a fake homedir? plistPath()
-    // uses the real homedir — instead assert through the file the step wrote.
-    const oldHome = process.env.HOME;
-    process.env.HOME = home; // node's os.homedir() honors $HOME on posix
-    try {
+    await withFakeHome(async () => {
       await ngrokStepOf().run(ctxFor(runner));
       const p = join(home, 'Library', 'LaunchAgents', 'ai.cezar.ngrok.plist');
       const mode = statSync(p).mode & 0o777;
       expect(mode).toBe(0o600);
       expect(readFileSync(p, 'utf8')).toContain('ops:longenough'); // creds live here → hence 0600
-    } finally {
-      if (oldHome === undefined) delete process.env.HOME;
-      else process.env.HOME = oldHome;
-    }
+    });
   });
 
   it('a failed launchctl bootstrap fails the step instead of recording done', async () => {
@@ -227,14 +233,9 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
       },
       interactive: async (_p, args) => (args[0] === 'bootstrap' ? 5 : 0),
     };
-    const oldHome = process.env.HOME;
-    process.env.HOME = home;
-    try {
+    await withFakeHome(async () => {
       await expect(ngrokStepOf().run(ctxFor(runner))).rejects.toThrow(/launchctl could not load/);
-    } finally {
-      if (oldHome === undefined) delete process.env.HOME;
-      else process.env.HOME = oldHome;
-    }
+    });
   });
 
   it('undo removes the agent from static label/path even with created:null', async () => {
@@ -246,15 +247,10 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
       },
       interactive: async () => 0,
     };
-    const oldHome = process.env.HOME;
-    process.env.HOME = home;
-    try {
+    await withFakeHome(async () => {
       await ngrokStepOf().undo(ctxFor(runner), null);
       expect(commands.some((c) => c[0] === 'bootout' && (c[1] ?? '').includes('ai.cezar.ngrok'))).toBe(true);
-    } finally {
-      if (oldHome === undefined) delete process.env.HOME;
-      else process.env.HOME = oldHome;
-    }
+    });
   });
 
   it('rejects a scheme-carrying domain (bare hostname only)', async () => {
@@ -279,14 +275,7 @@ describe('macosx-ngrok review fixes (PR #423)', () => {
         },
       },
     });
-    const oldHome = process.env.HOME;
-    process.env.HOME = home;
-    try {
-      await ngrokStepOf().run(ctx);
-    } finally {
-      if (oldHome === undefined) delete process.env.HOME;
-      else process.env.HOME = oldHome;
-    }
+    await withFakeHome(() => ngrokStepOf().run(ctx));
     expect(domainValidate).toBeDefined();
     expect(domainValidate?.('https://cezar.ngrok.app')).toBeDefined();
     expect(domainValidate?.('cezar.ngrok.app')).toBeUndefined();

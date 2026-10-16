@@ -1,5 +1,5 @@
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, afterEach, beforeEach } from 'vitest'
 
@@ -24,10 +24,14 @@ if (!process.env.GIT_CONFIG_COUNT) {
   process.env.GIT_CONFIG_VALUE_0 = 'false'
 }
 
+const realUserHome = homedir()
+const sandboxUserHome = mkdtempSync(join(realpathSync(tmpdir()), 'cez-vitest-user-'))
 const sandboxHome = mkdtempSync(join(realpathSync(tmpdir()), 'cez-vitest-home-'))
 
 const pinSandboxHome = (): void => {
   if (!process.env.CEZ_HOME) process.env.CEZ_HOME = sandboxHome
+  if (!process.env.HOME || process.env.HOME === realUserHome) process.env.HOME = sandboxUserHome
+  if (!process.env.USERPROFILE || process.env.USERPROFILE === realUserHome) process.env.USERPROFILE = sandboxUserHome
 }
 
 pinSandboxHome()
@@ -37,4 +41,5 @@ beforeEach(pinSandboxHome)
 afterEach(pinSandboxHome)
 afterAll(() => {
   rmSync(sandboxHome, { recursive: true, force: true })
+  rmSync(sandboxUserHome, { recursive: true, force: true })
 })

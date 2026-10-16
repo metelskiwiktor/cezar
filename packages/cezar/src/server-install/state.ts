@@ -11,6 +11,7 @@ import {
 import { createServer } from 'node:net';
 import { basename, dirname } from 'node:path';
 import {
+  assertCezarHomeWriteIsSandboxed,
   DEFAULT_SERVER_INSTANCE,
   serverInstancesDir,
   serverLockPath,
@@ -164,6 +165,7 @@ export async function instancePortConflict(
 /** Atomically persist state as `0600`, creating its dir (`0700`) if needed. */
 export function saveServerState(state: ServerState, instance: string = DEFAULT_SERVER_INSTANCE): void {
   const path = serverStatePath(instance);
+  assertCezarHomeWriteIsSandboxed(path);
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const tmp = `${path}.tmp`;
@@ -214,6 +216,7 @@ export class LockHeldError extends Error {}
  */
 export function acquireLock(instance: string = DEFAULT_SERVER_INSTANCE): () => void {
   const path = serverLockPath(instance);
+  assertCezarHomeWriteIsSandboxed(path);
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 
   // `wx` makes creation atomic — a plain exists-then-write check would let two
