@@ -124,7 +124,7 @@ export const workflowGraphNodeSchema = z.discriminatedUnion('type', [
     budgetUsd: z.number().positive().optional(),
   }),
   z.object({ ...graphNodeBase, type: z.literal('git.commit'), message: z.string().min(1) }),
-  z.object({ ...graphNodeBase, type: z.literal('github.draft-pr'), title: z.string().optional() }),
+  z.object({ ...graphNodeBase, type: z.literal('github.draft-pr'), title: z.string().optional(), ready: z.boolean().optional() }),
   /** `timeoutMs`/`pollMs` carry defaults server-side, so the served shape always has them. */
   z.object({
     ...graphNodeBase,

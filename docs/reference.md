@@ -326,7 +326,7 @@ whose counter never resets within a run, so every run is finite.
 | `ask-user` (`question`, `options?`, `timeoutMs?`) | `answered` (+`timeout`) | `answer` |
 | `dispatch` (`prompt`, `runner?`, `budgetUsd?`) | `done`, `failed` | `runId`, `status`, `summary` |
 | `git.commit` (`message`) | `done`, `nothing`, `failed` | `sha` |
-| `github.draft-pr` (`title?`) | `created`, `failed` | `url`, `number` |
+| `github.draft-pr` (`title?`, `ready?` — `true` opens it ready for review, never as a draft) | `created`, `failed` | `url`, `number` |
 | `github.wait-ci` (`timeoutMs`, `pollMs`) | `green`, `red`, `timeout`, `failed` (the task has no PR) | `status` |
 | `github.pr-comment` (`body`) | `done`, `failed` | — |
 | `fork` (`branches: 2–4`) | `1` … `4`, each wired to an agent | `runIds` |
@@ -356,6 +356,30 @@ whose counter never resets within a run, so every run is finite.
 - **Built-in templates** — `implement-and-verify`, `implement-review-pr`, `review-council`
   (three fresh reviewers at once, then a judge that ships or sends it back), `fix-ci` — sit
   next to `quick-task` (still the default). Open one in the editor; it saves as your copy.
+- **Lightweight workflows** — three built-ins where the agent owns the work and its own
+  self-check in ONE session, and cezar owns the worktree, the pinned base, the push and the PR:
+  - `implement` — one agent session implements, runs the verification the change warrants,
+    re-reads its diff, fixes what it finds and commits; cezar then pushes the branch and opens
+    the PR **ready for review** (never a draft). No test loop, review rounds or gate around it.
+  - `analysis` — one read-only step (`review: true`, tools `Read`, `Grep`, `Glob`, `WebFetch`,
+    `WebSearch`): the run is read-only end to end — credentials stripped, nothing
+    autosave-committed (also on Continue), no PR. Runners that ignore `allowedTools` (Codex,
+    OpenCode, Cursor) are held by the prompt and the no-commit rule, not a sandbox.
+  - `pr-review` — launched by a read-only PR automation (`task.readOnly: true` on a
+    `pull_request.*` trigger): the worktree forks from the PR HEAD cezar fetched, an
+    independent reviewer reads the real diff and the repo (and may run justified tests,
+    changing nothing), and cezar publishes ONE review per repo + PR + HEAD — only if the
+    agent succeeded and the PR HEAD has not moved. For **inline comments** the review ends
+    with one fenced block tagged `cez-inline-comments` holding
+    `[{"path":"src/a.ts","line":42,"body":"…"}]` (lines on the PR's new side). cezar posts
+    them as one GitHub review pinned to the reviewed commit; an invalid entry is dropped, and
+    if GitHub refuses the anchors they are listed in the review comment instead — neither
+    voids the review. On Agy, a failed non-mandatory read (a guessed or missing path) is a
+    note, not a failure, once the pinned diff, `AGENTS.md`, an affected file and every
+    trusted check result were read; permission denials, out-of-checkout reads and checkout
+    changes stay fatal.
+
+  Retro Lite is a separate process with its own semantics and is not part of any of them.
 - **Restarts** resume a walk parked at a gate, question, CI wait or subtask (or mid-check)
   at that node; an interrupted agent node keeps the usual Continue path.
 - **Verdicts.** An agent with `verdicts` ends its turn with `CEZ:VERDICT <name>`; the

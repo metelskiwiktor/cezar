@@ -67,7 +67,7 @@ export const READ_INSPECTION_TOOL_NAMES = new Set([
 ]);
 
 export const READ_ONLY_REVIEW_PROMPT =
-  'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools. Discover repository paths before opening them; do not guess module/index paths. For a prepared PR checkout, successfully read AGENTS.md, run the exact full PR diff command from the context, and use view_file on every surviving changed file before concluding the review. Report missing required files or denied access as incomplete review, never as approval.';
+  'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools. Discover repository paths before opening them; do not guess module/index paths. For a prepared PR checkout, successfully read AGENTS.md and the full PR diff, and inspect the changed code the review depends on. Report denied access as incomplete review, never as approval.';
 
 export const PR_REVIEW_SCOPE_PROMPT = [
   'You are an experienced second programmer reviewing a prepared PR checkout in READ-ONLY review mode. Inspect contracts, related unchanged modules, regressions and tests. Never edit sources, commit, push, merge, publish OTA/EAS or call gh.',
@@ -560,7 +560,7 @@ export class AgyCliRunner implements AgentRunner {
           : resultError ? `another provider error: ${resultError}`
           : isSignalTerminationExit(exitCode) ? `agy was terminated (code ${exitCode})`
           : toolErrors !== recoverableErrors ? 'a tool call failed'
-          : !evidence.complete() ? 'review evidence is incomplete (pinned diff, AGENTS.md, changed files, trusted check results, finished tool calls)'
+          : !evidence.strictComplete() ? 'review evidence is incomplete (pinned diff, AGENTS.md, changed files, trusted check results, finished tool calls)'
           : reviewVerdictRefusal(turnText);
         if (refusal) {
           const msg = `Agy provider function-call format error after the review text; recovery refused: ${refusal}. Nothing is published; the review text is kept in the run log for manual review. Provider error: ${formatError}`;
@@ -572,14 +572,15 @@ export class AgyCliRunner implements AgentRunner {
       }
 
       // A turn stopped for a trusted check is not a conclusion: its evidence may still be
-      // incomplete, and the final turn must complete it. A failed read never passes.
-      if (readOnly && ((inspectionErrors > 0 && (inspectionErrors !== recoverableErrors || (!checkStop && !evidence.complete()))) ||
-          (!checkStop && evidence.hasContext && !evidence.complete()))) {
-        const msg = `Tool execution failure: ${inspectionErrors} file inspection attempt(s) failed out of ${inspectionCalls}. Cannot complete review without unhindered file access and complete review evidence.`;
+      // incomplete, and the final turn must complete it. A failed in-scope read (a guessed or
+      // missing path) does not void a review whose mandatory evidence is complete — permission
+      // denials and scope violations were already fatal above, and integrity is checked below.
+      if (readOnly && !checkStop && evidence.hasContext && !evidence.complete()) {
+        const msg = `Tool execution failure: review evidence is incomplete (${inspectionErrors} of ${inspectionCalls} file inspection attempt(s) failed). The pinned diff, AGENTS.md, an affected file and every trusted check result must be read.`;
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
       }
-      if (recoverableErrors > 0 && evidence.complete()) onEvent?.({ type: 'note', message: `Review continued after ${recoverableErrors} bounded missing optional/discovery read(s); mandatory checkout evidence is complete.` });
+      if (inspectionErrors > 0 && !checkStop && evidence.hasContext) onEvent?.({ type: 'note', message: `Review continued after ${inspectionErrors} failed non-mandatory read(s); mandatory checkout evidence is complete.` });
 
       if (checkStop) {
         // Cezar killed agy at the request, so its exit code says nothing. The engine

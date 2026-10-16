@@ -267,6 +267,10 @@ export interface DraftPrInput {
   run: RunRecord;
   /** The task's handoff.md — becomes the PR body (goal + progress skim). */
   handoffText: string;
+  /** Open the PR ready for review instead of as a draft. Absent = draft (the review gate). */
+  ready?: boolean;
+  /** Delay base between transient `gh pr create` retries (default 1500ms; 0 in unit tests). */
+  retryDelayMs?: number;
 }
 
 /** Purpose-specific creation feed; independent of open lists and relevance search. */

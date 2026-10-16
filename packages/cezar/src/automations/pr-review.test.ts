@@ -2,6 +2,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   checkReviewText,
+  extractInlineComments,
+  INLINE_COMMENTS_TAG,
   preparePrReviewCheckout,
   prReviewMarker,
   publishPrReviewComment,
@@ -150,6 +152,149 @@ describe('publishPrReviewComment', () => {
     const { run, posts } = fakeRun({});
     await publishPrReviewComment({ ...base, body, run });
     expect(posts[0]?.body).toBe(`${body}\n\n${prReviewMarker(25, HEAD)}`);
+  });
+});
+
+describe('inline review comments', () => {
+  const block = (json: string) => `\n\n\`\`\`${INLINE_COMMENTS_TAG}\n${json}\n\`\`\`\n`;
+  const review = 'P1: src/a.ts:12 off-by-one in the loop bound; fix the comparison.\n\nRecommendation: CHANGES REQUESTED';
+
+  it('the prompt context documents the block format', () => {
+    expect(renderPrReviewContext({ number: 1, headSha: HEAD, baseRef: 'origin/main', mergeBase: BASE })).toContain('```' + INLINE_COMMENTS_TAG);
+  });
+
+  it('extracts valid comments, strips the block, and drops (never fails on) bad entries', () => {
+    const json = JSON.stringify([
+      { path: 'src/a.ts', line: 12, body: 'use <=' },
+      { path: '.\\src\\b.ts', line: 3, body: 'windows separators normalize' },
+      { path: '/abs/x.ts', line: 1, body: 'absolute' },
+      { path: '../out.ts', line: 1, body: 'traversal' },
+      { path: 'src/c.ts', line: 0, body: 'no line' },
+      { path: 'src/d.ts', line: 4, body: 'see C:\\Users\\me\\x' },
+      'garbage',
+    ]);
+    const out = extractInlineComments(`${review}${block(json)}`);
+    expect(out.text).toBe(review);
+    expect(out.comments).toEqual([
+      { path: 'src/a.ts', line: 12, body: 'use <=' },
+      { path: 'src/b.ts', line: 3, body: 'windows separators normalize' },
+    ]);
+    expect(out.dropped).toBe(5);
+  });
+
+  it('malformed JSON or unclosed/indented fences drop the block and never leak raw fence syntax', () => {
+    expect(extractInlineComments(`${review}${block('[{nope')}`)).toEqual({ text: review, comments: [], dropped: 1 });
+    expect(extractInlineComments(review)).toEqual({ text: review, comments: [], dropped: 0 });
+    const indented = `${review}\n\n   \`\`\`${INLINE_COMMENTS_TAG} json\n   [{"path":"src/a.ts","line":7,"body":"indented"}]\n   \`\`\`   \n`;
+    expect(extractInlineComments(indented)).toEqual({
+      text: review,
+      comments: [{ path: 'src/a.ts', line: 7, body: 'indented' }],
+      dropped: 0,
+    });
+    const tildes = `${review}\n\n~~~${INLINE_COMMENTS_TAG}\n[{"path":"src/a.ts","line":9,"body":"tildes"}]\n~~~\n`;
+    expect(extractInlineComments(tildes)).toEqual({
+      text: review,
+      comments: [{ path: 'src/a.ts', line: 9, body: 'tildes' }],
+      dropped: 0,
+    });
+    const unclosed = `${review}\n\n\`\`\`${INLINE_COMMENTS_TAG}\n[{"path":"src/a.ts","line":12,"body":"truncated"}`;
+    const outUnclosed = extractInlineComments(unclosed);
+    expect(outUnclosed).toEqual({ text: review, comments: [], dropped: 1 });
+    expect(outUnclosed.text).not.toContain(INLINE_COMMENTS_TAG);
+    expect(checkReviewText(`${review}\n\`\`\`${INLINE_COMMENTS_TAG} [{"path":"src/a.ts","line":1,"body":"x"}] \`\`\``)).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/unparsed cez-inline-comments/),
+    });
+  });
+
+  it('posts the line comments as one review pinned to the reviewed HEAD, then the review comment', async () => {
+    const { run, calls, posts } = fakeRun({ 'gh api --paginate': '' });
+    const inlineComments = [{ path: 'src/a.ts', line: 12, body: 'use <=' }];
+    await expect(publishPrReviewComment({ repoRoot: '/repo', repo: 'o/r', number: 25, headSha: HEAD, body: review, inlineComments, run }))
+      .resolves.toEqual({ status: 'published', inline: 1 });
+    expect(calls[1]).toBe('gh api --paginate repos/o/r/pulls/25/reviews --jq .[].body');
+    expect(calls[2]).toMatch(/^gh api --method POST repos\/o\/r\/pulls\/25\/reviews --input /);
+    expect(posts[0]).toMatchObject({
+      commit_id: HEAD,
+      event: 'COMMENT',
+      body: expect.stringContaining(prReviewMarker(25, HEAD)),
+      comments: [{ path: 'src/a.ts', line: 12, side: 'RIGHT', body: 'use <=' }],
+    });
+    expect(calls[3]).toMatch(/^gh api --method POST repos\/o\/r\/issues\/25\/comments --input /);
+    expect(posts[1]?.body).toBe(`${review}\n\n${prReviewMarker(25, HEAD)}`);
+  });
+
+  it('recovers idempotently when the main comment POST fails after inline review succeeded', async () => {
+    const state = { issueComments: [] as string[], reviews: [] as { body: string }[], failIssuePostOnce: true };
+    const calls: string[] = [];
+    const run: CommandRunner = async (exe, args) => {
+      const key = `${exe} ${args.join(' ')}`;
+      calls.push(key);
+      if (key.startsWith('gh api --paginate repos/o/r/issues/25/comments')) return state.issueComments.join('\n');
+      if (key.startsWith('gh api --paginate repos/o/r/pulls/25/reviews')) return state.reviews.map((r) => r.body).join('\n');
+      const i = args.indexOf('--input');
+      const payload = i >= 0 ? (JSON.parse(readFileSync(args[i + 1] as string, 'utf8')) as { body: string }) : { body: '' };
+      if (key.startsWith(`${POST}o/r/pulls/25/reviews`)) {
+        state.reviews.push(payload);
+        return '{}';
+      }
+      if (key.startsWith(`${POST}o/r/issues/25/comments`)) {
+        if (state.failIssuePostOnce) {
+          state.failIssuePostOnce = false;
+          throw new Error('HTTP 502 on issue comment');
+        }
+        state.issueComments.push(payload.body);
+        return '{}';
+      }
+      return '';
+    };
+    const inlineComments = [{ path: 'src/a.ts', line: 12, body: 'use <=' }];
+    // First attempt: inline review posts, main issue comment fails with 502.
+    await expect(publishPrReviewComment({ repoRoot: '/repo', repo: 'o/r', number: 25, headSha: HEAD, body: review, inlineComments, run }))
+      .rejects.toThrow(/502/);
+    expect(state.reviews).toHaveLength(1);
+    expect(state.issueComments).toHaveLength(0);
+
+    // Second attempt (retry): sees the existing inline review marker, skips reposting the review, and posts only the missing main comment.
+    await expect(publishPrReviewComment({ repoRoot: '/repo', repo: 'o/r', number: 25, headSha: HEAD, body: review, inlineComments, run }))
+      .resolves.toEqual({ status: 'published', inline: 1 });
+    expect(state.reviews).toHaveLength(1);
+    expect(state.issueComments).toHaveLength(1);
+    expect(state.issueComments[0]).toBe(`${review}\n\n${prReviewMarker(25, HEAD)}`);
+
+    // Third attempt: both exist now, skips completely.
+    await expect(publishPrReviewComment({ repoRoot: '/repo', repo: 'o/r', number: 25, headSha: HEAD, body: review, inlineComments, run }))
+      .resolves.toEqual({ status: 'skipped-duplicate' });
+    expect(state.reviews).toHaveLength(1);
+    expect(state.issueComments).toHaveLength(1);
+  });
+
+  it('a refused anchor (422) never costs the review: the comments fold into the review comment', async () => {
+    const { run, posts } = fakeRun({ 'gh api --paginate': '' }, `${POST}o/r/pulls/25/reviews`);
+    const inlineComments = [{ path: 'src/a.ts', line: 999, body: 'outside the diff' }];
+    await expect(publishPrReviewComment({ repoRoot: '/repo', repo: 'o/r', number: 25, headSha: HEAD, body: review, inlineComments, run }))
+      .resolves.toEqual({ status: 'published', inlineFallback: 1 });
+    expect(posts[1]?.body).toContain('### Inline comments\n\n- `src/a.ts:999` — outside the diff');
+    expect(posts[1]?.body).toContain(prReviewMarker(25, HEAD));
+  });
+
+  it('a duplicate HEAD posts neither the review nor its inline comments', async () => {
+    const { run, calls } = fakeRun({ 'gh api --paginate': prReviewMarker(25, HEAD) });
+    await expect(publishPrReviewComment({ repoRoot: '/repo', repo: 'o/r', number: 25, headSha: HEAD, body: review, inlineComments: [{ path: 'a', line: 1, body: 'b' }], run }))
+      .resolves.toEqual({ status: 'skipped-duplicate' });
+    expect(calls).toHaveLength(1);
+  });
+
+  it('publishReviewFromRun publishes the review without the block, inline comments anchored, drops reported', async () => {
+    const target = { repo: 'o/r', number: 25, headSha: HEAD, baseRef: 'origin/main', mergeBase: BASE };
+    const { run, posts } = fakeRun({ 'gh api repos/o/r/pulls/25': `${HEAD}\n`, 'gh api --paginate': '' });
+    let dropped = 0;
+    const text = `${review}${block(JSON.stringify([{ path: 'src/a.ts', line: 12, body: 'use <=' }, { path: '/etc/x', line: 1, body: 'bad' }]))}`;
+    await expect(publishReviewFromRun({ repoRoot: '/r', target, text, run, onInlineDropped: (n) => { dropped = n; } }))
+      .resolves.toEqual({ status: 'published', inline: 1 });
+    expect(dropped).toBe(1);
+    expect(posts[1]?.body).not.toContain(INLINE_COMMENTS_TAG);
+    expect(posts[1]?.body).toContain('Recommendation: CHANGES REQUESTED');
   });
 });
 

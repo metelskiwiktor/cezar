@@ -2455,9 +2455,42 @@ function mockGithubComments(kind: 'issue' | 'pr'): ForgeCommentsData {
 const PR_URL_RE = /https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/;
 const PUSH_TIMEOUT_MS = 60_000;
 const PROGRESS_LINES_MAX = 10;
+const PR_CREATE_MAX_ATTEMPTS = 4;
+const PR_CREATE_RETRY_DELAY_MS = 1_500;
+const TRANSIENT_PR_CREATE_RE = /no commits between\b|head sha can't be blank|head ref must be a branch|base sha can't be blank|was submitted too quickly|http 50[234]\b|bad gateway|service unavailable|gateway timeout/i;
+const AUTH_OR_PERM_PR_ERROR_RE = /auth|log ?in|credential|permission|forbidden|resource not accessible|insufficient|scope|saml|401|403/i;
+
+async function findExistingBranchPrUrl(worktree: string, branch: string): Promise<string | null> {
+  const res = await execTool(['pr', 'view', branch, '--json', 'url,state'], worktree, 'gh', 15_000);
+  if (!res.ok) return null;
+  try {
+    const parsed = JSON.parse(res.stdout) as { url?: unknown; state?: unknown };
+    if (typeof parsed.url !== 'string') return null;
+    if (typeof parsed.state === 'string' && parsed.state.toUpperCase() !== 'OPEN') return null;
+    const match = PR_URL_RE.exec(parsed.url);
+    return match ? match[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+async function localBranchHasCommitsAhead(worktree: string, baseTarget: string | undefined): Promise<boolean> {
+  if (!baseTarget || /^[0-9a-f]{7,40}$/i.test(baseTarget)) return true;
+  for (const ref of [`refs/remotes/origin/${baseTarget}`, baseTarget]) {
+    const count = await execTool(['rev-list', '--count', `${ref}..HEAD`], worktree, 'git', 10_000);
+    if (count.ok) {
+      const n = Number.parseInt(count.stdout.trim(), 10);
+      return Number.isFinite(n) ? n > 0 : true;
+    }
+  }
+  return true;
+}
 
 export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome> {
   const { run } = input;
+  if (run.readOnly) {
+    return { ok: false, error: 'read-only runs cannot open a pull request' };
+  }
   const worktree = run.worktreePath;
   const branch = run.branch;
   if (!worktree || !branch) {
@@ -2512,12 +2545,35 @@ export async function createDraftPr(input: DraftPrInput): Promise<DraftPrOutcome
   const baseArgs = run.prForkBase
     ? ['--base', run.prForkBase.targetBranch]
     : prBase && !/^[0-9a-f]{7,40}$/i.test(prBase) ? ['--base', prBase] : [];
-  const pr = await execTool(
-    ['pr', 'create', '--draft', '--head', branch, ...baseArgs, '--title', run.title, '--body', body],
-    worktree,
-    'gh',
-    PUSH_TIMEOUT_MS,
-  );
+  const createArgs = ['pr', 'create', ...(input.ready ? [] : ['--draft']), '--head', branch, ...baseArgs, '--title', run.title, '--body', body];
+  const delayBaseMs = input.retryDelayMs ?? PR_CREATE_RETRY_DELAY_MS;
+
+  let pr = await execTool(createArgs, worktree, 'gh', PUSH_TIMEOUT_MS);
+  for (let attempt = 1; !pr.ok && !pr.notFound; attempt++) {
+    const combined = `${pr.stdout}\n${pr.stderr}`;
+    const urlInError = PR_URL_RE.exec(combined);
+    if (urlInError) {
+      return { ok: true, url: urlInError[0], dryRun: false };
+    }
+    if (AUTH_OR_PERM_PR_ERROR_RE.test(combined)) break;
+    // Even when `gh pr create` failed or timed out, GitHub may have created the PR (or a prior
+    // attempt did) — check before retrying or reporting failure so we never create a duplicate.
+    if (/already exists/i.test(combined) || TRANSIENT_PR_CREATE_RE.test(combined)) {
+      const existingUrl = await findExistingBranchPrUrl(worktree, branch);
+      if (existingUrl) {
+        return { ok: true, url: existingUrl, dryRun: false };
+      }
+    }
+    if (attempt >= PR_CREATE_MAX_ATTEMPTS || !TRANSIENT_PR_CREATE_RE.test(combined)) break;
+    if (/no commits between\b/i.test(combined) && !(await localBranchHasCommitsAhead(worktree, baseArgs[1]))) {
+      break;
+    }
+    if (delayBaseMs > 0) {
+      await new Promise((r) => setTimeout(r, delayBaseMs * attempt));
+    }
+    pr = await execTool(createArgs, worktree, 'gh', PUSH_TIMEOUT_MS);
+  }
+
   if (!pr.ok) {
     if (pr.notFound) {
       return { ok: false, error: 'gh not found — install the GitHub CLI and run `gh auth login`, or merge the branch locally' };

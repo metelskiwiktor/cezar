@@ -19,6 +19,62 @@ function builtIn(name: string, description: string, graph: WorkflowGraph): Workf
   return { name, description, source: 'built-in', steps: graphToSteps(graph), graph };
 }
 
+/**
+ * The three lightweight workflows (`implement`, `analysis`, `pr-review`): the agent owns the
+ * work and its own self-check in ONE session; cezar owns the worktree, the pinned base, the push
+ * and the PR. No extra review rounds, no gates, no test loop wrapped around the agent.
+ */
+export const IMPLEMENT = builtIn(
+  'implement',
+  'One agent session implements, verifies proportionately and self-checks; cezar then opens the PR ready for review.',
+  {
+    nodes: [
+      { id: 'start', type: 'start' },
+      {
+        id: 'implement',
+        type: 'agent',
+        name: 'Implement',
+        prompt:
+          '{{task}}\n\n---\n' +
+          'Work in this one session: implement the change, run the verification it warrants (the tests that cover what you touched — not ceremony), ' +
+          're-read your own diff and fix what you find, then commit on the current branch. ' +
+          'Do not push, open a PR or merge: when you finish, cezar pushes the branch and opens the pull request ready for review.',
+      },
+      { id: 'pr', type: 'github.draft-pr', name: 'Open PR', ready: true },
+      { id: 'done', type: 'end', name: 'PR opened', status: 'success' },
+    ],
+    edges: [
+      { from: 'start', to: 'implement' },
+      { from: 'implement.done', to: 'pr' },
+      { from: 'pr.created', to: 'done' },
+    ],
+  },
+);
+
+/**
+ * Analysis only: one read-only agent step. `review: true` on every step makes the whole run
+ * read-only (`isReadOnlyWorkflow`): credentials stripped, nothing autosave-committed, no PR.
+ * The tool list keeps Claude (and Agy) to inspection; runners that ignore `allowedTools` are
+ * held by the prompt and the no-commit rule.
+ */
+export const ANALYSIS: WorkflowDef = {
+  name: 'analysis',
+  description: 'Read-only analysis: the agent investigates and reports — no code changes, no commits, no PR.',
+  source: 'built-in',
+  steps: [
+    {
+      id: 'analysis',
+      name: 'Analyse',
+      review: true,
+      allowedTools: ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch'],
+      prompt:
+        '{{task}}\n\n---\n' +
+        'This is a READ-ONLY analysis: do not edit, create or delete files, do not commit, push or open a PR. ' +
+        'Investigate the repository and answer with your findings, citing repo-relative path:line.',
+    },
+  ],
+};
+
 export const IMPLEMENT_AND_VERIFY = builtIn(
   'implement-and-verify',
   'Implement the task, run the tests, and loop a fixer on red (up to 3 rounds).',
@@ -208,7 +264,7 @@ export const REVIEW_COUNCIL = builtIn(
  */
 export const PR_REVIEW = builtIn(
   'pr-review',
-  'Review a pull request read-only, then publish the review as one PR comment (once per PR head).',
+  'Review a pull request read-only at its pinned HEAD, then publish the review (with optional inline line comments) once per PR head.',
   {
     nodes: [
       { id: 'start', type: 'start' },
@@ -228,4 +284,13 @@ export const PR_REVIEW = builtIn(
   },
 );
 
-export const BUILT_IN_GRAPH_WORKFLOWS: readonly WorkflowDef[] = [IMPLEMENT_AND_VERIFY, IMPLEMENT_REVIEW_PR, REVIEW_COUNCIL, FIX_CI, PR_REVIEW];
+/** Every built-in besides `quick-task` (`analysis` is a plain step workflow, like it). */
+export const BUILT_IN_GRAPH_WORKFLOWS: readonly WorkflowDef[] = [
+  IMPLEMENT,
+  ANALYSIS,
+  IMPLEMENT_AND_VERIFY,
+  IMPLEMENT_REVIEW_PR,
+  REVIEW_COUNCIL,
+  FIX_CI,
+  PR_REVIEW,
+];

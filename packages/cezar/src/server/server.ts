@@ -4912,6 +4912,7 @@ export function createApp(deps: ServerDeps) {
       const id = c.req.param('id');
       const run = store.getRun(id);
       if (!run) return c.json({ error: 'not found' }, 404);
+      if (run.readOnly) return c.json({ error: 'read-only runs cannot open a pull request' }, 409);
       if (manager.isActive(id)) return c.json({ error: 'run is still active — wait for the review gate' }, 409);
       if (!run.worktreePath || !existsSync(run.worktreePath) || !run.branch) {
         return c.json(

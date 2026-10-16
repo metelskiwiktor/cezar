@@ -133,6 +133,7 @@ import {
   DEFAULT_ALLOWED_TOOLS,
   retryableExit,
   stepKind,
+  isReadOnlyWorkflow,
   type WorkflowDef,
   type WorkflowStepDef,
 } from './types.ts';
@@ -1394,7 +1395,8 @@ export class RunManager {
       baseBranch: input.baseBranch,
       model: effectiveInput.model,
       runner: input.runner,
-      readOnly: input.readOnly,
+      // A read-only workflow (`analysis`) makes the whole run read-only, Continue included.
+      readOnly: isReadOnlyWorkflow(workflow) ? true : input.readOnly,
       prReview: input.prReview,
       // The composer's per-task account (spec 2026-07-29-agent-profiles). Persisted at creation
       // so a queued run picks it up at dequeue and every later resume reads the same answer.
@@ -4224,7 +4226,7 @@ export class RunManager {
       this.recordUsagePeaks(runId, state);
       this.clearIdleTimer(state);
       this.clearAutosaveTimer(state);
-      if (!state.cancelled && this.active.get(runId) === state && state.cwd !== this.repoRoot) {
+      if (!state.cancelled && this.active.get(runId) === state && state.cwd !== this.repoRoot && !this.isReadOnlyRun(runId)) {
         await autosaveCommit(state.cwd, 'turn end');
       }
       this.dropActive(runId, state);
@@ -4495,7 +4497,7 @@ export class RunManager {
 
     // Final autosave: the branch always ends holding the finished state.
     this.clearAutosaveTimer(state);
-    if (!state.cancelled && this.active.get(runId) === state && state.cwd !== this.repoRoot) {
+    if (!state.cancelled && this.active.get(runId) === state && state.cwd !== this.repoRoot && !this.isReadOnlyRun(runId)) {
       await autosaveCommit(state.cwd, 'run finalize');
     }
 
@@ -5126,24 +5128,26 @@ export class RunManager {
         if (run.pullRequestUrl) {
           const n = /\/pull\/(\d+)/.exec(run.pullRequestUrl)?.[1];
           outputs.set(node.id, { url: run.pullRequestUrl, number: n ? Number(n) : '' });
-          note(`draft PR already open: ${run.pullRequestUrl}`);
+          note(`PR already open: ${run.pullRequestUrl}`);
           return 'created';
         }
         const title = node.title ? render(node.title) : undefined;
+        const kind = node.ready ? 'ready-for-review PR' : 'draft PR';
         const outcome = await createDraftPr({
           repoRoot: this.repoRoot,
           run: title ? { ...run, title } : run,
           handoffText: readHandoff(this.dataDir, runId),
+          ...(node.ready ? { ready: true } : {}),
         });
         if (!outcome.ok) {
-          note(`draft PR failed — ${outcome.error}`, 'danger');
+          note(`${kind} failed — ${outcome.error}`, 'danger');
           return 'failed';
         }
         this.store.updateRun(runId, { pullRequestUrl: outcome.url });
         const number = /\/pull\/(\d+)/.exec(outcome.url)?.[1];
         if (number) this.store.recordPrRef(runId, { number: Number(number), url: outcome.url, origin: 'created' });
         outputs.set(node.id, { url: outcome.url, number: number ? Number(number) : '' });
-        note(`draft PR opened: ${outcome.url}`);
+        note(`${kind} opened: ${outcome.url}`);
         return 'created';
       }
       case 'github.pr-comment': {
@@ -5200,6 +5204,7 @@ export class RunManager {
             target,
             text,
             onFormatRepair: () => note('review preflight: omitted a local executable literal in one formatting pass; the full body passed revalidation'),
+            onInlineDropped: (count) => note(`review preflight: dropped ${count} invalid inline comment(s); the review itself is unaffected`),
             ...(model ? { model } : {}),
             ...(runner ? { runner } : {}),
             dryRun: process.env.CEZ_PR_REVIEW_DRY_RUN === '1',
@@ -5227,7 +5232,11 @@ export class RunManager {
             case 'published':
               outputs.set(node.id, { status: 'published', headSha: target?.headSha ?? '' });
               onOutputs();
-              note(`review published on ${where}`);
+              note(
+                `review published on ${where}` +
+                  (res.inline ? ` with ${res.inline} inline comment(s)` : '') +
+                  (res.inlineFallback ? ` — GitHub refused ${res.inlineFallback} inline anchor(s); they are listed in the review comment` : ''),
+              );
               return 'published';
           }
         } catch (err) {
@@ -6317,7 +6326,7 @@ export class RunManager {
       // Titles are the namer's job (task auto-naming spec) — turn text is
       // deliberately NEVER a title source; see maybeRefreshTitle below. The
       // one exception is an explicit CEZ:TITLE declaration (applied above).
-      if (run.worktreePath && existsSync(run.worktreePath)) {
+      if (run.worktreePath && existsSync(run.worktreePath) && !run.readOnly) {
         // `taskBranch` + `runStartedAt` are what keep this number *this task's* (#751): a
         // review/QA run repoints the worktree onto the branch under review, and without the
         // branch to compare HEAD against and the moment it was checked out, the stat would
@@ -6439,7 +6448,7 @@ export class RunManager {
   /** Whether settling this run now would park it at the review gate (#489). */
   private async reviewGateApplies(runId: string): Promise<boolean> {
     const run = this.store.getRun(runId);
-    if (!run?.worktreePath || !existsSync(run.worktreePath)) return false;
+    if (!run?.worktreePath || !existsSync(run.worktreePath) || run.readOnly) return false;
     const diff = await worktreeDiff(run.worktreePath, run.baseBranch ?? 'HEAD');
     const hasDiff = diff.trim().length > 0 && !diff.startsWith('(diff failed');
     const config = await loadConfig(this.repoRoot);
@@ -6841,11 +6850,17 @@ export class RunManager {
     if (runId) this.store.updateRun(runId, { monitoringWakeAt: undefined });
   }
 
+  /** A read-only run (PR review, `analysis`) never commits: whatever a runner that ignores
+   *  `allowedTools` left in the worktree stays uncommitted instead of becoming the run's work. */
+  private isReadOnlyRun(runId: string): boolean {
+    return this.store.getRun(runId)?.readOnly === true;
+  }
+
   /** Autosave-commit the worktree every 90 s while the run lives (spec 006).
    *  Opt-in via CEZ_AUTOSAVE=1 (#471) — see periodicAutosaveEnabled. */
   private armAutosave(runId: string, state: ActiveRun): void {
     if (!periodicAutosaveEnabled()) return;
-    if (state.cwd === this.repoRoot || state.autosaveTimer) return;
+    if (state.cwd === this.repoRoot || state.autosaveTimer || this.isReadOnlyRun(runId)) return;
     state.autosaveTimer = setInterval(() => {
       if (this.active.get(runId) !== state || state.cancelled) return;
       void autosaveCommit(state.cwd, 'periodic');
