@@ -414,6 +414,14 @@ export function reviewSourceFingerprint(cwd: string): string {
   return JSON.stringify([...files(cwd)].sort(([a], [b]) => a.localeCompare(b)));
 }
 
+/** Paths that differ between two fingerprints: names only, never contents or hashes. */
+export function reviewSourceChanges(before: string, after: string): string[] {
+  const parse = (fp: string) => { try { return new Map(JSON.parse(fp) as [string, string][]); } catch { return new Map<string, string>(); } };
+  const a = parse(before);
+  const b = parse(after);
+  return [...new Set([...a.keys(), ...b.keys()])].filter((p) => a.get(p) !== b.get(p)).sort();
+}
+
 export async function executeReviewCheck(cwd: string, request: ReviewCheck, env: NodeJS.ProcessEnv, timeoutMs: number,
   onChild?: (child: ChildProcessWithoutNullStreams) => void): Promise<string> {
   if (request.args[0] === 'just' && ['flow', 'device', 'scenario'].includes(request.args[1] ?? '')) return 'UI/emulator check skipped: no separate resource authorization; no device was started.';
