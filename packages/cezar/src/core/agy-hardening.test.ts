@@ -164,7 +164,9 @@ describe('AgyCliRunner security hardening & isolation', () => {
 
     async function recoveryRun(overrides: Record<string, string> = {}, posts: string[] = []) {
       const repo = makeRepo();
-      writeFileSync(join(repo, 'AGENTS.md'), 'Review instructions\n');
+      if (!overrides.FAKE_AGY_NO_AGENTS_FILE) {
+        writeFileSync(join(repo, 'AGENTS.md'), 'Review instructions\n');
+      }
       mkdirSync(join(repo, 'src'));
       writeFileSync(join(repo, 'src/models.ts'), 'export type Model = string;\n');
       const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
@@ -292,6 +294,33 @@ describe('AgyCliRunner security hardening & isolation', () => {
       const posts: string[] = [];
       await expect(recoveryRun({ FAKE_AGY_SKIP_ERROR: '1', FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/evidence/);
       expect(posts).toEqual([]);
+    });
+
+    it('allows review to succeed and publish when AGENTS.md does not exist in checkout', async () => {
+      const posts: string[] = [];
+      await expect(
+        recoveryRun({ FAKE_AGY_NO_AGENTS_FILE: '1', FAKE_AGY_OMIT: 'agents' }, posts),
+      ).resolves.toMatchObject({ publish: { status: 'published' } });
+      expect(posts).toHaveLength(1);
+    });
+
+    it('forgives ENOENT when agent attempts to read missing AGENTS.md in repo without it', async () => {
+      const posts: string[] = [];
+      await expect(
+        recoveryRun(
+          {
+            FAKE_AGY_NO_AGENTS_FILE: '1',
+            FAKE_AGY_OMIT: 'agents',
+            FAKE_AGY_MISSING_PATH: 'AGENTS.md',
+            FAKE_AGY_ERROR: 'ENOENT: no such file or directory',
+          },
+          posts,
+        ),
+      ).resolves.toMatchObject({
+        publish: { status: 'published' },
+        notes: expect.arrayContaining([expect.stringContaining('mandatory checkout evidence is complete')]),
+      });
+      expect(posts).toHaveLength(1);
     });
 
     it('uses the Cezar-pinned complete diff instead of requiring a native Agy command', async () => {

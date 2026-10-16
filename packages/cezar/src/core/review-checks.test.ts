@@ -332,6 +332,43 @@ describe('trusted check policy and source integrity', { timeout: 30_000 }, () =>
       expect(ev1.allowsFileInspection({ id: 'outside', name: 'list_dir', input: { DirectoryPath: join(r.cwd, '..') } })).toBe(false);
     } finally { diff.cleanup(); }
   });
+  it('handles presence vs absence of AGENTS.md in checkout', () => {
+    const r = repo();
+    const head = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: r.cwd, encoding: 'utf8' }).trim();
+    const diff = prepareReviewDiff(r.cwd, r.base, head);
+    try {
+      const read = (evidence: AgyReviewEvidence, id: string, path: string, range = {}) => {
+        evidence.call({ id, name: 'view_file', input: { AbsolutePath: path, ...range } });
+        evidence.result(id, false, '');
+      };
+
+      // Case 1: AGENTS.md exists in repo (repo() creates it) -> reading it is required
+      const evWithAgents = new AgyReviewEvidence({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: head } });
+      evWithAgents.deliverTrustedDiff(diff.file, diff.lines, diff.parts);
+      read(evWithAgents, 'diff', diff.file);
+      read(evWithAgents, 'tracked', join(r.cwd, 'tracked.txt'));
+      expect(evWithAgents.complete()).toBe(false);
+      read(evWithAgents, 'agents', join(r.cwd, 'AGENTS.md'));
+      expect(evWithAgents.complete()).toBe(true);
+
+      // Case 2: Repository WITHOUT AGENTS.md (e.g. cezar-adapter)
+      rmSync(join(r.cwd, 'AGENTS.md'));
+      const evWithoutAgents = new AgyReviewEvidence({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: head } });
+      evWithoutAgents.deliverTrustedDiff(diff.file, diff.lines, diff.parts);
+      read(evWithoutAgents, 'diff', diff.file);
+      read(evWithoutAgents, 'tracked', join(r.cwd, 'tracked.txt'));
+      // AGENTS.md does not exist -> review is complete without reading it
+      expect(evWithoutAgents.complete()).toBe(true);
+
+      // Harmless ENOENT reading of optional missing AGENTS.md does not void review
+      evWithoutAgents.call({ id: 'miss_agents', name: 'view_file', input: { AbsolutePath: join(r.cwd, 'AGENTS.md') } });
+      const forgiven = evWithoutAgents.result('miss_agents', true, 'ENOENT: no such file or directory');
+      expect(forgiven).toBe(true);
+      expect(evWithoutAgents.complete()).toBe(true);
+    } finally {
+      diff.cleanup();
+    }
+  });
   it('cleans only new temporary artifacts and preserves sources', async () => {
     const r = repo('const fs=require("fs"); fs.mkdirSync("coverage",{recursive:true}); fs.writeFileSync("coverage/result.txt","temporary"); console.log("passed")');
     await expect(executeReviewCheck(r.cwd, { args: ['just', 'test'], reason: 'contract' }, process.env, 10_000)).resolves.toContain('Exit: 0');

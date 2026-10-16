@@ -11,7 +11,7 @@ import { loadWorkflows } from './load.ts';
 import { readNodeText } from './node-text.ts';
 import { RunManager } from './run.ts';
 import { PR_REVIEW } from './templates.ts';
-import type { WorkflowDef } from './types.ts';
+import { reviewsPullRequest, type WorkflowDef } from './types.ts';
 
 const execFileAsync = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -231,4 +231,154 @@ describe('pr-review workflow run (mock agent, fake gh)', () => {
     expect(store.getRun(third)?.graphState?.outputs?.publish).toMatchObject({ status: 'duplicate' });
     expect(readFileSync(join(repoRoot, 'a.txt'), 'utf8')).toBe('one\n');
   }, 60_000);
+
+  it('automatically prepares PR checkout when launched with PR number in prompt and forks from PR HEAD', async () => {
+    // 1. Create a PR branch with a distinct file to prove the worktree forks from the PR HEAD
+    await execFileAsync('git', ['checkout', '-q', '-b', 'pr-42-branch'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'pr-only-file.txt'), 'content of PR 42\n');
+    await execFileAsync('git', ['add', 'pr-only-file.txt'], { cwd: repoRoot });
+    await execFileAsync('git', [...GIT_ID, 'commit', '-q', '-m', 'pr 42 commit'], { cwd: repoRoot });
+    const prHeadSha = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot })).stdout.trim();
+    await execFileAsync('git', ['checkout', '-q', 'main'], { cwd: repoRoot });
+    const mainHeadSha = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot })).stdout.trim();
+    await execFileAsync('git', ['remote', 'add', 'origin', 'https://github.com/metelskiwiktor/tabnote.git'], { cwd: repoRoot });
+
+    const posts: string[] = [];
+    const calls: string[] = [];
+    const mockRunner: CommandRunner = async (exe, args) => {
+      calls.push(`${exe} ${args.join(' ')}`);
+      if (exe === 'gh') {
+        if (args[0] === 'pr' && args[1] === 'view' && args[2] === '42') {
+          return JSON.stringify({ baseRefName: 'main' });
+        }
+        if (args[1] === `repos/metelskiwiktor/tabnote/pulls/42`) return `${prHeadSha}\n`;
+        if (args[1] === '--paginate') return '';
+        if (args[1] === '--method' && args[2] === 'POST' && args[3] === `repos/metelskiwiktor/tabnote/issues/42/comments`) {
+          const { body } = JSON.parse(readFileSync(args[5] as string, 'utf8')) as { body: string };
+          posts.push(body);
+          return '{}';
+        }
+      }
+      if (exe === 'git') {
+        if (args[0] === 'fetch') {
+          await execFileAsync('git', ['update-ref', 'refs/cez/pr/42/head', prHeadSha], { cwd: repoRoot });
+          await execFileAsync('git', ['update-ref', 'refs/remotes/origin/main', mainHeadSha], { cwd: repoRoot });
+          return '';
+        }
+        const res = await execFileAsync('git', [...args], { cwd: repoRoot });
+        return res.stdout;
+      }
+      throw new Error(`unexpected command ${exe} ${args.join(' ')}`);
+    };
+
+    manager = new RunManager(store, repoRoot, { prReviewCommandRunner: mockRunner });
+    // Start run without explicit prReview: Cezar must extract #42 from the task prompt and prepare the checkout!
+    const id = manager.startRun(PR_REVIEW, {
+      task: 'Review pull request #42 mock:review=500 in this repository',
+    }).id;
+
+    // Verify initial state: readOnly is forced true, prNumber is 42
+    const initial = store.getRun(id)!;
+    expect(initial.readOnly).toBe(true);
+    expect(initial.prNumber).toBe(42);
+
+    const final = await until(id, terminal);
+    expect(final.status).not.toBe('failed');
+    expect(final.readOnly).toBe(true);
+    expect(final.prReview).toEqual({
+      repo: 'metelskiwiktor/tabnote',
+      number: 42,
+      headSha: prHeadSha,
+      baseRef: 'origin/main',
+      mergeBase: mainHeadSha,
+    });
+    expect(final.baseBranch).toBe(prHeadSha);
+    expect(final.task).toContain('PR review checkout (prepared by cezar)');
+    expect(final.task).toContain(`The PR diff is: git diff ${mainHeadSha} ${prHeadSha}`);
+
+    // Verify the created worktree actually has the PR files!
+    expect(final.worktreePath).toBeDefined();
+    expect(readFileSync(join(final.worktreePath!, 'pr-only-file.txt'), 'utf8').trim()).toBe('content of PR 42');
+
+    // Verify GitHub comment was published with the right marker
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toContain(prReviewMarker(42, prHeadSha));
+  }, 60_000);
+
+  it('automatically prepares PR checkout when launched with prNumber input parameter', async () => {
+    await execFileAsync('git', ['checkout', '-q', '-b', 'pr-55-branch'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'pr-55-file.txt'), 'content of PR 55\n');
+    await execFileAsync('git', ['add', 'pr-55-file.txt'], { cwd: repoRoot });
+    await execFileAsync('git', [...GIT_ID, 'commit', '-q', '-m', 'pr 55 commit'], { cwd: repoRoot });
+    const prHeadSha = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot })).stdout.trim();
+    await execFileAsync('git', ['checkout', '-q', 'main'], { cwd: repoRoot });
+    const mainHeadSha = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot })).stdout.trim();
+    if (!(await execFileAsync('git', ['remote'], { cwd: repoRoot })).stdout.includes('origin')) {
+      await execFileAsync('git', ['remote', 'add', 'origin', 'https://github.com/metelskiwiktor/tabnote.git'], { cwd: repoRoot });
+    }
+
+    const posts: string[] = [];
+    const mockRunner: CommandRunner = async (exe, args) => {
+      if (exe === 'gh') {
+        if (args[0] === 'pr' && args[1] === 'view' && args[2] === '55') {
+          return JSON.stringify({ baseRefName: 'main' });
+        }
+        if (args[1] === `repos/metelskiwiktor/tabnote/pulls/55`) return `${prHeadSha}\n`;
+        if (args[1] === '--paginate') return '';
+        if (args[1] === '--method' && args[2] === 'POST') {
+          const { body } = JSON.parse(readFileSync(args[5] as string, 'utf8')) as { body: string };
+          posts.push(body);
+          return '{}';
+        }
+      }
+      if (exe === 'git') {
+        if (args[0] === 'fetch') {
+          await execFileAsync('git', ['update-ref', 'refs/cez/pr/55/head', prHeadSha], { cwd: repoRoot });
+          await execFileAsync('git', ['update-ref', 'refs/remotes/origin/main', mainHeadSha], { cwd: repoRoot });
+          return '';
+        }
+        const res = await execFileAsync('git', [...args], { cwd: repoRoot });
+        return res.stdout;
+      }
+      throw new Error(`unexpected command ${exe} ${args.join(' ')}`);
+    };
+
+    manager = new RunManager(store, repoRoot, { prReviewCommandRunner: mockRunner });
+    // Start with prompt that doesn't name #55, but prNumber: 55 is provided
+    const id = manager.startRun(PR_REVIEW, {
+      task: 'Review the changes thoroughly mock:review=500',
+      prNumber: 55,
+    }).id;
+
+    const final = await until(id, terminal);
+    expect(final.status).not.toBe('failed');
+    expect(final.prReview?.number).toBe(55);
+    expect(final.prReview?.headSha).toBe(prHeadSha);
+    expect(readFileSync(join(final.worktreePath!, 'pr-55-file.txt'), 'utf8').trim()).toBe('content of PR 55');
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).toContain(prReviewMarker(55, prHeadSha));
+  }, 60_000);
+
+  it('fails cleanly without calling GitHub if no PR number can be identified', async () => {
+    const gh = fakeGh({ remoteHead: HEAD, comments: [] });
+    manager = new RunManager(store, repoRoot, { prReviewCommandRunner: gh.run });
+    const id = manager.startRun(PR_REVIEW, {
+      task: 'Please review these changes',
+    }).id;
+
+    const final = await until(id, terminal);
+    expect(final.status).toBe('failed');
+    expect(final.error).toContain('PR review pre-flight failed: no pull request number identified for review');
+    expect(gh.calls).toEqual([]);
+  }, 30_000);
+
+  it('ignores worktree: false and forces isolated worktree and readOnly for pr-review', async () => {
+    manager = new RunManager(store, repoRoot);
+    const run = manager.startRun(PR_REVIEW, {
+      task: 'Review PR #99',
+      worktree: false,
+    });
+    expect(run.readOnly).toBe(true);
+    expect(run.worktree).toBeUndefined(); // Opt-out overridden
+  });
 });

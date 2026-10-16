@@ -159,6 +159,11 @@ export function isReadOnlyWorkflow(def: Pick<WorkflowDef, 'steps' | 'graph'>): b
   return !def.graph && def.steps.length > 0 && def.steps.every((s) => stepKind(s) === 'agent' && s.review === true);
 }
 
+/** Structural intent: does this workflow review a pull request? */
+export function reviewsPullRequest(workflow: Pick<WorkflowDef, 'steps' | 'graph'>): boolean {
+  return workflow.graph?.nodes.some((n) => n.type === 'github.review-comment') ?? false;
+}
+
 /**
  * Does this failing exit code buy the agent another attempt? With no `retryOn`
  * list — every workflow written before the field, and every one that doesn't

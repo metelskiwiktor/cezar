@@ -922,6 +922,12 @@ export const createRunInputBaseSchema = z
     /** false → run in the repo working tree instead of an isolated worktree (read-only skills).
      *  Omit for the default. Ignored server-side when variants > 1. */
     worktree: z.boolean().optional(),
+    /** Base branch/commit to anchor the worktree or run against (e.g. for PR reviews) */
+    baseBranch: z.string().trim().min(1).max(200).optional(),
+    /** Explicit read-only mode for review tasks. Enforces file system and environment sandbox. */
+    readOnly: z.boolean().optional(),
+    /** Optional pull request number to review or associate with this run. */
+    prNumber: z.number().int().positive().optional(),
     /** true → autonomous run: never parks at "waiting"; auto-continues until done. */
     autonomous: z.boolean().optional(),
     /** false → keep the handoff journal but do not expose or request a follow-up todos file.
