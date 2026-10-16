@@ -129,15 +129,32 @@ export function prepareReviewDiff(cwd: string, base: string, head: string) {
   };
 }
 
-function localPath(cwd: string, path: string, allowSharedDependency = false): boolean {
-  if (!path || path.startsWith('-') || isAbsolute(path) || /[\\:;|&<>`$\r\n]/.test(path)) return false;
+/** A harmless request Cezar does not run as written: unsupported syntax, a check this checkout
+ * does not provide, a path that does not exist. NOT fatal — the reviewer gets the reason and the
+ * accepted forms back as the check result and may correct the request within its budget.
+ * Anything that could escape the checkout, mutate it or publish stays a plain (fatal) Error. */
+export class ReviewCheckRejected extends Error {}
+
+function refuse(reason: string): never { throw new Error(`Review command refused: ${reason}`); }
+
+/** A checkout-relative path, validated lexically AND through realpath. Missing or malformed
+ * paths are rejected (non-fatal); anything pointing outside the checkout is fatal. */
+function checkoutPath(cwd: string, path: string, allowSharedDependency = false): string {
+  if (!path || path.startsWith('-')) throw new ReviewCheckRejected(`"${path}" is not a local path`);
+  if (isAbsolute(path) || /[:;|&<>`$\r\n\0]/.test(path)) refuse(`"${path}" is not a checkout-relative path`);
+  if (path.includes('\\')) throw new ReviewCheckRejected(`use forward slashes in "${path}"`);
   const abs = resolve(cwd, path);
   const rel = relative(cwd, abs);
-  if (rel === '..' || rel.startsWith(`..${sep}`)) return false;
-  if (!existsSync(abs)) return false;
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) refuse(`"${path}" escapes the checkout`);
+  if (!existsSync(abs)) throw new ReviewCheckRejected(`"${path}" does not exist in the checkout`);
   const actual = relative(realpathSync(cwd), realpathSync(abs));
-  if (actual !== '..' && !actual.startsWith(`..${sep}`) && !isAbsolute(actual)) return true;
-  return allowSharedDependency && sharedDependencyPath(cwd, abs);
+  if (actual !== '..' && !actual.startsWith(`..${sep}`) && !isAbsolute(actual)) return path;
+  if (allowSharedDependency && sharedDependencyPath(cwd, abs)) return path;
+  return refuse(`"${path}" resolves outside the checkout`);
+}
+
+function localPath(cwd: string, path: string): boolean {
+  try { checkoutPath(cwd, path); return true; } catch { return false; }
 }
 
 const lockSchema = z.object({ packages: z.record(z.string(), z.object({ version: z.string().optional() })) });
@@ -171,103 +188,214 @@ function sharedDependencyPath(cwd: string, abs: string): boolean {
   } catch { return false; }
 }
 
-export function reviewCommand(cwd: string, args: string[]): [string, string[]] {
-  if (args.length > 20 || args.some((a) => a.length > 500 || /[\r\n\0]/.test(a))) throw new Error('Review command rejected');
-  const [bin, action, ...rest] = args;
-  const path = rest[0];
-  if (bin === 'git' && action === 'diff' && rest.length === 2 && rest.every((v) => /^[a-f0-9]{40}$/.test(v))) return ['git', ['diff', '--no-ext-diff', '--no-textconv', ...rest]];
-  if (bin === 'git' && action === 'diff' && rest[0] === '--stat' && rest.length === 3 && rest.slice(1).every((v) => /^[a-f0-9]{40}$/.test(v))) return ['git', ['diff', '--no-ext-diff', '--no-textconv', '--stat', ...rest.slice(1)]];
-  if (bin === 'git' && action === 'log') {
-    let limit = 20;
-    let oneline = rest.length === 0;
-    let revRange: string | undefined;
-    const grepArgs: string[] = [];
-    const extraFlags: string[] = [];
-    for (let i = 0; i < rest.length; i++) {
-      const arg = rest[i];
-      if (arg === undefined) continue;
-      if (arg === '--oneline') {
-        oneline = true;
-        continue;
-      }
-      const next = rest[i + 1];
-      if (arg === '-n' && typeof next === 'string' && /^\d+$/.test(next)) {
-        limit = Math.min(100, Math.max(1, parseInt(next, 10)));
-        i++;
-        continue;
-      }
-      if (typeof arg === 'string' && /^-\d+$/.test(arg)) {
-        limit = Math.min(100, Math.max(1, parseInt(arg.slice(1), 10)));
-        continue;
-      }
-      if (arg.startsWith('--grep=')) {
-        grepArgs.push(arg);
-        continue;
-      }
-      if (arg === '--grep' && typeof next === 'string') {
-        grepArgs.push(`--grep=${next}`);
-        i++;
-        continue;
-      }
-      if (arg === '-i' || arg === '--stat' || arg === '--name-only' || arg === '--name-status' || arg === '--reverse') {
-        extraFlags.push(arg);
-        continue;
-      }
-      if (typeof arg === 'string' && !arg.startsWith('-') && /^[a-zA-Z0-9_\-./]+(\.\.[a-zA-Z0-9_\-./]+)?$/.test(arg)) {
-        revRange = arg;
-        continue;
-      }
-      throw new Error('Review command rejected: use git log [--oneline] [-n <N>] [--grep=...] [<commit>|<base>..<head>]');
+/** What the prepared checkout offers, read from its ROOT justfile and package.json only: a
+ * monorepo's package-level scripts are never guessed. Reads files, never executes anything. */
+export interface ReviewCapabilities {
+  /** Recipe name -> whether it declares parameters. Absent: the checkout has no justfile. */
+  justRecipes?: Map<string, boolean>;
+  /** The exposed scripts (`NPM_SCRIPTS`) the root package.json really declares. */
+  npmScripts: Set<string>;
+}
+
+const NPM_SCRIPTS: readonly string[] = ['test', 'check', 'typecheck'];
+
+function smallFile(path: string, maxBytes: number): string | undefined {
+  try {
+    const stat = lstatSync(path);
+    return stat.isFile() && stat.size <= maxBytes ? readFileSync(path, 'utf8') : undefined;
+  } catch { return undefined; }
+}
+
+export function detectReviewCapabilities(cwd: string): ReviewCapabilities {
+  const caps: ReviewCapabilities = { npmScripts: new Set() };
+  const justfile = smallFile(join(cwd, 'justfile'), 256 * 1024) ?? smallFile(join(cwd, 'Justfile'), 256 * 1024);
+  if (justfile !== undefined) {
+    caps.justRecipes = new Map();
+    for (const line of justfile.split(/\r?\n/)) {
+      // `name params: deps` at column 0; `name := value` (settings, aliases, variables) is not a recipe.
+      const m = /^@?([A-Za-z_][A-Za-z0-9_-]*)([^:]*):(?!=)/.exec(line);
+      if (m && !/^(?:set|alias|export|import|mod)$/.test(m[1]!)) caps.justRecipes.set(m[1]!, m[2]!.trim() !== '');
     }
-    const logArgs = ['log'];
-    if (oneline) logArgs.push('--oneline');
-    logArgs.push(`-${limit}`, ...grepArgs, ...extraFlags);
-    if (revRange) logArgs.push(revRange);
-    return ['git', logArgs];
   }
-  if (bin === 'git' && action === 'grep') {
-    const flags: string[] = ['-n'];
-    let pattern: string | undefined;
-    let targetPath: string | undefined;
-    for (let i = 0; i < rest.length; i++) {
-      const tok = rest[i];
-      if (tok === undefined) continue;
-      if (tok === '--') {
-        if (i + 1 < rest.length) {
-          targetPath = rest[i + 1];
-          break;
-        }
-        continue;
+  const manifest = smallFile(join(cwd, 'package.json'), 1024 * 1024);
+  if (manifest !== undefined) {
+    try {
+      const scripts = (JSON.parse(manifest) as { scripts?: Record<string, unknown> }).scripts ?? {};
+      for (const name of NPM_SCRIPTS) {
+        const body = scripts[name];
+        // `npm init`'s placeholder test script only fails; it is not a test suite.
+        if (typeof body === 'string' && body.trim() && !/no test specified/i.test(body)) caps.npmScripts.add(name);
       }
-      if (tok === '-n' || tok === '-i' || tok === '-F' || tok === '-E' || tok === '-w') {
-        if (!flags.includes(tok)) flags.push(tok);
-        continue;
+    } catch { /* an unparsable manifest offers no npm checks */ }
+  }
+  return caps;
+}
+
+const SHA = /^[a-f0-9]{40}$/;
+// A recipe/script name that publishes or mutates is never a review check, available or not.
+const PUBLISHING_NAME = /(?:^|[-_:])(?:publish|deploy|release|preview|push|upload|ota|eas|install|update|version)(?:$|[-_:])/i;
+const FATAL_BIN = /^(?:sh|bash|zsh|fish|dash|cmd|powershell|pwsh|wsl|env|sudo|node|deno|bun|npx|python[\d.]*|py|perl|ruby|php|gh|hub|curl|wget|ssh|scp|rsync|eas|expo|docker|rm|del|mv|cp)(?:\.exe|\.cmd|\.bat)?$/i;
+const PACKAGE_MANAGER = /^(?:npm|pnpm|yarn)$/;
+const MUTATING_PM_ACTION = /^(?:install|i|add|ci|publish|unpublish|remove|rm|uninstall|un|update|up|upgrade|link|ln|exec|x|dlx|version|pack|deprecate|dist-tag|owner|access|login|adduser|logout|token|cache|prune|dedupe|rebuild|set|config|init|create|audit)$/;
+const GIT_READ_ACTIONS = new Set(['show', 'status', 'blame', 'ls-files', 'cat-file', 'rev-parse', 'shortlog', 'describe']);
+
+function npmCommand(args: string[]): [string, string[]] {
+  // Windows cannot spawn npm.cmd without a shell: run npm's own CLI script with this Node.
+  const dir = dirname(process.execPath);
+  for (const cli of [join(dir, 'node_modules', 'npm', 'bin', 'npm-cli.js'), join(dir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')]) {
+    if (existsSync(cli)) return [process.execPath, [cli, ...args]];
+  }
+  return ['npm', args];
+}
+
+function gitLog(rest: string[]): [string, string[]] {
+  let limit = 20;
+  let oneline = rest.length === 0;
+  let revRange: string | undefined;
+  const grepArgs: string[] = [];
+  const extraFlags: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i]!;
+    const next = rest[i + 1];
+    if (arg === '--oneline') oneline = true;
+    else if (arg === '-n' && typeof next === 'string' && /^\d+$/.test(next)) { limit = Math.min(100, Math.max(1, parseInt(next, 10))); i++; }
+    else if (/^-\d+$/.test(arg)) limit = Math.min(100, Math.max(1, parseInt(arg.slice(1), 10)));
+    else if (arg.startsWith('--grep=')) grepArgs.push(arg);
+    else if (arg === '--grep' && typeof next === 'string') { grepArgs.push(`--grep=${next}`); i++; }
+    else if (['-i', '--stat', '--name-only', '--name-status', '--reverse'].includes(arg)) extraFlags.push(arg);
+    else if (!arg.startsWith('-') && /^[a-zA-Z0-9_\-./]+(\.\.[a-zA-Z0-9_\-./]+)?$/.test(arg)) revRange = arg;
+    else throw new ReviewCheckRejected(`git log does not accept "${arg}"`);
+  }
+  return ['git', ['log', ...(oneline ? ['--oneline'] : []), `-${limit}`, ...grepArgs, ...extraFlags, ...(revRange ? [revRange] : [])]];
+}
+
+function gitGrep(cwd: string, rest: string[]): [string, string[]] {
+  const flags: string[] = ['-n'];
+  let pattern: string | undefined;
+  let targetPath: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const tok = rest[i]!;
+    if (tok === '--') { targetPath = rest[i + 1]; break; }
+    if (['-n', '-i', '-F', '-E', '-w'].includes(tok)) { if (!flags.includes(tok)) flags.push(tok); continue; }
+    if (tok === '-e' && i + 1 < rest.length) { pattern = rest[++i]; continue; }
+    if (!tok.startsWith('-') && !pattern) { pattern = tok; continue; }
+    if (!tok.startsWith('-') && !targetPath) { targetPath = tok; continue; }
+    throw new ReviewCheckRejected(`git grep does not accept "${tok}"`);
+  }
+  if (!pattern) throw new ReviewCheckRejected('git grep requires a pattern');
+  return ['git', ['grep', ...flags, '-e', pattern, ...(targetPath ? ['--', checkoutPath(cwd, targetPath)] : [])]];
+}
+
+interface CheckFamily {
+  /** The forms this checkout offers, exactly as the reviewer is told them. */
+  usages(caps: ReviewCapabilities, base: string, head: string): string[];
+  /** The shell-free command for `rest`; throws `ReviewCheckRejected` or a fatal Error. */
+  resolve(cwd: string, rest: string[], caps: ReviewCapabilities): [string, string[]];
+}
+
+/** THE review check policy: the accepted forms, their availability in this checkout and how each
+ * runs. The reviewer's instructions and every rejection's feedback are generated from it. */
+const FAMILIES: Record<string, CheckFamily> = {
+  git: {
+    usages: (_caps, base, head) => [`git diff [--stat] ${base} ${head}`, 'git log [--oneline] [-n N] [--grep=TEXT] [REV|BASE..HEAD]', 'git grep [-n|-i|-F|-E|-w] PATTERN [LOCAL_PATH]'],
+    resolve(cwd, [action, ...rest]) {
+      if (action === 'diff') {
+        const stat = rest[0] === '--stat';
+        const shas = stat ? rest.slice(1) : rest;
+        if (shas.length !== 2 || !shas.every((v) => SHA.test(v))) throw new ReviewCheckRejected('git diff takes [--stat] and two full commit SHAs; the full pinned diff is already supplied as a file');
+        return ['git', ['diff', '--no-ext-diff', '--no-textconv', ...(stat ? ['--stat'] : []), ...shas]];
       }
-      if (tok === '-e' && i + 1 < rest.length) {
-        pattern = rest[++i];
-        continue;
+      if (action === 'log') return gitLog(rest);
+      if (action === 'grep') return gitGrep(cwd, rest);
+      if (action && GIT_READ_ACTIONS.has(action)) throw new ReviewCheckRejected(`git ${action} is not an accepted form`);
+      return refuse(`git ${action ?? ''} is not a read-only review check`);
+    },
+  },
+  rg: {
+    usages: () => ['rg [-l] PATTERN LOCAL_PATH', 'rg --files [LOCAL_PATH]'],
+    resolve(cwd, rest) {
+      if (rest[0] === '--files') {
+        if (rest.length > 2) throw new ReviewCheckRejected('rg --files takes at most one local path');
+        return ['rg', ['--files', '--glob', '!.cezar-review-tmp', ...(rest[1] === undefined ? [] : ['--', checkoutPath(cwd, rest[1], true)])]];
       }
-      if (!pattern && !tok.startsWith('-')) {
-        pattern = tok;
-        continue;
+      const list = rest[0] === '-l' || rest[0] === '--files-with-matches';
+      const [pattern, path, ...extra] = list ? rest.slice(1) : rest;
+      if (!pattern || pattern.startsWith('-') || path === undefined || extra.length > 0) throw new ReviewCheckRejected('rg takes [-l] PATTERN LOCAL_PATH, or --files [LOCAL_PATH]');
+      return ['rg', [list ? '-l' : '-n', '--', pattern, checkoutPath(cwd, path, true)]];
+    },
+  },
+  just: {
+    usages: ({ justRecipes: r }) => [
+      ...(r?.has('test') ? ['just test'] : []),
+      ...(r?.get('test') ? ['just test file LOCAL_PATH...'] : []),
+      ...(r?.has('check') ? ['just check'] : []),
+    ],
+    resolve(cwd, [recipe, ...args], { justRecipes }) {
+      if (!recipe || recipe.startsWith('-')) throw new ReviewCheckRejected('just needs a recipe name');
+      if (['flow', 'device', 'scenario'].includes(recipe)) throw new ReviewCheckRejected('UI/emulator checks require separate resource authorization; report them skipped');
+      if (PUBLISHING_NAME.test(recipe)) refuse(`just ${recipe} is not a review check`);
+      if (!justRecipes) throw new ReviewCheckRejected('this checkout has no justfile');
+      if (!justRecipes.has(recipe)) throw new ReviewCheckRejected(`the justfile has no "${recipe}" recipe`);
+      if ((recipe === 'test' || recipe === 'check') && args.length === 0) return ['just', [recipe]];
+      if (recipe === 'test' && justRecipes.get('test') && args[0] === 'file' && args.length > 1) return ['just', ['test', 'file', ...args.slice(1).map((p) => checkoutPath(cwd, p))]];
+      throw new ReviewCheckRejected(`just ${[recipe, ...args].join(' ')} is not an accepted form`);
+    },
+  },
+  npm: {
+    usages: ({ npmScripts: s }) => [
+      ...(s.has('test') ? ['npm test', 'npm test -- LOCAL_PATH...'] : []),
+      ...NPM_SCRIPTS.filter((n) => n !== 'test' && s.has(n)).map((n) => `npm run ${n}`),
+    ],
+    resolve(cwd, [action, ...args], { npmScripts }) {
+      if (action === 'test' || action === 't') {
+        if (!npmScripts.has('test')) throw new ReviewCheckRejected('package.json declares no test script');
+        if (args.length === 0) return npmCommand(['test']);
+        if (args[0] === '--' && args.length > 1) return npmCommand(['test', '--', ...args.slice(1).map((p) => checkoutPath(cwd, p))]);
+        throw new ReviewCheckRejected('npm test takes no flags; pass local paths after --');
       }
-      if (pattern && !tok.startsWith('-')) {
-        targetPath = tok;
-        continue;
+      if (action === 'run' || action === 'run-script') {
+        const [script, ...extra] = args;
+        if (!script || script.startsWith('-')) throw new ReviewCheckRejected('npm run needs a script name');
+        if (PUBLISHING_NAME.test(script)) refuse(`npm run ${script} is not a review check`);
+        if (!NPM_SCRIPTS.includes(script)) throw new ReviewCheckRejected(`npm run ${script} is not an accepted form`);
+        if (!npmScripts.has(script)) throw new ReviewCheckRejected(`package.json declares no "${script}" script`);
+        if (extra.length > 0) throw new ReviewCheckRejected(`npm run ${script} takes no arguments`);
+        return npmCommand(['run', script]);
       }
-      throw new Error('Review command rejected: use git grep [-n] [-i] [-F] [-E] [-w] pattern [local-path]');
+      if (!action || MUTATING_PM_ACTION.test(action)) refuse(`npm ${action ?? ''} is not a review check`);
+      throw new ReviewCheckRejected(`npm ${action} is not an accepted form`);
+    },
+  },
+};
+
+export function reviewCheckForms(caps: ReviewCapabilities, base = 'BASE_SHA', head = 'HEAD_SHA'): string[] {
+  return Object.values(FAMILIES).flatMap((family) => family.usages(caps, base, head));
+}
+
+/** The reviewer's check instructions, generated from the policy for THIS checkout. */
+export function reviewCheckInstructions(caps: ReviewCapabilities, base = 'BASE_SHA', head = 'HEAD_SHA'): string {
+  const example = caps.npmScripts.has('test') ? ['npm', 'test'] : caps.justRecipes?.has('test') ? ['just', 'test'] : ['git', 'diff', '--stat', base, head];
+  return [
+    `Checks are optional: read the code and tests first; request a check only when its result could change the verdict. To request one, send a message whose last line is ONLY: ${CHECK_MARKER}${JSON.stringify({ args: example, reason: 'why the verdict depends on it' })}. Cezar stops the turn there, runs it without a shell and returns a result file in the next turn; do not continue the review in the same turn.`,
+    `Accepted check forms in this checkout (one argv token per array element): ${reviewCheckForms(caps, base, head).join('; ')}. Nothing else: no shell, other flags or scripts, external paths, installs or publication. At most 6 requests and 5 minutes per command within the run timeout; UI/emulator checks are skipped.`,
+    'A harmless request Cezar cannot run (unsupported form, unavailable check, missing path) returns "Check NOT RUN" with the reason: correct it or report the check as skipped. A path outside the checkout, a mutating or publishing request, or a check that changes the checkout ends the review.',
+  ].join('\n');
+}
+
+export function reviewCommand(cwd: string, args: string[], caps: ReviewCapabilities = detectReviewCapabilities(cwd)): [string, string[]] {
+  if (args.length > 20 || args.some((a) => a.length > 500 || /[\r\n\0]/.test(a))) refuse('argument limits exceeded');
+  const [bin = '', ...rest] = args;
+  try {
+    const family = Object.hasOwn(FAMILIES, bin) ? FAMILIES[bin] : undefined;
+    if (family) return family.resolve(cwd, rest, caps);
+    if (FATAL_BIN.test(bin) || (PACKAGE_MANAGER.test(bin) && MUTATING_PM_ACTION.test(rest[0] ?? ''))) refuse(`${bin} is not a review check`);
+    throw new ReviewCheckRejected(`${bin || 'an empty command'} is not an accepted check`);
+  } catch (err) {
+    if (err instanceof ReviewCheckRejected) {
+      throw new ReviewCheckRejected(`Review command rejected: ${err.message}. Accepted forms in this checkout: ${reviewCheckForms(caps).join('; ')}`);
     }
-    if (!pattern) throw new Error('Review command rejected: git grep requires a pattern');
-    if (targetPath && !localPath(cwd, targetPath)) throw new Error('Review command rejected: git grep path must be local');
-    const outArgs = ['grep', ...flags, '-e', pattern];
-    if (targetPath) outArgs.push('--', targetPath);
-    return ['git', outArgs];
+    throw err;
   }
-  if (bin === 'rg' && action && !action.startsWith('-') && !/[\r\n]/.test(action) && rest.length === 1 && path && localPath(cwd, path, true)) return ['rg', ['-n', '--', action, path]];
-  if (bin === 'just' && ((action === 'check' && rest.length === 0) || (action === 'test' && rest.length === 0) ||
-      (action === 'test' && rest[0] === 'file' && rest.length > 1 && rest.slice(1).every((p) => localPath(cwd, p))))) return ['just', [action, ...rest]];
-  if (bin === 'just' && ['flow', 'device', 'scenario'].includes(action ?? '')) throw new Error('UI/emulator check unavailable: resource authorization is required; report skipped');
-  throw new Error('Review command rejected: use git diff/log/grep, rg pattern local-path, just check, just test [file local-path...]');
 }
 
 // Only NEW files in these narrowly named artifact roots can be removed. Existing
@@ -289,7 +417,14 @@ export function reviewSourceFingerprint(cwd: string): string {
 export async function executeReviewCheck(cwd: string, request: ReviewCheck, env: NodeJS.ProcessEnv, timeoutMs: number,
   onChild?: (child: ChildProcessWithoutNullStreams) => void): Promise<string> {
   if (request.args[0] === 'just' && ['flow', 'device', 'scenario'].includes(request.args[1] ?? '')) return 'UI/emulator check skipped: no separate resource authorization; no device was started.';
-  const [bin, args] = reviewCommand(cwd, request.args);
+  let command: [string, string[]];
+  try { command = reviewCommand(cwd, request.args); }
+  catch (err) {
+    // Only a harmless rejection becomes feedback; it is reported as NOT RUN, never as a result.
+    if (!(err instanceof ReviewCheckRejected)) throw err;
+    return `Check NOT RUN: ${request.args.join(' ')}\nReason: ${request.reason}\n${err.message}\nCorrect the request or report this check as skipped.`;
+  }
+  const [bin, args] = command;
   if (timeoutMs <= 0) throw new Error('Review command budget exhausted');
   const before = files(cwd);
   const snapshot = getWorkspaceGitSnapshot(cwd);

@@ -79,18 +79,25 @@ export async function preparePrReviewCheckout(
   return { number, headSha, baseRef, mergeBase };
 }
 
-/** Machine-owned context appended to the review task's prompt. */
+/**
+ * Machine-owned context appended to the review task's prompt — runner-agnostic, and the ONE place
+ * the review rubric and verdict format live. How the diff is delivered and how checks are run is
+ * the runner's business (Agy gets a pinned diff file and Cezar-brokered checks), so this context
+ * names the diff range without telling anyone to run a command.
+ */
 export function renderPrReviewContext(checkout: PrReviewCheckout): string {
   return [
     '---',
     'PR review checkout (prepared by cezar)',
     `Your working directory is a task worktree forked from the PR HEAD ${checkout.headSha}: its files ARE the PR's files.`,
     `Base branch: ${checkout.baseRef}; merge base: ${checkout.mergeBase}.`,
-    `The PR diff is: git diff ${checkout.mergeBase} ${checkout.headSha}`,
-    `Changed files: git diff --stat ${checkout.mergeBase} ${checkout.headSha}`,
+    `The PR diff is: git diff ${checkout.mergeBase} ${checkout.headSha} (if your runner supplies it as a file, read that file instead).`,
     'This is a READ-ONLY review: do not edit, create or delete files, do not commit, push, merge or comment on GitHub.',
-    'Read what the review needs — the diff, the affected code and its callers, AGENTS.md — not every file ritually. You may run targeted tests or checks when they are justified; they must not change tracked files.',
-    'Your final message is the review; cezar publishes it after the run succeeds.',
+    'Read what the review needs — the full diff, the affected code, its callers and tests, and AGENTS.md if the checkout has one — not every file ritually. Running tests is optional: only when a result could change the verdict, through the mechanism your runner provides, and never in a way that changes tracked files.',
+    'Your final message is the review; cezar publishes it after the run succeeds. Format:',
+    '- Findings, most severe first, each as P0, P1, P2 or P3 + repo-relative path:line + the problem and why it matters (P0 blocker/data loss/security, P1 incorrect behaviour or regression, P2 risk or missing coverage, P3 minor). Say "Findings: none" when there are none.',
+    '- The checks you ran or requested with their outcome, and checks skipped with the reason.',
+    '- Exactly one final line, plain text: Recommendation: APPROVE or Recommendation: CHANGES REQUESTED (any P0/P1 finding means CHANGES REQUESTED).',
     'Cite files as plain repo-relative path:line, never Markdown file links, file:// URLs or absolute local paths.',
     `Optional inline comments on changed lines (new side of the diff): end the review with ONE fenced block tagged ${INLINE_COMMENTS_TAG} holding a JSON array, e.g.`,
     '```' + INLINE_COMMENTS_TAG,

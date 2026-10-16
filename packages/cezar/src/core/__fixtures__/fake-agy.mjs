@@ -99,6 +99,9 @@ switch (mode) {
     const args = process.argv.slice(2);
     if (args.includes('--conversation') && args[args.indexOf('--conversation') + 1] !== 'review-fixture-local') process.exit(5);
     if (prompt.includes('Cezar trusted check result:') && !args.includes('--conversation')) process.exit(6);
+    // `|`-separated fragments the prompt must (not) contain: the generated check policy.
+    if (process.env.FAKE_AGY_PROMPT_HAS?.split('|').some((s) => !prompt.includes(s))) { process.stderr.write('prompt lacks expected text'); process.exit(7); }
+    if (process.env.FAKE_AGY_PROMPT_LACKS?.split('|').some((s) => prompt.includes(s))) { process.stderr.write('prompt has unexpected text'); process.exit(8); }
     line({ event: 'init', conversation_id: 'review-fixture-local' });
     let step = 10;
     const file = trustedDiffReads((tool_name, parameters) => {
@@ -112,10 +115,13 @@ switch (mode) {
       line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), name) } } } });
       line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name: 'view_file', tool_info: { result: '' } } });
     }
-    const final = prompt.includes('Cezar trusted check result:') && !process.env.FAKE_AGY_REPEAT;
+    // FAKE_AGY_CHECKS: one request per turn, in order (e.g. a rejected one, then its correction).
+    const checks = process.env.FAKE_AGY_CHECKS ? JSON.parse(process.env.FAKE_AGY_CHECKS) : [JSON.parse(process.env.FAKE_AGY_CHECK)];
+    const answered = (prompt.match(/Cezar check result file:/g) ?? []).length;
+    const final = answered >= checks.length && !process.env.FAKE_AGY_REPEAT;
     const response = final
-      ? (process.env.FAKE_AGY_VERDICT ?? `Findings: none. Full pinned diff and contracts inspected. Verification: ${JSON.parse(process.env.FAKE_AGY_CHECK).join(' ')} returned exit 0. Emulator skipped: no resource authorization.\nRecommendation: APPROVE`)
-      : `CEZ_REVIEW_CHECK ${JSON.stringify({ args: JSON.parse(process.env.FAKE_AGY_CHECK), reason: 'inspect affected contract' })}`;
+      ? (process.env.FAKE_AGY_VERDICT ?? `Findings: none. Full pinned diff and contracts inspected. Verification: ${checks.at(-1).join(' ')} returned exit 0. Emulator skipped: no resource authorization.\nRecommendation: APPROVE`)
+      : `CEZ_REVIEW_CHECK ${JSON.stringify({ args: checks[Math.min(answered, checks.length - 1)], reason: 'inspect affected contract' })}`;
     if (!final && process.env.FAKE_AGY_MIDTURN) {
       // Live run 2bb661b9: the request is one message mid-turn, as deltas; Gemini keeps
       // inspecting and concludes without the result unless Cezar stops the turn.
