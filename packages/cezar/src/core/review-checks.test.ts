@@ -7,7 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { AgyCliRunner } from './agy-cli-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
 import { prepareReadOnlyIsolation } from './read-only-sandbox.ts';
-import { executeReviewCheck, parseReviewCheck, pinnedReviewDiff, prepareReviewDiff, reviewCommand } from './review-checks.ts';
+import {
+  detectReviewCapabilities, executeReviewCheck, parseReviewCheck, pinnedReviewDiff, prepareReviewDiff, reviewCheckInstructions,
+  reviewCommand, ReviewCheckRejected, reviewSourceFingerprint,
+} from './review-checks.ts';
+import { publishReviewFromRun } from '../automations/pr-review.ts';
 import { AgyReviewEvidence } from './agy-review-evidence.ts';
 
 // On this Windows host use real just. Other CI hosts need no new dependency:
@@ -26,18 +30,19 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 const repos: string[] = [];
-function repo(script = '') {
+function repo(script = '', opts: { justfile?: boolean; agents?: boolean; scripts?: Record<string, string> } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'cez-review-v3-'));
   repos.push(cwd);
   const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
   git('init', '-q');
   git('config', 'core.autocrlf', 'false');
-  writeFileSync(join(cwd, 'AGENTS.md'), 'Review contracts; targeted tests only\n');
+  if (opts.agents !== false) writeFileSync(join(cwd, 'AGENTS.md'), 'Review contracts; targeted tests only\n');
   writeFileSync(join(cwd, 'tracked.txt'), 'v1\n');
   writeFileSync(join(cwd, '.gitignore'), 'coverage/\n.cache/\n');
   // The real Windows just executable invokes this local, offline fixture. No API.
   writeFileSync(join(cwd, 'check.cjs'), script);
-  writeFileSync(join(cwd, 'justfile'), 'set shell := ["node", "-e"]\ncheck:\n    require("./check.cjs")\ntest *paths:\n    require("./check.cjs")\n');
+  if (opts.justfile !== false) writeFileSync(join(cwd, 'justfile'), 'set shell := ["node", "-e"]\ncheck:\n    require("./check.cjs")\ntest *paths:\n    require("./check.cjs")\n');
+  if (opts.scripts) writeFileSync(join(cwd, 'package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: opts.scripts }));
   git('add', '.');
   git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'base');
   const base = git('rev-parse', 'HEAD');
@@ -258,10 +263,21 @@ describe('trusted check policy and source integrity', { timeout: 30_000 }, () =>
   it('does not interpret a finding mentioning the protocol as a command request', () => {
     expect(parseReviewCheck('P2 src/runner.ts:10: CEZ_REVIEW_CHECK must validate arguments.\nRecommendation: CHANGES REQUESTED')).toBeUndefined();
   });
-  it.each([['git', 'push'], ['git', 'commit'], ['gh', 'pr'], ['just', 'preview', 'update'], ['just', 'publish', 'x'],
-    ['just', 'test', 'file', '../external'], ['just', 'test', '--updateSnapshot'], ['sh', '-c', 'git diff'], ['rg', 'x', 'C:/outside']])('rejects unsafe request %j', (...args) => {
+  it.each([['git', 'push'], ['git', 'commit'], ['gh', 'pr'], ['just', 'preview', 'update'], ['just', 'publish', 'x'], ['npm', 'install'],
+    ['npm', 'run', 'publish'], ['just', 'test', 'file', '../external'], ['sh', '-c', 'git diff'], ['rg', 'x', 'C:/outside'], ['rg', '--files', '..'],
+    ['rg', '-l', 'x', '../outside']])('refuses unsafe request %j fatally', (...args) => {
     const r = repo();
-    expect(() => reviewCommand(r.cwd, args)).toThrow(/rejected/);
+    let error: unknown;
+    try { reviewCommand(r.cwd, args); } catch (err) { error = err; }
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(ReviewCheckRejected);
+    expect((error as Error).message).toMatch(/refused/);
+  });
+  it.each([['just', 'test', '--updateSnapshot'], ['rg', '--files', 'no-such-dir'], ['npm', 'test'], ['npm', 'run', 'lint'], ['git', 'show', 'HEAD'],
+    ['jest'], ['rg', 'pattern']])('rejects harmless unavailable request %j with the accepted forms', (...args) => {
+    const r = repo();
+    expect(() => reviewCommand(r.cwd, args)).toThrow(ReviewCheckRejected);
+    expect(() => reviewCommand(r.cwd, args)).toThrow(/rejected: .*Accepted forms in this checkout: .*just test; just test file LOCAL_PATH\.\.\.; just check/);
   });
   it('checks actual pinned HEAD, never accepts a forged empty diff', () => {
     const r = repo();
@@ -409,5 +425,104 @@ describe('trusted check policy and source integrity', { timeout: 30_000 }, () =>
       const env = buildChildEnv({ backend: 'agy', readOnly: true, source: { ...process.env, GH_TOKEN: 'secret', EXPO_TOKEN: 'secret' }, extraEnv: isolation.env });
       await expect(executeReviewCheck(r.cwd, { args: ['just', 'test'], reason: 'contract' }, env, 10_000)).resolves.toContain('Exit: 0');
     } finally { isolation.cleanup(); }
+  });
+});
+
+describe('check policy follows the prepared checkout (cezar-adapter#8 run ee37f4e1)', { timeout: 60_000 }, () => {
+  const ADAPTER_SCRIPTS = { test: 'node check.cjs', check: 'node check.cjs' };
+
+  it('offers npm forms for a package.json repo without a justfile, never an absent just', () => {
+    const r = repo('', { justfile: false, scripts: ADAPTER_SCRIPTS });
+    const text = reviewCheckInstructions(detectReviewCapabilities(r.cwd), r.base, r.head);
+    expect(text).toContain('npm test; npm test -- LOCAL_PATH...; npm run check');
+    expect(text).toContain('{"args":["npm","test"]');
+    expect(text).not.toMatch(/\bjust\b/);
+    expect(text).not.toContain('npm run typecheck');
+  });
+
+  it('offers only the recipes a justfile really declares', () => {
+    const r = repo();
+    const text = reviewCheckInstructions(detectReviewCapabilities(r.cwd), r.base, r.head);
+    expect(text).toContain('just test; just test file LOCAL_PATH...; just check');
+    expect(text).toContain('{"args":["just","test"]');
+    expect(text).not.toMatch(/\bnpm\b/);
+  });
+
+  it('offers only read-only inspection when the checkout has neither, and ignores the npm init placeholder', () => {
+    const r = repo('', { justfile: false, scripts: { test: 'echo "Error: no test specified" && exit 1' } });
+    const text = reviewCheckInstructions(detectReviewCapabilities(r.cwd), r.base, r.head);
+    expect(text).not.toMatch(/\b(?:just|npm)\b/);
+    expect(text).toContain(`git diff [--stat] ${r.base} ${r.head}`);
+    expect(text).toContain('rg --files [LOCAL_PATH]');
+    expect(text).toContain(`{"args":["git","diff","--stat","${r.base}","${r.head}"]`);
+  });
+
+  it('runs the declared npm scripts and reports a red test as red', async () => {
+    const r = repo('console.log("npm suite ran"); process.exit(process.argv.includes("fail") ? 1 : 0)', { justfile: false, scripts: { ...ADAPTER_SCRIPTS, check: 'node check.cjs fail' } });
+    const before = reviewSourceFingerprint(r.cwd);
+    const green = await executeReviewCheck(r.cwd, { args: ['npm', 'test'], reason: 'contract' }, process.env, 60_000);
+    expect(green).toMatch(/Exit: 0;[\s\S]*npm suite ran/);
+    await expect(executeReviewCheck(r.cwd, { args: ['npm', 'run', 'check'], reason: 'contract' }, process.env, 60_000)).resolves.toMatch(/Exit: 1;/);
+    expect(reviewSourceFingerprint(r.cwd)).toBe(before);
+  });
+
+  it('lists files and matching files through rg, inside the checkout only', async () => {
+    const r = repo();
+    mkdirSync(join(r.cwd, 'tests'));
+    writeFileSync(join(r.cwd, 'tests/a.test.ts'), 'contract v2\n');
+    const files = await executeReviewCheck(r.cwd, { args: ['rg', '--files', 'tests'], reason: 'find tests' }, process.env, 10_000);
+    expect(files).toMatch(/Exit: 0;[\s\S]*tests[\\/]a\.test\.ts/);
+    const root = await executeReviewCheck(r.cwd, { args: ['rg', '--files'], reason: 'layout' }, process.env, 10_000);
+    expect(root).toContain('tracked.txt');
+    expect(root).not.toContain('.cezar-review-tmp');
+    await expect(executeReviewCheck(r.cwd, { args: ['rg', '-l', 'v2', '.'], reason: 'callers' }, process.env, 10_000)).resolves.toMatch(/tracked\.txt/);
+    await expect(executeReviewCheck(r.cwd, { args: ['rg', '--files', '../'], reason: 'escape' }, process.env, 10_000)).rejects.toThrow(/refused: .*escapes the checkout/);
+  });
+
+  it('returns a harmless unavailable check as NOT RUN feedback without executing anything', async () => {
+    const r = repo('require("fs").writeFileSync("ran.txt","x")', { justfile: false, scripts: ADAPTER_SCRIPTS });
+    const result = await executeReviewCheck(r.cwd, { args: ['just', 'test'], reason: 'contract' }, process.env, 10_000);
+    expect(result).toMatch(/^Check NOT RUN: just test/);
+    expect(result).toContain('this checkout has no justfile');
+    expect(result).toContain('npm test; npm test -- LOCAL_PATH...; npm run check');
+    expect(result).not.toMatch(/Exit:/);
+    expect(existsSync(join(r.cwd, 'ran.txt'))).toBe(false);
+  });
+
+  it('feeds a rejected check back to fake Agy, runs the corrected one and publishes the review', async () => {
+    const r = repo('console.log("adapter suite passed")', { justfile: false, agents: false, scripts: ADAPTER_SCRIPTS });
+    const before = reviewSourceFingerprint(r.cwd);
+    const notes: string[] = [];
+    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+      FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECKS: JSON.stringify([['just', 'test'], ['npm', 'test']]), FAKE_AGY_ASSERT_PR_SCOPE: '1',
+      FAKE_AGY_PROMPT_HAS: 'npm test; npm test -- LOCAL_PATH...; npm run check|Checkout AGENTS.md: absent',
+      FAKE_AGY_PROMPT_LACKS: 'just test|just check|Checkout AGENTS.md: present',
+    } }, (e) => { if (e.type === 'note') notes.push(e.message); });
+    expect(notes.some((n) => n.startsWith('Check NOT RUN: just test') && n.includes('no justfile'))).toBe(true);
+    expect(notes.some((n) => /Exit: 0;[\s\S]*adapter suite passed/.test(n))).toBe(true);
+    expect(result.text).toContain('Recommendation: APPROVE');
+    expect(reviewSourceFingerprint(r.cwd)).toBe(before);
+    expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: r.cwd, encoding: 'utf8' }).trim()).toBe(r.head);
+    expect(existsSync(join(r.cwd, '.cezar-review-tmp'))).toBe(false);
+
+    const posts: string[] = [];
+    const published = await publishReviewFromRun({ repoRoot: r.cwd, target: { repo: 'o/cezar-adapter', number: 8, headSha: r.head, baseRef: 'origin/main', mergeBase: r.base },
+      text: result.text, model: 'gemini', runner: 'agy', run: async (_exe, args) => {
+        if (args.includes('--jq') && args.includes('.head.sha')) return r.head;
+        const input = args.indexOf('--input');
+        if (input >= 0) posts.push(readFileSync(args[input + 1]!, 'utf8'));
+        return '';
+      } });
+    expect(published).toEqual({ status: 'published' });
+    expect(posts.join('')).toContain('Recommendation: APPROVE');
+  });
+
+  it('ends the review fatally when a requested check escapes the checkout', async () => {
+    const r = repo();
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+      FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECKS: JSON.stringify([['rg', '--files', '../']]),
+    } })).rejects.toThrow(/refused: .*escapes the checkout/);
+    expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: r.cwd, encoding: 'utf8' }).trim()).toBe(r.head);
+    expect(existsSync(join(r.cwd, '.cezar-review-tmp'))).toBe(false);
   });
 });
