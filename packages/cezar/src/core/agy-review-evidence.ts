@@ -38,7 +38,10 @@ export class AgyReviewEvidence {
     const stats = git(['diff', '--no-ext-diff', '--no-textconv', '--numstat', '--no-renames', '-z', base, head]);
     if (current.status !== 0 || current.stdout.trim() !== head || changed.status !== 0 || stats.status !== 0) return;
     const binary = new Set(stats.stdout.split('\0').filter((row) => row.startsWith('-\t-\t')).map((row) => row.slice(4)));
-    this.required.add(resolve(spec.cwd, 'AGENTS.md'));
+    const agentsPath = resolve(spec.cwd, 'AGENTS.md');
+    if (existsSync(agentsPath)) {
+      this.required.add(agentsPath);
+    }
     for (const path of changed.stdout.split('\0').filter(Boolean)) {
       this.required.add(resolve(spec.cwd, path));
       if (!binary.has(path) && existsSync(resolve(spec.cwd, path)) && lstatSync(resolve(spec.cwd, path)).isFile()) this.affected.add(resolve(spec.cwd, path));
@@ -173,8 +176,9 @@ export class AgyReviewEvidence {
     // Only a known optional checkout doc, never an arbitrary missing source,
     // skill or external handoff. Success still requires the diff + all required reads.
     const local = relative(this.spec.cwd, path);
+    const localNormalized = local.replace(/\\/g, '/');
     const extension = extname(path);
-    if ((local === 'README.md' || (local.startsWith(`docs${sep}`) && (extension === '.md' || extension === ''))) && this.optionalMisses < 2) {
+    if ((local === 'README.md' || local === 'AGENTS.md' || (localNormalized.startsWith('docs/') && (extension === '.md' || extension === ''))) && this.optionalMisses < 2) {
       this.optionalMisses++;
       return true;
     }
@@ -202,10 +206,12 @@ export class AgyReviewEvidence {
     if (!cwd) return false;
     // An unresolved guessed path (`recoveries`) no longer voids the review: only the mandatory
     // evidence below does. `recoveries` still decides the stricter late-format-error path.
+    const agentsPath = resolve(cwd, 'AGENTS.md');
+    const agentsRead = !existsSync(agentsPath) || this.reads.has(agentsPath);
     return this.validContext && this.diffRead && this.pending.size === 0 &&
       [...this.checkFiles.values()].every((check) => check.read || check.coverage.size >= check.lines) &&
       (this.trustedDiff
-        ? this.reads.has(resolve(cwd, 'AGENTS.md')) &&
+        ? agentsRead &&
           (this.affected.size === 0 || [...this.affected].some((path) => this.reads.has(path)))
         : [...this.required].every((path) => existsSync(path) && this.reads.has(path)));
   }
