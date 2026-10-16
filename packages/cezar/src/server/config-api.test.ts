@@ -21,6 +21,7 @@ describe('the config API', () => {
   let repoRoot: string;
   let homeRoot: string;
   const savedHome = process.env.HOME;
+  const savedUserProfile = process.env.USERPROFILE;
   const savedCezHome = process.env.CEZ_HOME;
   const savedCodexHome = process.env.CODEX_HOME;
   const savedXdgConfigHome = process.env.XDG_CONFIG_HOME;
@@ -32,6 +33,7 @@ describe('the config API', () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-configapi-'));
     homeRoot = mkdtempSync(join(tmpdir(), 'cez-configapi-home-'));
     process.env.HOME = homeRoot;
+    process.env.USERPROFILE = homeRoot;
     process.env.CEZ_HOME = join(homeRoot, '.cezar');
     process.env.CODEX_HOME = join(homeRoot, '.codex');
     process.env.XDG_CONFIG_HOME = join(homeRoot, '.config');
@@ -49,6 +51,8 @@ describe('the config API', () => {
     rmSync(homeRoot, { recursive: true, force: true });
     if (savedHome === undefined) delete process.env.HOME;
     else process.env.HOME = savedHome;
+    if (savedUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = savedUserProfile;
     if (savedCezHome === undefined) delete process.env.CEZ_HOME;
     else process.env.CEZ_HOME = savedCezHome;
     if (savedCodexHome === undefined) delete process.env.CODEX_HOME;
