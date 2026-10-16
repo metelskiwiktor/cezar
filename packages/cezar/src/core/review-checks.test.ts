@@ -4,9 +4,9 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AgyCliRunner } from './agy-cli-runner.ts';
+import { AgyCliRunner, reviewRoundsViolation } from './agy-cli-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
-import { prepareReadOnlyIsolation } from './read-only-sandbox.ts';
+import { getWorkspaceGitSnapshot, prepareReadOnlyIsolation } from './read-only-sandbox.ts';
 import {
   detectReviewCapabilities, executeReviewCheck, parseReviewCheck, pinnedReviewDiff, prepareReviewDiff, reviewCheckInstructions,
   reviewCommand, ReviewCheckRejected, reviewSourceFingerprint,
@@ -515,6 +515,41 @@ describe('check policy follows the prepared checkout (cezar-adapter#8 run ee37f4
       } });
     expect(published).toEqual({ status: 'published' });
     expect(posts.join('')).toContain('Recommendation: APPROVE');
+  });
+
+  it('keeps the check\'s own integrity violation as the run error and reports the final one beside it (cezar-adapter#8 run 00f1416a)', async () => {
+    const r = repo('const fs=require("fs");fs.mkdirSync(".ai/cezar/runs",{recursive:true});fs.writeFileSync(".ai/cezar/runs/1707342b.ndjson","{}")',
+      { justfile: false, scripts: ADAPTER_SCRIPTS });
+    // An ignored tree, like the adapter's: the files a test writes there are not ARTIFACTs.
+    mkdirSync(join(r.cwd, '.ai'));
+    writeFileSync(join(r.cwd, '.ai/.gitignore'), '*\n');
+    const notes: string[] = [];
+    const errors: string[] = [];
+    const outcome = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+      FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECKS: JSON.stringify([['npm', 'test']]),
+    } }, (e) => { if (e.type === 'note') notes.push(e.message); if (e.type === 'error') errors.push(e.message); }).catch((e: unknown) => e as Error);
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/^Review source integrity violation: .ai\/cezar\/runs\/1707342b\.ndjson$/);
+    expect(errors.join('\n')).not.toContain('across review/check rounds');
+    const extra = notes.find((n) => n.startsWith('Additionally: Read-only review violation: checkout changed across review/check rounds'));
+    expect(extra).toContain('changed paths: .ai/cezar/runs/1707342b.ndjson');
+    expect(extra).not.toContain('{}');
+    // Nothing is silently reverted: the evidence stays for diagnosis.
+    expect(existsSync(join(r.cwd, '.ai/cezar/runs/1707342b.ndjson'))).toBe(true);
+  });
+
+  it('names a moved HEAD and changed sources in the final verdict, and is silent when nothing changed', () => {
+    const r = repo('', { justfile: false, scripts: ADAPTER_SCRIPTS });
+    const baseline = getWorkspaceGitSnapshot(r.cwd)!;
+    const fingerprint = reviewSourceFingerprint(r.cwd);
+    expect(reviewRoundsViolation(r.cwd, baseline, fingerprint)).toBeUndefined();
+    writeFileSync(join(r.cwd, 'tracked.txt'), 'SECRET_CONTENT\n');
+    const changed = reviewRoundsViolation(r.cwd, baseline, fingerprint);
+    expect(changed).toMatch(/^Read-only review violation: checkout changed across review\/check rounds \(changed paths: tracked\.txt\)/);
+    expect(changed).not.toContain('SECRET_CONTENT');
+    execFileSync('git', ['checkout', '-q', '--', 'tracked.txt'], { cwd: r.cwd });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'moved'], { cwd: r.cwd });
+    expect(reviewRoundsViolation(r.cwd, baseline, fingerprint)).toMatch(/HEAD moved \([0-9a-f]{12} -> [0-9a-f]{12}\)/);
   });
 
   it('ends the review fatally when a requested check escapes the checkout', async () => {

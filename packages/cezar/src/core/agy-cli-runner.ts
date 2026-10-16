@@ -29,7 +29,7 @@ import { resolveAgyBin } from './agy-bin.ts';
 import { AgyReviewEvidence } from './agy-review-evidence.ts';
 import {
   CHECK_MARKER, detectReviewCapabilities, executeReviewCheck, parseReviewCheck, prepareReviewDiff,
-  reviewCheckInstructions, reviewSourceFingerprint, type ReviewCheck,
+  reviewCheckInstructions, reviewSourceChanges, reviewSourceFingerprint, type ReviewCheck,
 } from './review-checks.ts';
 import { killAgyTree } from './kill-process-tree.ts';
 export { killAgyTree } from './kill-process-tree.ts';
@@ -88,6 +88,25 @@ export function prReviewScopePrompt(checkInstructions: string): string {
     'For shared/symlinked node_modules, use a Cezar rg check on a node_modules/package/... path, never native file tools. Only this Git repository\'s main dependency cache and versions matching the checkout package-lock.json are admitted; arbitrary external paths and nested links to host files are rejected. No external --add-dir is granted.',
     'Conclude only after your analysis and every requested check result, in the review format the task specifies. Describe local executable literals without reproducing absolute paths. No marketing text.',
   ].join('\n');
+}
+
+/**
+ * The end-of-review integrity verdict across all review/check rounds: `undefined` when
+ * the checkout is unchanged, otherwise a message naming what moved (HEAD, changed paths).
+ * Names only — never file contents, hashes or environment values.
+ */
+export function reviewRoundsViolation(cwd: string, baseline: string, fingerprint: string | undefined): string | undefined {
+  const integrity = verifyWorkspaceIntegrity(cwd, baseline);
+  const current = reviewSourceFingerprint(cwd);
+  if (integrity.clean && current === fingerprint) return undefined;
+  const reasons: string[] = [];
+  const head = getWorkspaceGitSnapshot(cwd)?.split('\n')[0];
+  if (head === undefined) reasons.push('git state could not be read');
+  else if (head !== baseline.split('\n')[0]) reasons.push(`HEAD moved (${baseline.split('\n')[0]!.slice(5, 17)} -> ${head.slice(5, 17)})`);
+  const paths = fingerprint === undefined ? [] : reviewSourceChanges(fingerprint, current);
+  if (paths.length) reasons.push(`changed paths: ${paths.slice(0, 20).join(', ')}${paths.length > 20 ? ` (+${paths.length - 20} more)` : ''}`);
+  if (!reasons.length) reasons.push('git status changed');
+  return `Read-only review violation: checkout changed across review/check rounds (${reasons.join('; ')}); preserve it for diagnosis`;
 }
 
 export function isReadOnlyTools(allowedTools?: string[]): boolean {
@@ -630,6 +649,7 @@ export class AgyCliRunner implements AgentRunner {
     let turnQueue: Promise<void> = Promise.resolve();
 
     const result = (async (): Promise<AgentRunResult> => {
+      let primaryFailed = false;
       try {
         if (spec.prReview) {
           if (!spec.cwd) throw new Error('PR review requires a checkout');
@@ -671,12 +691,23 @@ export class AgyCliRunner implements AgentRunner {
           reviewTranscript += `\nPrevious check request: ${CHECK_MARKER}${JSON.stringify(check)}\nCezar trusted check result: inspect the result file before concluding.\nCezar check result file: ${resultFile.path}\nResult lines: ${resultFile.lines}\n`;
           textChunks.splice(textStart);
         } while (true);
+      } catch (err) {
+        primaryFailed = true;
+        throw err;
       } finally {
         if (spec.prReview || opts.autoEndAfterFirstTurn) open = false;
         reviewDiff?.cleanup();
-        if (spec.prReview && spec.cwd && reviewBaseline !== undefined &&
-            (!verifyWorkspaceIntegrity(spec.cwd, reviewBaseline).clean || reviewSourceFingerprint(spec.cwd) !== reviewFingerprint)) {
-          throw new Error('Read-only review violation: checkout changed across review/check rounds; preserve it for diagnosis');
+        if (spec.prReview && spec.cwd && reviewBaseline !== undefined) {
+          let violation: string | undefined;
+          try { violation = reviewRoundsViolation(spec.cwd, reviewBaseline, reviewFingerprint); }
+          catch (err) { violation = `Read-only review violation: the final checkout integrity check failed: ${err instanceof Error ? err.message : String(err)}`; }
+          if (violation) {
+            // The first failure (e.g. a check's own integrity violation naming the files)
+            // stays the run's error; this one is reported beside it, never instead of it.
+            // A note, not an error event: the engine keeps the FIRST error event as the run's.
+            if (primaryFailed) onEvent?.({ type: 'note', message: `Additionally: ${violation}` });
+            else throw new Error(violation);
+          }
         }
       }
 
