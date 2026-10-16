@@ -98,7 +98,8 @@ export const graphNodeSchema = z.discriminatedUnion('type', [
     budgetUsd: z.number().positive().optional(),
   }),
   z.object({ ...nodeBase, type: z.literal('git.commit'), message: z.string().min(1) }),
-  z.object({ ...nodeBase, type: z.literal('github.draft-pr'), title: z.string().optional() }),
+  /** `ready: true` opens the PR ready for review instead of as a draft (the `implement` built-in). */
+  z.object({ ...nodeBase, type: z.literal('github.draft-pr'), title: z.string().optional(), ready: z.boolean().optional() }),
   /** Park until the task PR's checks settle. A timeout is REQUIRED (defaulted) — a wait with no
    *  bounded exit would hold the run forever (AGENTS.md § transitions out of every state). */
   z.object({
@@ -221,7 +222,7 @@ export const NODE_CATALOG: NodeCatalogEntry[] = [
   { type: 'ask-user', category: 'agents', label: 'Ask user', description: 'Ask a question and continue with the answer.', ports: ['answered'], outputs: ['answer'] },
   { type: 'dispatch', category: 'agents', label: 'Dispatch subtask', description: 'A child task in its own worktree, budget carved from this run.', ports: ['done', 'failed'], outputs: ['runId', 'status', 'summary'] },
   { type: 'git.commit', category: 'git', label: 'Commit', description: 'Commit everything in the worktree.', ports: ['done', 'nothing', 'failed'], outputs: ['sha'] },
-  { type: 'github.draft-pr', category: 'git', label: 'Draft PR', description: 'Push the branch and open a draft PR through gh.', ports: ['created', 'failed'], outputs: ['url', 'number'] },
+  { type: 'github.draft-pr', category: 'git', label: 'Draft PR', description: 'Push the branch and open a draft PR through gh (`ready: true` opens it ready for review).', ports: ['created', 'failed'], outputs: ['url', 'number'] },
   { type: 'github.wait-ci', category: 'git', label: 'Wait for CI', description: "Park until the PR's checks pass or fail (timeout required).", ports: ['green', 'red', 'timeout', 'failed'], outputs: ['status'] },
   { type: 'github.pr-comment', category: 'git', label: 'PR comment', description: 'Comment on the task PR.', ports: ['done', 'failed'], outputs: [] },
   { type: 'github.review-comment', category: 'git', label: 'Publish PR review', description: "Post an agent's full review on the PR this run reviews — once per PR head, never on a stale head.", ports: ['published', 'duplicate', 'stale', 'failed'], outputs: ['status', 'headSha'] },

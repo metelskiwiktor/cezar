@@ -151,6 +151,15 @@ export function stepKind(step: WorkflowStepDef): 'agent' | 'check' {
 }
 
 /**
+ * A step workflow whose every step is a `review: true` agent (the `analysis` built-in): the
+ * whole run is read-only — credentials stripped, no autosave commits, no PR. Graph workflows
+ * never qualify (their `review` flag means a fork reviewer, not a read-only run).
+ */
+export function isReadOnlyWorkflow(def: Pick<WorkflowDef, 'steps' | 'graph'>): boolean {
+  return !def.graph && def.steps.length > 0 && def.steps.every((s) => stepKind(s) === 'agent' && s.review === true);
+}
+
+/**
  * Does this failing exit code buy the agent another attempt? With no `retryOn`
  * list — every workflow written before the field, and every one that doesn't
  * care — any failure does, unchanged. With one, only the codes it names: an

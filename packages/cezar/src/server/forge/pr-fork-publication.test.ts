@@ -56,6 +56,15 @@ it('publishes to the persisted develop target even when baseBranch is a SHA', as
   expect(ghCalls[0]).toEqual(expect.arrayContaining(['--base', 'develop', '--head', 'cez/task']));
   expect(git('--git-dir', remote, 'rev-parse', 'refs/heads/cez/task')).toBe(git('rev-parse', 'HEAD'));
 });
+it('opens a draft by default and a ready-for-review PR when asked', async () => {
+  const payload = await input();
+  expect((await createDraftPr(payload)).ok).toBe(true);
+  expect(ghCalls[0]).toContain('--draft');
+  ghCalls.length = 0;
+  expect((await createDraftPr({ ...payload, ready: true })).ok).toBe(true);
+  expect(ghCalls[0]?.slice(0, 2)).toEqual(['pr', 'create']);
+  expect(ghCalls[0]).not.toContain('--draft');
+});
 it('changed origin blocks publication before autosave, push or gh', async () => {
   const payload = await input(); const before = git('rev-parse', 'HEAD');
   git('remote', 'set-url', 'origin', `${remote}-changed`);

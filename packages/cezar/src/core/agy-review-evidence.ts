@@ -200,12 +200,19 @@ export class AgyReviewEvidence {
   complete(): boolean {
     const cwd = this.spec.cwd;
     if (!cwd) return false;
-    return this.validContext && this.diffRead && this.pending.size === 0 && this.recoveries.size === 0 &&
+    // An unresolved guessed path (`recoveries`) no longer voids the review: only the mandatory
+    // evidence below does. `recoveries` still decides the stricter late-format-error path.
+    return this.validContext && this.diffRead && this.pending.size === 0 &&
       [...this.checkFiles.values()].every((check) => check.read || check.coverage.size >= check.lines) &&
       (this.trustedDiff
         ? this.reads.has(resolve(cwd, 'AGENTS.md')) &&
           (this.affected.size === 0 || [...this.affected].some((path) => this.reads.has(path)))
         : [...this.required].every((path) => existsSync(path) && this.reads.has(path)));
+  }
+
+  /** `complete()` plus every guessed path corrected — the late-format-error recovery's bar. */
+  strictComplete(): boolean {
+    return this.complete() && this.recoveries.size === 0;
   }
 
   get hasContext(): boolean { return this.spec.prReview !== undefined || this.spec.userPrompt.includes('The PR diff is:'); }

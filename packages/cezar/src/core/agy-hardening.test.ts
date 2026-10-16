@@ -220,9 +220,25 @@ describe('AgyCliRunner security hardening & isolation', () => {
         CEZ_TODOS_FILE: 'C:/main/todos.json', CEZ_BIN: 'C:/runtime/index.js', CEZ_TREE_DIR: 'C:/main/tree' })).resolves.toMatchObject({ publish: { status: 'published' } });
     });
 
-    it('a changed README is mandatory even if the agent reports ENOENT', async () => {
-      await expect(recoveryRun({ FAKE_AGY_REQUIRED_README: '1', FAKE_AGY_MISSING_PATH: 'README.md' })).rejects.toThrow(/evidence/);
-    });
+    // One failed in-scope read does not void a review whose mandatory evidence (pinned diff,
+    // AGENTS.md, an affected file, finished calls) is complete; the run says so in a note.
+    it.each<[string, Record<string, string>]>([
+      ['a changed README reported ENOENT (its diff is read)', { FAKE_AGY_REQUIRED_README: '1', FAKE_AGY_MISSING_PATH: 'README.md' }],
+      ['more than two optional misses', { FAKE_AGY_MISSING_PATH: 'docs/README.md', FAKE_AGY_EXTRA_MISSES: '2' }],
+      ['a missing skill file', { FAKE_AGY_MISSING_PATH: '.agents/skills/README.md' }],
+      ['a guessed index path never corrected', { FAKE_AGY_OMIT: 'correction' }],
+      ['a transient miss on a changed file read afterwards', { FAKE_AGY_MISSING_PATH: 'tracked.txt' }],
+      ['a transient miss on AGENTS.md read afterwards', { FAKE_AGY_MISSING_PATH: 'AGENTS.md' }],
+      ['an arbitrary missing source', { FAKE_AGY_MISSING_PATH: 'src/unrelated.ts' }],
+      ['an unknown read failure', { FAKE_AGY_ERROR: 'unknown read failure' }],
+    ])('a single non-mandatory inspection error does not void the review: %s', async (_name, overrides) => {
+      const posts: string[] = [];
+      await expect(recoveryRun(overrides, posts)).resolves.toMatchObject({
+        publish: { status: 'published' },
+        notes: expect.arrayContaining([expect.stringContaining('mandatory checkout evidence is complete')]),
+      });
+      expect(posts).toHaveLength(1);
+    }, 20_000);
 
     it('fails closed on an outside inspection even if the provider reports success', async () => {
       const posts: string[] = [];
@@ -230,13 +246,9 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(posts).toEqual([]);
     });
 
-    it('bounds optional missing reads to two and rejects missing skills or external handoff', async () => {
-      const cases: Record<string, string>[] = [{ FAKE_AGY_MISSING_PATH: 'docs/README.md', FAKE_AGY_EXTRA_MISSES: '2' },
-        { FAKE_AGY_MISSING_PATH: '.agents/skills/README.md' }, { FAKE_AGY_MISSING_PATH: '../runs/id/handoff.md' }];
-      for (const overrides of cases) {
-        await expect(recoveryRun(overrides)).rejects.toThrow(/evidence/);
-      }
-    }, 20_000); // Three independent Git/CLI fixtures, including Windows process startup.
+    it('rejects an external handoff read as a scope violation', async () => {
+      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: '../runs/id/handoff.md' })).rejects.toThrow(/evidence/);
+    });
 
     it('stops immediately on permission denial before the agent can bypass it', async () => {
       const calls: string[] = [];
@@ -251,7 +263,7 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(posts).toEqual([]);
     });
 
-    it.each(['correction', 'agents', 'changed'])('fails closed when recovery lacks %s evidence', async (missing) => {
+    it.each(['agents', 'changed'])('fails closed when recovery lacks %s evidence', async (missing) => {
       const posts: string[] = [];
       await expect(recoveryRun({ FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/inspection|evidence/);
       expect(posts).toEqual([]);
@@ -323,9 +335,15 @@ describe('AgyCliRunner security hardening & isolation', () => {
       });
     });
 
-    it.each(['tracked.txt', 'AGENTS.md', 'src/unrelated.ts', '../outside/index.ts'])('does not forgive missing required, arbitrary or external path %s', async (path) => {
+    it('does not forgive an external path', async () => {
       const posts: string[] = [];
-      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: path }, posts)).rejects.toThrow(/inspection/);
+      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: '../outside/index.ts' }, posts)).rejects.toThrow(/scope violation/);
+      expect(posts).toEqual([]);
+    });
+
+    it('a guessed path never corrected still refuses the stricter late-format-error recovery', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_RESULT_ERROR: 'malformed', FAKE_AGY_OMIT: 'correction' }, posts)).rejects.toThrow(/recovery refused/);
       expect(posts).toEqual([]);
     });
 
@@ -347,7 +365,7 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(posts).toEqual([]);
     });
 
-    it.each(['permission denied', 'EACCES: access denied', 'EPERM: operation not permitted', 'ENOENT: permission denied', 'unknown read failure'])('does not recover %s', async (error) => {
+    it.each(['permission denied', 'EACCES: access denied', 'EPERM: operation not permitted', 'ENOENT: permission denied'])('does not recover %s', async (error) => {
       const posts: string[] = [];
       await expect(recoveryRun({ FAKE_AGY_ERROR: error }, posts)).rejects.toThrow();
       expect(posts).toEqual([]);
