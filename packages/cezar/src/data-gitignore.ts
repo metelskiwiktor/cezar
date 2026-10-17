@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -57,7 +57,13 @@ export function ensureDataGitignore(repoRoot: string): void {
   const path = join(repoRoot, '.ai/cezar', '.gitignore');
   try {
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
-    const current = existsSync(path) ? readFileSync(path, 'utf8') : '';
+    // Read-or-empty rather than exists-then-read: one syscall, no window between them.
+    let current = '';
+    try {
+      current = readFileSync(path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
     const lines = current.split('\n');
     const missing = DATA_GITIGNORE_ENTRIES.filter((w) => !lines.includes(w));
     if (missing.length > 0) {

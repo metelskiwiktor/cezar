@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /**
@@ -127,7 +127,6 @@ function boundProgressLog(text: string): string {
  *  continuation) is never overwritten. Returns the file path. */
 export function seedHandoffFile(dataDir: string, run: HandoffSeed): string {
   const file = handoffPath(dataDir, run.id);
-  if (existsSync(file)) return file;
   const header =
     `# Handoff — ${run.title}\n\n` +
     `**Task id:** ${run.id}\n` +
@@ -139,9 +138,12 @@ export function seedHandoffFile(dataDir: string, run: HandoffSeed): string {
     `## Resume notes\n`;
   try {
     mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file, header, 'utf8');
+    // `wx` makes "never overwrite" atomic: an exists-check first left a window in which a
+    // concurrent seed (continuation racing a resume) could clobber a file that already had progress.
+    writeFileSync(file, header, { encoding: 'utf8', flag: 'wx' });
   } catch {
-    // best effort — a read-only data dir must not break the run
+    // EEXIST is the idempotent case; anything else is best effort — a read-only data dir must
+    // not break the run
   }
   return file;
 }

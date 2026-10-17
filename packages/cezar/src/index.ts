@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:net';
-import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { detectEnvironment } from './core/backend-detect.ts';
@@ -809,11 +809,13 @@ description: House rules the agent should follow in this repo.
   ];
 
   for (const example of examples) {
-    if (existsSync(example.path)) {
-      console.log(`  = ${example.path} (exists, left untouched)`);
-    } else {
-      writeFileSync(example.path, example.content, 'utf8');
+    // `wx`: "never overwrite" is decided by the create itself, not by an exists-check before it.
+    try {
+      writeFileSync(example.path, example.content, { encoding: 'utf8', flag: 'wx' });
       console.log(`  + ${example.path}`);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      console.log(`  = ${example.path} (exists, left untouched)`);
     }
   }
   ensureDataGitignore(repoRoot);

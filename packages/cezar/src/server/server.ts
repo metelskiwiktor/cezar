@@ -1717,9 +1717,14 @@ export function createApp(deps: ServerDeps) {
   app.get('/assets/:file', (c) => {
     const file = c.req.param('file');
     if (!isSafeAssetFilename(file)) return c.json({ error: 'not found' }, 404);
-    const path = join(distDir, 'assets', file);
-    if (!existsSync(path) || !statSync(path).isFile()) return c.json({ error: 'not found' }, 404);
-    return new Response(readFileSync(path), {
+    // Read-or-404 in one call (ENOENT, EISDIR, …) — no exists/stat check to race against.
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(join(distDir, 'assets', file));
+    } catch {
+      return c.json({ error: 'not found' }, 404);
+    }
+    return new Response(bytes, {
       headers: {
         'content-type': assetContentType(file),
         'cache-control': ASSET_CACHE_CONTROL,

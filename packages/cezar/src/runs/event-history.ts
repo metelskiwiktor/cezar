@@ -1,5 +1,5 @@
 import { createReadStream, type Stats } from 'node:fs';
-import { open, stat } from 'node:fs/promises';
+import { open, stat, type FileHandle } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { z } from 'zod';
 
@@ -245,15 +245,9 @@ async function reverseEventsUntil(
   bytesRead: number;
   canonical?: CanonicalItem[];
 }> {
-  let fileSize = 0;
-  try {
-    fileSize = (await stat(filePath)).size;
-  } catch {
-    return { events: [], fileSize: 0, fileHighWater: 0, reachedStart: true, bytesRead: 0 };
-  }
-  if (fileSize === 0) return { events: [], fileSize, fileHighWater: 0, reachedStart: true, bytesRead: 0 };
-
-  const handle = await open(filePath, 'r');
+  const opened = await openSized(filePath);
+  if (!opened) return { events: [], fileSize: 0, fileHighWater: 0, reachedStart: true, bytesRead: 0 };
+  const { handle, fileSize } = opened;
   let position = fileSize;
   let suffix: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   const reversed: RunHistoryEvent[] = [];
@@ -311,15 +305,30 @@ async function reverseEventsUntil(
   };
 }
 
-async function readFileTail(filePath: string): Promise<{ fileSize: number; fileHighWater: number; bytesRead: number }> {
-  let fileSize = 0;
+/** Open first, then size the DESCRIPTOR: a separate `stat(path)` could describe a different file
+ *  than the one opened (a rename-over between the two), so the reverse read would start at the
+ *  wrong offset. `null` for a missing or empty file — the caller's "nothing yet" answer. */
+async function openSized(filePath: string): Promise<{ handle: FileHandle; fileSize: number } | null> {
+  let handle: FileHandle;
   try {
-    fileSize = (await stat(filePath)).size;
+    handle = await open(filePath, 'r');
   } catch {
-    return { fileSize: 0, fileHighWater: 0, bytesRead: 0 };
+    return null;
   }
-  if (fileSize === 0) return { fileSize, fileHighWater: 0, bytesRead: 0 };
-  const handle = await open(filePath, 'r');
+  try {
+    const fileSize = (await handle.stat()).size;
+    if (fileSize > 0) return { handle, fileSize };
+  } catch {
+    // fall through: unreadable is the same answer as missing
+  }
+  await handle.close();
+  return null;
+}
+
+async function readFileTail(filePath: string): Promise<{ fileSize: number; fileHighWater: number; bytesRead: number }> {
+  const opened = await openSized(filePath);
+  if (!opened) return { fileSize: 0, fileHighWater: 0, bytesRead: 0 };
+  const { handle, fileSize } = opened;
   let position = fileSize;
   let suffix: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   let totalBytesRead = 0;

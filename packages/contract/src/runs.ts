@@ -882,6 +882,14 @@ function truncateToBounds(value: string, maxChars: number, maxBytes: number): st
   return out;
 }
 
+/** Drop trailing `.` and ` ` in one linear pass. The equivalent `/[. ]+$/` backtracks
+ *  quadratically on a long run of them followed by anything else. */
+function trimTrailingDotsAndSpaces(value: string): string {
+  let end = value.length;
+  while (end > 0 && (value[end - 1] === '.' || value[end - 1] === ' ')) end -= 1;
+  return value.slice(0, end);
+}
+
 /**
  * Turn the filename a browser reported into one that is safe to use as a path segment, or `null`
  * when nothing usable survives.
@@ -932,11 +940,11 @@ export function sanitizeAttachmentName(name: string, mediaType: string): string 
   const ext = dot > 0 ? cleaned.slice(dot + 1).toLowerCase() : '';
   const keepsExtension = allowed.includes(ext);
   const rawStem = keepsExtension ? cleaned.slice(0, dot) : cleaned;
-  const stem = truncateToBounds(rawStem, MAX_ATTACHMENT_NAME_STEM, MAX_ATTACHMENT_NAME_STEM_BYTES)
-    // Trailing dots and spaces last, after truncation could have exposed one: Windows refuses an
-    // entry that ends in either, and `notes.` would otherwise become `notes..txt`.
-    .replace(/[. ]+$/, '')
-    .trim();
+  // Trailing dots and spaces last, after truncation could have exposed one: Windows refuses an
+  // entry that ends in either, and `notes.` would otherwise become `notes..txt`.
+  const stem = trimTrailingDotsAndSpaces(
+    truncateToBounds(rawStem, MAX_ATTACHMENT_NAME_STEM, MAX_ATTACHMENT_NAME_STEM_BYTES),
+  ).trim();
   if (stem === '') return null;
   // The last Windows filename rule, and the only one that is not about characters: these stems
   // name DEVICES whatever extension follows, so `CON.txt` is the console rather than a file and a

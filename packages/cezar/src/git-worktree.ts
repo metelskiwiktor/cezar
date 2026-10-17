@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, realpathSync, type Dirent } from 'node:fs';
-import { readdir, readFile, rm, stat } from 'node:fs/promises';
+import { open, readdir, rm } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { resolveTaskDiffBase } from './git-diff-base.ts';
 import { isSafeGitRef } from './git-refs.ts';
@@ -599,11 +599,21 @@ export async function unresolvedConflicts(dir: string, porcelain: string): Promi
     // the on-disk copy is what would be committed. Binary files decode to
     // mojibake rather than throwing, but cannot match the anchored marker
     // pattern; unreadable paths (races, symlinks) are skipped, not fatal.
+    // One descriptor for the size check AND the read, bounded by that size: a
+    // path stat'ed then re-opened could have grown, or been swapped for a link
+    // to a device (`/dev/zero`), in between.
     let text: string;
     try {
-      const full = join(dir, path);
-      if ((await stat(full)).size > MARKER_SCAN_MAX_BYTES) continue;
-      text = await readFile(full, 'utf8');
+      const handle = await open(join(dir, path), 'r');
+      try {
+        const info = await handle.stat();
+        if (!info.isFile() || info.size > MARKER_SCAN_MAX_BYTES) continue;
+        const buf = Buffer.alloc(info.size);
+        const { bytesRead } = await handle.read(buf, 0, info.size, 0);
+        text = buf.toString('utf8', 0, bytesRead);
+      } finally {
+        await handle.close();
+      }
     } catch {
       continue;
     }

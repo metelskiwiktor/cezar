@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
-import { rmSync } from 'node:fs';
-import { lstat, open, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { constants as fsConstants, rmSync } from 'node:fs';
+import { lstat, open, readdir, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { resolveTaskDiffBase, type RepointedHead } from '../git-diff-base.ts';
@@ -599,17 +599,12 @@ export function isOsOpenableImage(path: string): boolean {
 }
 
 /** True when the first 8 KB contain a NUL byte — good enough for a viewer flag. */
-async function sniffBinary(path: string, size: number): Promise<boolean> {
-  const handle = await open(path, 'r');
-  try {
-    const len = Math.min(size, 8192);
-    if (len === 0) return false;
-    const buf = Buffer.alloc(len);
-    await handle.read(buf, 0, len, 0);
-    return buf.includes(0);
-  } finally {
-    await handle.close();
-  }
+async function sniffBinary(handle: FileHandle, size: number): Promise<boolean> {
+  const len = Math.min(size, 8192);
+  if (len === 0) return false;
+  const buf = Buffer.alloc(len);
+  await handle.read(buf, 0, len, 0);
+  return buf.includes(0);
 }
 
 /**
@@ -681,13 +676,35 @@ export async function readWorktreePath(
 
   if (!info.isFile()) return { kind: 'invalid', error: `not a regular file: ${display}` };
 
-  const binary = await sniffBinary(target, info.size).catch(() => true);
-  const tooLarge = info.size > contentCap;
-  if (binary || tooLarge) {
-    return { kind: 'file', path: display, size: info.size, binary, tooLarge };
+  // The worktree is written by an agent while we read it, so the checks above describe the path
+  // as it WAS. Open once — refusing a final-component symlink where the OS can (POSIX) — and serve
+  // only if the descriptor is the very inode `lstat` vetted; sniff and read through that
+  // descriptor, never the path again. A swap in between (a symlink to `~/.ssh/id_rsa`, a bigger
+  // file renamed over it) is reported as changed instead of served.
+  let handle: FileHandle;
+  try {
+    handle = await open(target, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  } catch {
+    return { kind: 'invalid', error: `file changed while it was being read: ${display}` };
   }
-  const content = await readFile(target, 'utf8');
-  return { kind: 'file', path: display, size: info.size, binary: false, tooLarge: false, content };
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile() || opened.dev !== info.dev || opened.ino !== info.ino) {
+      return { kind: 'invalid', error: `file changed while it was being read: ${display}` };
+    }
+    const size = opened.size;
+    const binary = await sniffBinary(handle, size).catch(() => true);
+    const tooLarge = size > contentCap;
+    if (binary || tooLarge) {
+      return { kind: 'file', path: display, size, binary, tooLarge };
+    }
+    const buf = Buffer.alloc(size);
+    const { bytesRead } = await handle.read(buf, 0, size, 0);
+    const content = buf.toString('utf8', 0, bytesRead);
+    return { kind: 'file', path: display, size, binary: false, tooLarge: false, content };
+  } finally {
+    await handle.close();
+  }
 }
 
 // ---- branches -------------------------------------------------------------
