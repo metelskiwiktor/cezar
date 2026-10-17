@@ -13,14 +13,19 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContentBlock } from '../core/agent-runner.ts';
+import { parseAskMarker } from '../core/ask.ts';
 import type { UiEvent } from '../core/ui-events.ts';
 import { ClaudeCliRunner } from '../core/claude-cli-runner.ts';
-import { createWorktree } from '../git-worktree.ts';
+import { createWorktree, removeWorktree } from '../git-worktree.ts';
 import { RunStore, type RunRecord, type StepState } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { parseTaskMarkers } from '../runs/task-markers.ts';
-import { appendTurnText, endsWithMonitoringMarker, RunManager, turnEndMarkerText } from './run.ts';
+import { appendTurnText, endsWithDoneMarker, endsWithMonitoringMarker, RunManager, turnEndMarkerText } from './run.ts';
 import type { WorkflowDef } from './types.ts';
+import { track } from '../telemetry.ts';
+
+// A spy, inert like the real `track` without consent — lets skill provisioning assert its signal.
+vi.mock('../telemetry.ts', async (importOriginal) => ({ ...(await importOriginal<object>()), track: vi.fn() }));
 
 type UsageAccountingHarness = {
   beginUsageInvocation(runId: string, state: Record<string, unknown>, stepId: string): void;
@@ -70,6 +75,32 @@ describe('appendTurnText', () => {
     expect(appendTurnText('', 'first')).toBe('first');
     expect(appendTurnText('first', '')).toBe('first');
     expect(appendTurnText(appendTurnText('', 'first'), 'second')).toBe('first\nsecond');
+  });
+});
+
+describe('turn-end markers tolerate trailing task references (#997)', () => {
+  const ask =
+    'CEZ:ASK {"questions":[{"header":"Scope","question":"Which scope?","options":[{"label":"Narrow"},{"label":"Wide"}]}]}';
+
+  it.each([
+    'finished\nCEZ:DONE\nCEZ:PR=42',
+    'finished\nCEZ:DONE\nCEZ:ISSUE=997',
+    'finished\nCEZ:DONE\nCEZ:TITLE=closing the issue',
+  ])('normalizes DONE before trailing references: %s', (turn) => {
+    expect(endsWithDoneMarker(turn)).toBe(true);
+  });
+
+  it('normalizes ASK before trailing references so the card parser still sees it', () => {
+    const normalized = turnEndMarkerText(`Need a decision.\n${ask}\nCEZ:ISSUE=997`);
+    expect(parseAskMarker(normalized)).not.toBeNull();
+  });
+
+  it.each([
+    'finished\nCEZ:DONE\nthen continued working',
+    'Need a decision.\nCEZ:ASK {"questions":[]}\nCEZ:ISSUE=997\nthen continued working',
+    'I will emit CEZ:DONE and CEZ:PR=42 in the next turn.',
+  ])('does not strip or promote marker-like prose: %s', (turn) => {
+    expect(turnEndMarkerText(turn)).toBe(turn);
   });
 });
 
@@ -254,19 +285,11 @@ it('parallel variants ignore a worktree opt-out and retain isolated mode', () =>
  * Turn-end bookkeeping (#389, task auto-naming spec) against a REAL fixture
  * repo: `recordTurnEnd` is the exact method both agent-event paths fire on
  * `turn-end`, driven directly here because a live agent session is the only
- * other way to reach it. CEZ_AUTONAME=0 keeps the namer (an LLM call) out of
- * these fixtures — titles are ONLY ever namer-owned or user-owned now, never
- * derived from turn text.
+ * other way to reach it. The suite-wide CEZ_AUTONAME=0 (vitest.setup.ts) keeps
+ * the namer (an LLM call) out of these fixtures — titles are ONLY ever
+ * namer-owned or user-owned now, never derived from turn text.
  */
 describe('RunManager.recordTurnEnd', () => {
-  const savedAutoname = process.env.CEZ_AUTONAME;
-  beforeAll(() => {
-    process.env.CEZ_AUTONAME = '0';
-  });
-  afterAll(() => {
-    if (savedAutoname === undefined) delete process.env.CEZ_AUTONAME;
-    else process.env.CEZ_AUTONAME = savedAutoname;
-  });
   let repoRoot: string;
   let store: RunStore;
   let manager: RunManager;
@@ -684,13 +707,11 @@ describe('RunManager.continueRun override', () => {
  */
 describe('RunManager.settleSuccess — optional review gate', () => {
   const savedGate = process.env.CEZ_REVIEW_GATE;
-  const savedAutoname = process.env.CEZ_AUTONAME;
   let repoRoot: string;
   let store: RunStore;
   let manager: RunManager;
 
   beforeAll(async () => {
-    process.env.CEZ_AUTONAME = '0';
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-reviewgate-'));
     await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
     writeFileSync(join(repoRoot, 'a.txt'), 'one\ntwo\nthree\n');
@@ -705,8 +726,6 @@ describe('RunManager.settleSuccess — optional review gate', () => {
     rmSync(repoRoot, { recursive: true, force: true });
     if (savedGate === undefined) delete process.env.CEZ_REVIEW_GATE;
     else process.env.CEZ_REVIEW_GATE = savedGate;
-    if (savedAutoname === undefined) delete process.env.CEZ_AUTONAME;
-    else process.env.CEZ_AUTONAME = savedAutoname;
   });
 
   afterEach(() => {
@@ -934,6 +953,76 @@ describe('a single agent step plus a check step gets NO chain note (#410)', () =
     expect(notes[0]).not.toContain('chain of');
     expect(notes[0]).not.toContain('earlier step');
     expect(notes[0]).not.toContain('project-conventions');
+  }, 30_000);
+});
+
+/**
+ * Regression for #1079: command steps can mutate tracked files, but those
+ * mutations are verification residue rather than agent work. The agent's
+ * checkpoint must remain recoverable while the check artifact stays available
+ * in the worktree but does not land in the branch's autosave history.
+ */
+describe('check-step mutations stay out of autosave commits (#1079)', () => {
+  let repoRoot: string;
+  let store: RunStore;
+  let manager: RunManager;
+  const savedDryRun = process.env.CEZ_DRY_RUN;
+
+  beforeAll(async () => {
+    repoRoot = mkdtempSync(join(tmpdir(), 'cez-1079-'));
+    process.env.CEZ_DRY_RUN = '1';
+    await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
+    writeFileSync(join(repoRoot, 'debug_test.txt'), 'base\n');
+    await run('git', ['add', '-A'], { cwd: repoRoot });
+    await run('git', [...GIT_ID, 'commit', '-q', '-m', 'base'], { cwd: repoRoot });
+    store = RunStore.open(join(repoRoot, '.ai/cezar'));
+    manager = new RunManager(store, repoRoot);
+  });
+
+  afterAll(() => {
+    manager.dispose();
+    if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
+    else process.env.CEZ_DRY_RUN = savedDryRun;
+    store.flush();
+    rmSync(repoRoot, { recursive: true, force: true });
+  });
+
+  it('keeps the tracked check artifact out of the autosave commit', async () => {
+    const record = manager.startRun(
+      {
+        name: 'implement-verify',
+        source: 'built-in',
+        steps: [
+          { id: 'implement', name: 'Implement', prompt: '{{task}}' },
+          {
+            id: 'verify',
+            name: 'Verify',
+            command: "printf 'debug from check\\n' >> debug_test.txt; printf 'generated by check\\n' > generated_check.txt",
+          },
+        ],
+      },
+      { task: 'mock:done make the change' },
+    );
+
+    const terminal = new Set(['done', 'review', 'failed', 'cancelled']);
+    const deadline = Date.now() + 20_000;
+    while (!terminal.has(store.getRun(record.id)?.status ?? '')) {
+      if (Date.now() > deadline) throw new Error('run did not finish in time');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    const finished = store.getRun(record.id);
+    expect(finished?.status).toBe('done');
+    expect(finished?.worktreePath).toBeTruthy();
+    const worktreePath = finished?.worktreePath as string;
+    const { stdout: subjects } = await run('git', ['log', '--format=%s', '-5'], { cwd: worktreePath });
+    expect(subjects.trim().split('\n')).toEqual(['cezar autosave (turn end)', 'base']);
+    const { stdout: files } = await run('git', ['show', '--format=', '--name-only', 'HEAD'], { cwd: worktreePath });
+    expect(files.trim().split('\n')).toEqual(['notes.md']);
+    expect(readFileSync(join(worktreePath, 'debug_test.txt'), 'utf8')).toBe('base\ndebug from check\n');
+    expect(readFileSync(join(worktreePath, 'generated_check.txt'), 'utf8')).toBe('generated by check\n');
+
+    await removeWorktree(repoRoot, worktreePath, finished?.branch);
   }, 30_000);
 });
 
@@ -3457,7 +3546,45 @@ describe("registry /skill expansion on a fresh run's opening prompt (#278)", () 
     expect(echoed?.text).not.toContain('/demo-review look at the diff');
   }, 40_000);
 
+  it("installs the slash skill and the companion it names into the task's worktree", async () => {
+    // The worktree is a fresh checkout: neither skill is in it unless cezar puts it there,
+    // and the agent then answers "Unknown skill" / "companion not installed".
+    writeFileSync(
+      join(repoRoot, '.ai/cezar/skills/demo-review.md'),
+      '---\nname: demo-review\ndescription: Review a diff.\n---\n\nRun the `demo-engine` skill verbatim.\n',
+    );
+    writeFileSync(join(repoRoot, '.ai/cezar/skills/demo-engine.md'), '---\nname: demo-engine\n---\n\nEngine.\n');
+    const record = manager.startRun(SINGLE_STEP, { task: '/demo-review 12', worktree: true });
+    runId = record.id;
+    await waitFor(() => eventsOf(record.id).some((e) => e.stepId === 'task' && e.type === 'text'));
+    const wt = store.getRun(record.id)!.worktreePath!;
+    for (const dir of ['.claude/skills', '.agents/skills']) {
+      expect(readFileSync(join(wt, dir, 'demo-review/SKILL.md'), 'utf8')).toContain('demo-engine');
+      expect(readFileSync(join(wt, dir, 'demo-engine/SKILL.md'), 'utf8')).toContain('Engine.');
+    }
+    expect(vi.mocked(track)).toHaveBeenCalledWith('skills_provisioned', { label: 'installed', value: 2 });
+  }, 40_000);
+
+  it("writes no skill copies into the user's own checkout on an in-place run", async () => {
+    // In place the cwd IS the checkout, whose skill dirs `discoverSkills` reads ahead of the
+    // builtin — a written-out copy would shadow the real skill for good.
+    const savedApiUrl = process.env.CEZ_API_URL;
+    process.env.CEZ_API_URL = 'http://127.0.0.1:1';
+    try {
+      const record = manager.startRun(SINGLE_STEP, { task: '/create-cezar-automation daily', worktree: false });
+      runId = record.id;
+      await waitFor(() => eventsOf(record.id).some((e) => e.stepId === 'task' && e.type === 'text'));
+      for (const dir of ['.claude/skills', '.agents/skills']) {
+        expect(existsSync(join(repoRoot, dir, 'create-cezar-automation'))).toBe(false);
+      }
+    } finally {
+      if (savedApiUrl === undefined) delete process.env.CEZ_API_URL;
+      else process.env.CEZ_API_URL = savedApiUrl;
+    }
+  }, 40_000);
+
   it('leaves an unknown slash command untouched so backend-native commands still work', async () => {
+    vi.mocked(track).mockClear();
     const record = manager.startRun(SINGLE_STEP, { task: '/compact please', worktree: false });
     runId = record.id;
     await waitFor(() =>
@@ -3469,5 +3596,7 @@ describe("registry /skill expansion on a fresh run's opening prompt (#278)", () 
       (e) => e.stepId === 'task' && e.type === 'text' && e.text?.includes('looking into'),
     );
     expect(echoed?.text).toContain('/compact please');
+    // A backend's own command is not a missing skill.
+    expect(vi.mocked(track)).not.toHaveBeenCalledWith('skills_provisioned', expect.anything());
   }, 40_000);
 });

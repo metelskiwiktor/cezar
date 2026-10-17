@@ -32,6 +32,8 @@ import type {
   CancelResponse,
   ChangesPayload,
   CheckoutProjectInput,
+  CreateProjectInput,
+  GithubOwnersResponse,
   ConfigResponse,
   ReclaimWorktreesResponse,
   RemoveWorktreeResponse,
@@ -53,6 +55,7 @@ import type {
   FsBrowseResponse,
   GitCommitResponse,
   GitPushResponse,
+  GitStatusResponse,
   GithubChecksData,
   GithubSearchData,
   GithubRefStatusData,
@@ -93,12 +96,15 @@ import type {
   RunHistoryContext,
   RunHistoryPage,
   RepoResponse,
+  RepoTree,
   Runner,
   ModelDiscoveryRunner,
   RunnerModelCatalogResponse,
   RunRecord,
   RunsIndexResponse,
   StarCountPayload,
+  SetTelemetryConsentInput,
+  TelemetryConsentPayload,
   WorktreeEntry,
   SaveWorkflowInput,
   SaveWorkflowResponse,
@@ -132,6 +138,8 @@ import type {
   TrackerItemResponse,
   TrackerItemsResponse,
   TrackerKind, TrackerCredentials, TrackerConnectionResponse,
+  SecretsList, SecretValueInput,
+  E2eStatus, E2eSetupInput, E2eSetupResponse,
 } from '@open-mercato/cezar-api-client'
 import { parseProviderStatusResponse } from '@/lib/provider-status'
 import {
@@ -143,11 +151,14 @@ import {
   queryScope,
   runHistoryContextSchema,
   runHistoryPageSchema,
+  githubOwnersResponseSchema,
 } from '@open-mercato/cezar-api-client'
 import type { Ok, OkJson } from '@open-mercato/cezar-api-client'
 import type { ClientResponse } from 'hono/client'
 import type { ResponseFormat } from 'hono/types'
 import type { AppType } from '@open-mercato/cezar/app-type'
+import { SID_HEADER, sid } from '@/lib/sid'
+import { noteFailedRequest } from '@/lib/failed-request'
 
 /**
  * The cockpit's client for its own HTTP API.
@@ -387,9 +398,16 @@ async function unwrapValidated<R extends ClientResponse<unknown, number, Respons
  */
 async function fetchOrThrow(url: string, init?: RequestInit): Promise<Response> {
   try {
-    return await fetch(url, { ...init, credentials: 'include' })
+    // The device id rides every request, so whatever this device does server-side (start a
+    // task, hit an error) is attributed to it — see lib/sid.ts.
+    const headers = new Headers(init?.headers)
+    headers.set(SID_HEADER, sid())
+    const res = await fetch(url, { ...init, headers, credentials: 'include' })
+    if (!res.ok) noteFailedRequest(url, init?.method, res.status, init?.body)
+    return res
   } catch (cause) {
     if (cause instanceof DOMException && cause.name === 'AbortError') throw cause
+    noteFailedRequest(url, init?.method, 0, init?.body, cause)
     throw new ApiError(0, `cannot reach the cezar server (${url})`, { cause })
   }
 }
@@ -432,6 +450,16 @@ export async function getHealth(opts?: ReadOptions): Promise<HealthResponse> {
  *  answer and the chip renders nothing for it. */
 export async function getStarCount(opts?: ReadOptions): Promise<StarCountPayload> {
   return unwrap(await cez.api.v1['star-count'].$get({}, init(opts)), '/star-count')
+}
+
+/** The opt-in telemetry answer (`~/.cezar/config.json`), behind the consent bar and
+ *  Settings → Privacy. */
+export async function getTelemetryConsent(opts?: ReadOptions): Promise<TelemetryConsentPayload> {
+  return unwrap(await cez.api.v1.telemetry.consent.$get({}, init(opts)), '/telemetry/consent')
+}
+
+export async function putTelemetryConsent(input: SetTelemetryConsentInput): Promise<TelemetryConsentPayload> {
+  return unwrap(await cez.api.v1.telemetry.consent.$put({ json: input }), '/telemetry/consent')
 }
 
 /** Host-local catalog for one discovery runner (`claude`, `codex`, `opencode`, `cursor` — #794, #784).
@@ -646,8 +674,8 @@ export async function refreshSkills(): Promise<Skill[]> {
   )
 }
 
-/** The default (vendor) repo's full skill list — every skill the "Import skills" panel can
- *  offer, regardless of import state. Empty once a repo configures its own `skillsRepos`. */
+/** Full definitions from the default (vendor) repo — every skill the catalog can preview,
+ *  regardless of enabled state. Empty once a repo configures its own `skillsRepos`. */
 export async function getImportableSkills(opts?: ReadOptions): Promise<ImportableSkill[]> {
   return unwrap(
     await cez.api.v1.p[':projectId'].skills.importable.$get(
@@ -743,6 +771,37 @@ export async function getRepoChanges(opts?: ReadOptions): Promise<ChangesPayload
   )
 }
 
+/** The project repository's whole path index for the Git tab's Files sub-tab (#1279) — tracked
+ *  plus untracked-not-ignored, sorted, with `truncated` saying whether the server capped it. One
+ *  read backs both the tree and its filter, so expanding a folder and typing in the filter box
+ *  cost nothing. 409 (as an ApiError) outside a git repository. */
+export async function getRepoTree(opts?: ReadOptions): Promise<RepoTree> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].repo.tree.$get({ param: { projectId: queryScope() } }, init(opts)),
+    '/repo/tree',
+  )
+}
+
+/** One repository file for the Files sub-tab's viewer. Only a path the index lists is served —
+ *  an ignored untracked `.env` 409s with the server's own wording, which is why this route is
+ *  safe to point at the real checkout. Always the `file` member: every indexed path is a file. */
+export async function getRepoFile(path: string, opts?: ReadOptions): Promise<WorktreeEntry> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].repo.files.$get(
+      { param: { projectId: queryScope() }, query: { path } },
+      init(opts),
+    ),
+    '/repo/files',
+  )
+}
+
+/** The same-origin URL an `<img>` loads a repository image's bytes from — `runFileRawUrl`'s
+ *  sibling. Same server-side protections: image extensions only, inside the size cap, `nosniff`
+ *  and the no-script CSP. Handed to an `<img>`, never fetched, so it is built here. */
+export function repoFileRawUrl(path: string): string {
+  return apiPath(`/repo/files?path=${encodeURIComponent(path)}&raw=1`)
+}
+
 /** One commit's structured diff (R5 repo view): `?structured=1` on the legacy commit route —
  *  additive, the text-blob answer stays for the legacy UI. 409 + reason for unknown shas. */
 /*  NOT on the typed client, and it is the route that cannot be: the same handler answers the
@@ -789,7 +848,7 @@ export async function getRunCommit(
 /** Issues + PRs via the logged-in `gh`. Degrades to `{ available: false, reason }` server-side —
  *  an unreachable forge is a hint in the tab, not an ApiError. */
 export async function getGithub(
-  params: { limit?: number; refresh?: boolean } = {},
+  params: { limit?: number; refresh?: boolean; issuesCursor?: string; prsCursor?: string } = {},
   opts?: ReadOptions,
 ): Promise<GithubData> {
   return unwrap(
@@ -801,6 +860,8 @@ export async function getGithub(
         query: {
           limit: params.limit === undefined ? undefined : String(params.limit),
           refresh: params.refresh ? '1' : undefined,
+          issuesCursor: params.issuesCursor,
+          prsCursor: params.prsCursor,
         },
       },
       init(opts),
@@ -827,6 +888,45 @@ export async function saveTrackerConnection(input: TrackerCredentials): Promise<
 export async function removeTrackerConnection(): Promise<TrackerClearedResponse> {
   return unwrap(await cez.api.v1.p[':projectId'].tracker.connection.$delete(
     { param: { projectId: queryScope() } }), '/tracker/connection')
+}
+
+// ---- project and workspace secrets (metadata only; a value goes in once and never comes back) ----
+
+export async function getProjectSecrets(opts?: ReadOptions): Promise<SecretsList> {
+  return unwrap(await cez.api.v1.p[':projectId'].secrets.$get(
+    { param: { projectId: queryScope() } }, init(opts)), '/secrets')
+}
+export async function getWorkspaceSecrets(opts?: ReadOptions): Promise<SecretsList> {
+  return unwrap(await cez.api.v1.workspace.secrets.$get({}, init(opts)), '/workspace/secrets')
+}
+/** Every write answers 204, which has no body for `unwrap` to parse — only the status matters. */
+async function expectNoContent(res: Response): Promise<void> {
+  if (!res.ok) throw errorFor(res.status, res.statusText, await res.text())
+}
+export async function saveProjectSecret(name: string, input: SecretValueInput): Promise<void> {
+  await expectNoContent(await cez.api.v1.p[':projectId'].secrets[':name'].$put(
+    { param: { projectId: queryScope(), name }, json: input }))
+}
+export async function removeProjectSecret(name: string): Promise<void> {
+  await expectNoContent(await cez.api.v1.p[':projectId'].secrets[':name'].$delete(
+    { param: { projectId: queryScope(), name } }))
+}
+export async function saveWorkspaceSecret(name: string, input: SecretValueInput): Promise<void> {
+  await expectNoContent(await cez.api.v1.workspace.secrets[':name'].$put({ param: { name }, json: input }))
+}
+export async function removeWorkspaceSecret(name: string): Promise<void> {
+  await expectNoContent(await cez.api.v1.workspace.secrets[':name'].$delete({ param: { name } }))
+}
+
+// ---- one-click e2e setup (spec 2026-10-10-e2e-one-click-setup) ----
+
+export async function getE2eStatus(opts?: ReadOptions): Promise<E2eStatus> {
+  return unwrap(await cez.api.v1.p[':projectId'].e2e.$get(
+    { param: { projectId: queryScope() } }, init(opts)), '/e2e')
+}
+export async function startE2eSetup(input: E2eSetupInput): Promise<E2eSetupResponse> {
+  return unwrap(await cez.api.v1.p[':projectId'].e2e.setup.$post(
+    { param: { projectId: queryScope() }, json: input }), '/e2e/setup')
 }
 
 export async function getTrackerAssociation(opts?: ReadOptions): Promise<TrackerAssociationResponse> {
@@ -1224,6 +1324,27 @@ export async function checkoutProject(input: CheckoutProjectInput): Promise<Regi
 }
 
 /**
+ * Create a new project — a fresh git repo, optionally backed by a new private GitHub repo
+ * (`POST /api/projects/create`, spec 2026-09-29-create-new-project). Same contract as
+ * `checkoutProject`: every non-2xx is a failure whose `{ error }` the dialog shows verbatim, and
+ * progress arrives as `checkout-progress` keyed by `input.checkoutId`.
+ */
+export async function createProject(input: CreateProjectInput): Promise<RegisterProjectResponse> {
+  return unwrap(await cez.api.v1.projects.create.$post({ json: input }), '/projects/create')
+}
+
+/** Who a new GitHub repository may belong to (`GET /api/projects/github-owners`). Workspace-level.
+ *  Validated, not cast: the dialog iterates `owners`, so a body of another shape — a server
+ *  started before the owner cards, a proxy — must reject the query rather than throw mid-render. */
+export async function getGithubOwners(opts?: ReadOptions): Promise<GithubOwnersResponse> {
+  return unwrapValidated(
+    await cez.api.v1.projects['github-owners'].$get({}, init(opts)),
+    '/projects/github-owners',
+    githubOwnersResponseSchema,
+  )
+}
+
+/**
  * Deregister a project (`DELETE /api/projects/:projectId`, step 4.4).
  *
  * Registry-only by contract — the server deletes NOTHING under the project root — so this
@@ -1484,13 +1605,15 @@ export async function continueProjectRun(
   )
 }
 
-/** Draft PR from the review gate (spec 009): push the branch, `gh pr create --draft`; the run
- *  completes as done with the PR badge. On 409 the ApiError's `manual` carries the
+/** Open the run's PR (spec 009): push the branch, `gh pr create`; the run completes as done with
+ *  the PR badge. Draft unless `draft: false` — the review gate's Draft PR omits it, the run
+ *  header's Create PR asks for a ready one. On 409 the ApiError's `manual` carries the
  *  `git merge <branch>` fallback to show copyable. */
-export async function createRunPr(id: string): Promise<CreatePrResponse> {
+export async function createRunPr(id: string, opts: { draft?: boolean } = {}): Promise<CreatePrResponse> {
   return unwrap(
     await cez.api.v1.p[':projectId'].runs[':id'].pr.$post({
       param: { projectId: queryScope(), id: encodeURIComponent(id) },
+      json: opts,
     }),
     runPath(id, '/pr'),
   )
@@ -1652,6 +1775,17 @@ export async function commitRun(id: string, message: string): Promise<GitCommitR
       json: { message },
     }),
     runPath(id, '/git/commit'),
+  )
+}
+
+/** What the run's worktree holds that has not left it: uncommitted files, unpushed commits. */
+export async function getRunGitStatus(id: string, opts?: ReadOptions): Promise<GitStatusResponse> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id'].git.status.$get(
+      { param: { projectId: queryScope(), id: encodeURIComponent(id) } },
+      init(opts),
+    ),
+    runPath(id, '/git/status'),
   )
 }
 
@@ -2066,10 +2200,10 @@ export async function deleteWorkflow(name: string): Promise<DeleteWorkflowRespon
 // ---- prefs ---------------------------------------------------------------------------------
 
 /** Merges server-side (the stored object spread under the patch) and answers the merged state. */
-export async function putUiState(patch: UiState): Promise<UiState> {
+export async function putUiState(patch: UiState, projectId = queryScope()): Promise<UiState> {
   return unwrap(
     await cez.api.v1.p[':projectId']['ui-state'].$put({
-      param: { projectId: queryScope() },
+      param: { projectId },
       json: patch,
     }),
     '/ui-state',

@@ -28,6 +28,7 @@ export const DATA_GITIGNORE_ENTRIES = [
   'worktrees/',
   'tmp/', // per-run agent temp directories (#785)
   'drafts/', // unsent composer text + pasted screenshots (#939) — never in git history
+  'node-text/', // fork-local: per-run graph node text (review drafts) read by `github.review-comment`
   'todos.json',
   'todos.json.tmp',
   // Private, per-project MCP servers (spec 2026-10-07-private-project-mcp) — personal tokens.
