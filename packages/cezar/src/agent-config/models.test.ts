@@ -92,4 +92,14 @@ describe('readAgentModelDefaults', () => {
     await expect(readAgentModelDefaults(repo, { HOME: home })).resolves.toEqual({});
     await expect(readAgentModelProvider('codex', repo, { HOME: home })).resolves.toBe('deepseek');
   });
+
+  it('reports an agy model only when the environment pins one, never the runner fallback', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'cez-native-models-repo-'));
+    const home = mkdtempSync(join(tmpdir(), 'cez-native-models-home-'));
+    roots.push(repo, home);
+
+    await expect(readAgentModelDefaults(repo, { HOME: home })).resolves.toEqual({});
+    await expect(readAgentModelDefaults(repo, { HOME: home, CEZ_AGY_MODEL: ' gemini-x ' })).resolves.toEqual({ agy: 'gemini-x' });
+    await expect(readAgentModelDefaults(repo, { HOME: home, AGY_MODEL: 'gemini-y' })).resolves.toEqual({ agy: 'gemini-y' });
+  });
 });

@@ -12,7 +12,7 @@ named AGY / PR-review layer on top.
 | Upstream tag `v0.15.2` (merged) | `a9cc59b6fba6b24ea9b7c6944ecbd447ceafda90` |
 | Merge-base | `1a34fe0fc262c1ea7d3a22f953bb19ac82c3acbf` (`v0.14.0-37-g1a34fe0f`) |
 | `upstream/main` on 2026-10-17 | `bccdadb5` — 27 commits past `v0.15.2`, deliberately **not** merged (unreleased) |
-| Open fork PR #14 head | `358b13a9` (`cez/2d71bc32`) — not in `main`, see §7 |
+| Fork PR #14 head | `358b13a9` (`cez/2d71bc32`) — **merged into fork `main` as `9733573c`**, then into this branch, see §12 |
 
 History since the merge-base: fork **31 commits** (22 non-merge + 9 PR merges), upstream
 **79 commits** to `v0.15.2`. Fork diff vs merge-base: 101 files, +7273/−136. After the merge the
@@ -100,11 +100,11 @@ Nothing was dropped wholesale; dropped *code*: fork's PR-lookup/auth-retry branc
 | PR publish `Head sha can't be blank` / `No commits between` | blank-sha: **fixed upstream** (#1430, retry + adopt existing PR); `No commits between` lag: **fork delta kept** | `forge/github.ts` `createDraftPr`, `CHANGELOG.md:16` | `pr-fork-publication.test.ts` (retry, adopt, empty-branch no-retry) — pass |
 | implement → ready PR in the right repo | **own regression risk introduced by the merge, fixed** (`ready` spread; #1383 target) | §3, §4 | `pr-fork-publication.test.ts` — pass; `lightweight-workflows.test.ts` — pass |
 | lost / stale base commits | **fixed** (fork pinning + upstream base-remote fetch) | `pr-fork.ts`, `git-worktree.ts` | `pr-fork.test.ts` 15/15 |
-| Claude timed out at 30 min | **still open on main** — upstream default is still 30 min (`claude-cli-runner.ts:37`); PR #14 raises Claude to 60 | — | PR #14's `claude-cli-runner.test.ts` |
-| evidence gate 1/29 inspections | **own regression, still open on main**; PR #14 (risk-based gate) | `agy-review-evidence.ts` | PR #14's `agy-hardening`/`review-checks` tests |
+| Claude timed out at 30 min | **fixed on fork `main` by #14** (`DEFAULT_CLAUDE_RUN_TIMEOUT_MS = 60 min`), preserved by the §12 merge; upstream default stays 30 min for other runners | `claude-cli-runner.ts:42` | `claude-cli-runner.test.ts` |
+| evidence gate 1/29 inspections | **fixed on fork `main` by #14** (risk-based gate), preserved by §12 | `agy-review-evidence.ts` | `agy-hardening`/`review-checks` tests — pass |
 | resume of pruned Claude sessions | **fixed upstream** (#1435), merged; fork adds `readOnly`/`prReview` to the relaunch | `run.ts` Continue `launch()` | upstream `continuation-missing-session.test.ts` — fails on this Windows host **identically on pure v0.15.2** (mock-claude spawn), so unproven here |
 | native Windows check shell (Git Bash vs WSL) | **still open upstream** (#1338 OPEN). Checks `spawn('bash', ['-lc', …])`; on this host PATH order gives Git Bash first, but `C:\Windows\System32\bash.exe` (WSL) is next — a server started with a different PATH would run checks in WSL | `run.ts` `runCheckStep`; `where bash` | pending (needs a real check run per PATH) |
-| tests accidentally under `.ai/cezar/tmp` | **own test fragility, still open**: cezar sets the agent's temp dir to `.ai/cezar/tmp/<run>`, so `review-checks.test.ts` "runtimeDir never inside .ai" fails whenever the suite runs inside a cezar task | test output | fix the test to stub `os.tmpdir()` (next iteration) |
+| tests accidentally under `.ai/cezar/tmp` | **fixed (test only, §12)**: the assertion is now relative to a controlled temp root (`TMPDIR`/`TMP`/`TEMP` stubbed), outside the reviewed repo and never under `.ai/cezar/worktrees`; production isolation unchanged | — | `review-checks.test.ts` |
 | false read-only failures (`git push` blocked), `DISABLED_READ_ONLY_REVIEW` | own mechanisms; `agy-hardening.test.ts`, `review-checks.test.ts` (except the tmpdir case above), `pr-review-workflow.test.ts` all pass on the merge | — | E2E on a real PR: **pending** |
 | PowerShell "don't ask" permissions | outside cezar code (Claude Code permission mode in headless runs) | — | — |
 | test teardown race (#1147), check `retryOn` (#1265) | already in the fork before this merge (ancestors of the merge-base) | `git merge-base --is-ancestor` | — |
@@ -166,3 +166,37 @@ for unpinned runs in this repository the PR target follows §4.
   GitHub E2E (implement → ready PR on the fork, pr-review publish on a pinned HEAD, analysis
   without modifications, resume, adapter against a 0.15.2 server). These need a running
   instance and real repositories and remain **pending**.
+
+## 12. Re-integration onto fork `main` with #14 (2026-10-17)
+
+PR #15's head `4d3c9135` was two commits behind fork `main` `9733573c` (PR #14 merged there).
+`git merge --no-ff origin/cez/8cdec23b` on top of `9733573c`: **no conflicts**. Checked after
+the merge: every file #14 touched is byte-identical to `358b13a9`, except `claude-cli-runner.ts`/
+`.test.ts`, which only gain upstream's additions (`exit` → `stdinOpen`, missing-session helper)
+and keep `DEFAULT_CLAUDE_RUN_TIMEOUT_MS = 60 min`; `prTargetRemote` (pinned runs → `origin`) is
+intact. Pushed as a fast-forward of `cez/8cdec23b` (contains both `4d3c9135` and `9733573c`).
+
+GitHub Actions on `4d3c9135` (run 39064616984) failed 27 unit tests on Linux — real fork drift
+that Windows runs had hidden behind host failures. Fixed here:
+
+| Failure | Cause | Fix |
+| --- | --- | --- |
+| `open-in-app` `cli:agy` → null | `agy` missing from `AGENT_CLIS` | **production**: added (bin `agy` / `CEZ_AGY_BIN`) + cockpit icon |
+| `models` ×5, `config-api` ×9 | agy strategy reported its hard-coded fallback as the agent's *native* model, which materialized in `defaultModels` and outranked an auto override (#906) | **production**: agy reports a native model only when `CEZ_AGY_MODEL`/`AGY_MODEL` pins one; the runner still falls back to `DEFAULT_AGY_MODEL` at launch. New regression case in `models.test.ts` |
+| `agent-profiles` #582 guard | agy's discovered account home was `~/.claude` | **production**: `AgentHomePaths.agy = ~/.gemini` (where `agy` keeps `oauth_creds.json`/`google_accounts.json`, verified on the host) |
+| `draft-pr-autosave` "does not retry a permanent failure" (timeout) | fork's `No commits between` retry assumed "ahead" when the base is unknown → 4 attempts, 9 s of backoff | **production**: unknown base → no retry (the upstream rule); a SHA base is compared directly instead of assumed ahead |
+| `provider-auth` ×4, `providers-api` ×2, `agent-profiles-api`, `provider-settings` | descriptor-order fixtures listed 7 providers, agy is the 8th | fixtures extended (no assertion removed); `CEZ_AGY_BIN=agy` pinned so the probe never depends on a host install |
+| `agent-profile-wiring` zero-config env | fork's documented empty `CEZ_PR_BASE_*` (clears inherited values, `docs/reference.md`) | fixture extended |
+| `review-checks` `rg --files tests` EISDIR | CI has no ripgrep; the test's stand-in only read one file | stand-in covers exactly the argv shapes `reviewCommand` emits; verified with `rg` removed from PATH (62/62) |
+
+Verified on this Windows host (Node 22.19): `npm run typecheck` **pass**; targeted vitest over the
+files above plus `claude-cli-runner`, `agy-hardening`, `agy-cli-runner`, `automations/pr-review`,
+`pr-review-workflow`, `pr-fork` (both), `pr-fork-publication`, `lightweight-workflows`,
+`catalog`, `open-in-menu`: 605/624. All 19 remaining failures are **known host failures**, none
+in CI's list for a reason that is not the host: Windows path separators (`agent-profiles` ×2,
+`catalog` ×3), a real `~/.local/bin/codex.exe` resolved by `providers-api` POST/status (×6, incl.
+one `EBUSY` rmdir), POSIX `sh` `gh` stubs in `draft-pr-autosave` (×5 — Linux CI is the verdict),
+`agent-profile-wiring` seeing this cezar task's own `CEZ_API_URL`/`CEZ_BIN` (11/11 with them
+unset), and `claude-cli-runner` "exits 143" (fails identically on pristine `v0.15.2` here —
+**baseline**, not patched). **Not run**: full vitest locally (PR #15's Linux CI runs it), `build`,
+`test:package`, `test:e2e`, and the real-GitHub E2E listed in §11.

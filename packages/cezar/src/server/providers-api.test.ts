@@ -105,6 +105,7 @@ describe('workspace provider API', () => {
   const savedModelsLocked = process.env.CEZ_AGENT_MODELS_LOCKED;
   const savedDryRun = process.env.CEZ_DRY_RUN;
   const savedRemote = process.env.CEZ_REMOTE;
+  const savedAgyBin = process.env.CEZ_AGY_BIN;
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'cez-providers-api-'));
@@ -112,6 +113,8 @@ describe('workspace provider API', () => {
     delete process.env.CEZ_AGENT_MODELS_LOCKED;
     delete process.env.CEZ_DRY_RUN;
     delete process.env.CEZ_REMOTE;
+    // Without it `resolveAgyBin` probes the host's install locations instead of naming `agy`.
+    process.env.CEZ_AGY_BIN = 'agy';
   });
 
   afterEach(() => {
@@ -123,6 +126,8 @@ describe('workspace provider API', () => {
     else process.env.CEZ_DRY_RUN = savedDryRun;
     if (savedRemote === undefined) delete process.env.CEZ_REMOTE;
     else process.env.CEZ_REMOTE = savedRemote;
+    if (savedAgyBin === undefined) delete process.env.CEZ_AGY_BIN;
+    else process.env.CEZ_AGY_BIN = savedAgyBin;
   });
 
   const service = (
@@ -213,6 +218,7 @@ describe('workspace provider API', () => {
         { provider: 'pi', status: 'connected', enabled: true },
         { provider: 'junie', status: 'connected', enabled: true },
         { provider: 'copilot', status: 'connected', enabled: true },
+        { provider: 'agy', status: 'connected', enabled: true },
       ],
     });
   });
@@ -236,6 +242,7 @@ describe('workspace provider API', () => {
         { provider: 'pi', status: 'connected', enabled: true },
         { provider: 'junie', status: 'connected', enabled: true },
         { provider: 'copilot', status: 'connected', enabled: true },
+        { provider: 'agy', status: 'connected', enabled: true },
       ],
     });
     expect(runCommand).not.toHaveBeenCalled();

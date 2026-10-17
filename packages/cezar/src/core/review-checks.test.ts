@@ -16,6 +16,18 @@ import { AgyReviewEvidence } from './agy-review-evidence.ts';
 
 // On this Windows host use real just. Other CI hosts need no new dependency:
 // the offline Node fixture stands in only when just is unavailable.
+// The rg stand-in covers exactly the argv shapes `reviewCommand` emits — `--files [-- PATH]`,
+// `-l|-n -- PATTERN PATH` — and skips dot-entries, as rg does by default.
+const FAKE_RG = vi.hoisted(() => [
+  'const fs = require("fs"), p = require("path"); const a = process.argv.slice(1);',
+  'const walk = (d) => fs.statSync(d).isDirectory() ? fs.readdirSync(d).filter((n) => !n.startsWith(".")).flatMap((n) => walk(p.join(d, n))) : [d];',
+  'if (a[0] === "--files") { const i = a.indexOf("--"); for (const f of walk(i < 0 ? "." : a[i + 1])) console.log(p.relative(".", f)); }',
+  'else { const [mode, , pat, target] = a; const re = new RegExp(pat); let hit = false;',
+  '  for (const f of walk(target)) { const lines = fs.readFileSync(f, "utf8").split("\\n");',
+  '    if (mode === "-l") { if (lines.some((l) => re.test(l))) { hit = true; console.log(p.relative(".", f)); } }',
+  '    else for (const l of lines) if (re.test(l)) { hit = true; console.log(l); } }',
+  '  process.exit(hit ? 0 : 1); }',
+].join('\n'));
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   const hasJust = actual.spawnSync('just', ['--version'], { windowsHide: true }).status === 0;
@@ -23,7 +35,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   return { ...actual, spawn: (file: string, args: string[], opts: import('node:child_process').SpawnOptionsWithoutStdio) => {
     if (file === 'just' && !hasJust) return actual.spawn(process.execPath, [join(String(opts.cwd), 'check.cjs')], opts);
     if (file === 'rg' && !hasRg && opts.env?.PATH !== 'C:/cezar-no-such-bin') {
-      return actual.spawn(process.execPath, ['-e', 'process.stdout.write(require("fs").readFileSync(process.argv[1],"utf8"))', args.at(-1) ?? ''], opts);
+      return actual.spawn(process.execPath, ['-e', FAKE_RG, '--', ...args], opts);
     }
     return actual.spawn(file, args, opts);
   } };

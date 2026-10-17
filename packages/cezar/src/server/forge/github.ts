@@ -2652,10 +2652,12 @@ const PROGRESS_LINES_MAX = 10;
 /**
  * Fork-local: `No commits between` is only worth a retry while the branch really is ahead of
  * the base locally (GitHub has not seen the push yet); a genuinely empty branch fails at once.
+ * No known base means nothing to compare against, so the upstream rule applies: no retry.
  */
 async function localBranchHasCommitsAhead(worktree: string, baseRemote: string, baseTarget: string | undefined): Promise<boolean> {
-  if (!baseTarget || /^[0-9a-f]{7,40}$/i.test(baseTarget)) return true;
-  for (const ref of [`refs/remotes/${baseRemote}/${baseTarget}`, baseTarget]) {
+  if (!baseTarget) return false;
+  const refs = /^[0-9a-f]{7,40}$/i.test(baseTarget) ? [baseTarget] : [`refs/remotes/${baseRemote}/${baseTarget}`, baseTarget];
+  for (const ref of refs) {
     const count = await execTool(['rev-list', '--count', `${ref}..HEAD`], worktree, 'git', 10_000);
     if (count.ok) {
       const n = Number.parseInt(count.stdout.trim(), 10);

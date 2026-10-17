@@ -52,6 +52,7 @@ describe('agent profile resolution', () => {
       expect(defaultAgentProfile('opencode', env).path).toBe('/home/u/.config/opencode');
       expect(defaultAgentProfile('cursor', env).path).toBe('/home/u/.cursor');
       expect(defaultAgentProfile('copilot', env).path).toBe('/home/u/.copilot');
+      expect(defaultAgentProfile('agy', env).path).toBe('/home/u/.gemini');
     });
 
     it('never hands one provider another vendor\'s home — the ternary chain\'s failure (#582)', () => {
