@@ -6,7 +6,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSy
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { killAgyTree } from './kill-process-tree.ts';
-import { getWorkspaceGitSnapshot, verifyWorkspaceIntegrity } from './read-only-sandbox.ts';
+import { getWorkspaceGitSnapshot, READ_ONLY_PUSH_URL, verifyWorkspaceIntegrity } from './read-only-sandbox.ts';
 import { z } from 'zod';
 
 export const CHECK_MARKER = 'CEZ_REVIEW_CHECK ';
@@ -376,7 +376,7 @@ export function reviewCheckForms(caps: ReviewCapabilities, base = 'BASE_SHA', he
 export function reviewCheckInstructions(caps: ReviewCapabilities, base = 'BASE_SHA', head = 'HEAD_SHA'): string {
   const example = caps.npmScripts.has('test') ? ['npm', 'test'] : caps.justRecipes?.has('test') ? ['just', 'test'] : ['git', 'diff', '--stat', base, head];
   return [
-    `Checks are optional: read the code and tests first; request a check only when its result could change the verdict. To request one, send a message whose last line is ONLY: ${CHECK_MARKER}${JSON.stringify({ args: example, reason: 'why the verdict depends on it' })}. Cezar stops the turn there, runs it without a shell and returns a result file in the next turn; do not continue the review in the same turn.`,
+    `Checks are optional: read the code and tests first; request a check only when its result could change the verdict. Prefer the targeted tests of the changed code over the full suite; run the full suite only for a cross-cutting change. To request one, send a message whose last line is ONLY: ${CHECK_MARKER}${JSON.stringify({ args: example, reason: 'why the verdict depends on it' })}. Cezar stops the turn there, runs it without a shell and returns a result file in the next turn; do not continue the review in the same turn.`,
     `Accepted check forms in this checkout (one argv token per array element): ${reviewCheckForms(caps, base, head).join('; ')}. Nothing else: no shell, other flags or scripts, external paths, installs or publication. At most 6 requests and 5 minutes per command within the run timeout; UI/emulator checks are skipped.`,
     'A harmless request Cezar cannot run (unsupported form, unavailable check, missing path) returns "Check NOT RUN" with the reason: correct it or report the check as skipped. A path outside the checkout, a mutating or publishing request, or a check that changes the checkout ends the review.',
   ].join('\n');
@@ -476,5 +476,25 @@ export async function executeReviewCheck(cwd: string, request: ReviewCheck, env:
   if (timedOut) throw new Error('Review command timed out; process tree stopped');
   if (tooLarge) throw new Error('Review command output budget exceeded; no truncated evidence accepted');
   if (error) return `Command unavailable (${error.message}); report this check as skipped.`;
-  return `Check: ${request.args.join(' ')}\nReason: ${request.reason}\nExit: ${status}; duration: ${Date.now() - started}ms\n${output}`;
+  const guard = status !== 0 ? readOnlyGuardHits(output) : 0;
+  return `Check: ${request.args.join(' ')}\nReason: ${request.reason}\nExit: ${status}; duration: ${Date.now() - started}ms\n${output}` +
+    (guard ? `\n${READ_ONLY_GUARD_LABEL}: ${guard} output line(s) show a git push refused by the review sandbox (${READ_ONLY_PUSH_URL}). ` +
+      'A failure caused only by that is an environment false negative, not a PR regression and not a pass: report it as unverified (read-only guard). Judge every other failure on its merits.' : '');
+}
+
+const READ_ONLY_GUARD_LABEL = 'Read-only guard';
+
+/** Output lines naming the read-only push URL: failures the review sandbox itself caused
+ * (live run f1082729: 18 `prScopeGuard` tests pushing to a fixture remote). Classified,
+ * never worked around — the guard stays on for every check. */
+export function readOnlyGuardHits(output: string): number {
+  return output.split('\n').filter((line) => line.includes(READ_ONLY_PUSH_URL)).length;
+}
+
+/** One line for the published review: what Cezar itself ran and what it returned. */
+export function summarizeCheckResult(result: string): string {
+  const exit = /^Exit: (\S+?);/m.exec(result)?.[1];
+  if (exit === undefined) return /^Check NOT RUN/.test(result) ? 'not run (request rejected)' : 'skipped';
+  const guard = new RegExp(`^${READ_ONLY_GUARD_LABEL}: (\\d+)`, 'm').exec(result)?.[1];
+  return `exit ${exit}${guard ? ` — ${guard} failure line(s) caused by the read-only guard (${READ_ONLY_PUSH_URL}), unverified, not counted as regressions` : ''}`;
 }

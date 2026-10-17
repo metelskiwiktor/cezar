@@ -26,10 +26,10 @@ import { buildChildEnv } from './agent-env.ts';
 import { disclaimedCommand } from './disclaim-spawn.ts';
 import { readNdjson } from './ndjson.ts';
 import { resolveAgyBin } from './agy-bin.ts';
-import { AgyReviewEvidence } from './agy-review-evidence.ts';
+import { AgyReviewEvidence, safeReviewToken } from './agy-review-evidence.ts';
 import {
   CHECK_MARKER, detectReviewCapabilities, executeReviewCheck, parseReviewCheck, prepareReviewDiff,
-  reviewCheckInstructions, reviewSourceChanges, reviewSourceFingerprint, type ReviewCheck,
+  reviewCheckInstructions, reviewSourceChanges, reviewSourceFingerprint, summarizeCheckResult, type ReviewCheck,
 } from './review-checks.ts';
 import { killAgyTree } from './kill-process-tree.ts';
 export { killAgyTree } from './kill-process-tree.ts';
@@ -78,15 +78,11 @@ export const READ_ONLY_REVIEW_PROMPT =
  * forms are generated from the check policy for the prepared checkout (`reviewCheckInstructions`). */
 export function prReviewScopePrompt(checkInstructions: string): string {
   return [
-    'You are an experienced second programmer reviewing a prepared PR checkout in READ-ONLY review mode. Inspect contracts, related unchanged modules, regressions and tests. Never edit sources, commit, push, merge, publish OTA/EAS or call gh.',
-    'The only allowed repository root is your working directory, the prepared PR checkout. Resolve repository references there, never in the main checkout.',
-    'Do not load implementation skills, retrospective skills, or global skills. Repository instructions about implementation, dispatch, committing, publication, and handoff do not apply to this read-only review.',
-    'Do not read or write run handoff, task journals or cockpit state; they are not review evidence. Do not guess their paths.',
-    'Cezar supplies the complete pinned PR diff as a checkout-local file (split into part files for large diffs): read it with view_file instead of running git. Inspect the checkout with view_file, grep_search, list_dir and find_by_name; read AGENTS.md only when Cezar reports that the checkout has one. Do not mechanically view every generated/binary file; account for the full diff and inspect affected contracts and tests. Do not use run_command or any other terminal tool: plan-mode command approvals are unavailable headlessly on Windows.',
+    'You are an experienced second programmer reviewing a prepared PR checkout, READ-ONLY. Never edit sources, commit, push, merge, publish (OTA/EAS) or call gh. Your working directory is the only repository root. Do not load implementation skills or any other skill; do not read or write run handoffs, task journals or cockpit state. Repository instructions about implementation, committing and publication do not apply here.',
+    'Cezar supplies the complete pinned PR diff as a checkout-local file (or part files): read it all with view_file. Then open the changed code the verdict depends on, and its callers and tests, with view_file, grep_search, list_dir or find_by_name — proportionate to the size and risk of the diff, not every file. Discover paths before opening them. No run_command or other terminal tool.',
     checkInstructions,
-    'Report the checks you requested with their results and duration, and checks skipped with reasons; never present a check that did not run, or a failing one, as passing. Tests execute repository code as the owner, without an OS sandbox. Only new coverage/, .cache/ and .cezar-review-tmp/ artifacts are cleaned by Cezar; existing files and source changes fail integrity. Permission denial is fatal: stop, never retry through another tool or executor.',
-    'For shared/symlinked node_modules, use a Cezar rg check on a node_modules/package/... path, never native file tools. Only this Git repository\'s main dependency cache and versions matching the checkout package-lock.json are admitted; arbitrary external paths and nested links to host files are rejected. No external --add-dir is granted.',
-    'Conclude only after your analysis and every requested check result, in the review format the task specifies. Describe local executable literals without reproducing absolute paths. No marketing text.',
+    'Report requested checks with their outcome, and skipped ones with the reason; never present a check that did not run, or a failing one, as passing. Tests run repository code as the owner; any change to the checkout fails the review. A permission denial is fatal: stop, never retry another way. Shared node_modules are readable only through a Cezar rg check.',
+    'Conclude after your analysis and every requested check result, in the review format the task specifies, without absolute local paths.',
   ].join('\n');
 }
 
@@ -150,7 +146,7 @@ export function parseReviewCheckMessage(text: string): ReviewCheck | undefined {
 export function reviewVerdictRefusal(text: string): string | undefined {
   const lines = text.split('\n').filter((line) => /\bRecommendation:/i.test(line));
   if (lines.length !== 1) return `the review text has ${lines.length} Recommendation lines, expected exactly one`;
-  if (!/Recommendation:\W*(APPROVE|CHANGES REQUESTED)\b/i.test(lines[0]!)) return 'the Recommendation line is neither APPROVE nor CHANGES REQUESTED';
+  if (!/Recommendation:\W*(APPROVE|CHANGES REQUESTED|COMMENT)\b/i.test(lines[0]!)) return 'the Recommendation line is not APPROVE, CHANGES REQUESTED or COMMENT';
   return undefined;
 }
 
@@ -304,6 +300,17 @@ export class AgyCliRunner implements AgentRunner {
     let reviewSessionId: string | undefined;
     let reviewBaseline: string | undefined;
     let reviewFingerprint: string | undefined;
+    /** One line per Cezar-run check, for the published coverage section. */
+    const checksRun: string[] = [];
+    /** Cezar's own account of the review, appended to the final review text: the checks it ran
+     * with their real outcomes and the non-critical evidence the reviewer lacked. */
+    const appendReviewCoverage = () => {
+      const gaps = evidence.gaps();
+      if (!spec.prReview || (!gaps.length && !checksRun.length)) return;
+      const section = ['### Review coverage (reported by Cezar)', ...checksRun.map((c) => `- Check ${c}`), ...gaps.map((g) => `- Not verified: ${g}`)].join('\n');
+      textChunks.push(`\n\n${section}`);
+      onEvent?.({ type: 'text', text: `\n${section}` });
+    };
 
     const limitMs = spec.timeoutMs ?? this.timeoutMs;
     let deadline: NodeJS.Timeout | undefined;
@@ -358,6 +365,9 @@ export class AgyCliRunner implements AgentRunner {
 
       let isolationCleanup: (() => void) | undefined;
       let env: NodeJS.ProcessEnv;
+      // A PR review's turn-end is held until the turn is judged, so Cezar's coverage section
+      // joins the same turn text the engine publishes. After an error the engine ignores it.
+      let heldTurnEnd = false;
 
       if (readOnly) {
         const isolation = prepareReadOnlyIsolation();
@@ -515,6 +525,7 @@ export class AgyCliRunner implements AgentRunner {
           }
           // The first fatal reason wins: a provider error streamed after Cezar stopped the
           // turn (e.g. on a permission denial) must not replace the reason it stopped.
+          if (event.type === 'turn-end' && spec.prReview) { heldTurnEnd = true; return; }
           if (event.type === 'error') resultError ??= event.message;
           onEvent?.(event);
         };
@@ -603,25 +614,33 @@ export class AgyCliRunner implements AgentRunner {
           throw new Error(msg);
         }
         onEvent?.({ type: 'note', message: `Agy reported a late provider function-call format error after a complete review; accepted the finished review only because the pinned diff, mandatory evidence and every trusted check result were verified. Provider error: ${formatError.split('\n')[0]}` });
+        appendReviewCoverage();
         return undefined;
       }
 
-      // A turn stopped for a trusted check is not a conclusion: its evidence may still be
-      // incomplete, and the final turn must complete it. A failed in-scope read (a guessed or
-      // missing path) does not void a review whose mandatory evidence is complete — permission
-      // denials and scope violations were already fatal above, and integrity is checked below.
+      // A turn stopped for a trusted check is not a conclusion: the final turn must complete
+      // its evidence. Only CRITICAL evidence (pinned HEAD, full diff, a changed file opened)
+      // blocks; a failed or guessed read, an unread AGENTS.md or check result is disclosed in
+      // the published review instead (live run f1082729). Permission denials and scope
+      // violations were already fatal above, and integrity is checked below.
       if (readOnly && !checkStop && evidence.hasContext && !evidence.complete()) {
-        const msg = `Tool execution failure: review evidence is incomplete (${inspectionErrors} of ${inspectionCalls} file inspection attempt(s) failed). The pinned diff, AGENTS.md, an affected file and every trusted check result must be read.`;
+        const missing = evidence.missingCritical();
+        const msg = `Review evidence is incomplete: ${missing.join('; ') || 'no prepared checkout'}. Nothing is published` +
+          `${inspectionErrors ? ` (${inspectionErrors} of ${inspectionCalls} inspection attempt(s) also failed; failed reads alone never block)` : ''}.`;
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
       }
-      if (inspectionErrors > 0 && !checkStop && evidence.hasContext) onEvent?.({ type: 'note', message: `Review continued after ${inspectionErrors} failed non-mandatory read(s); mandatory checkout evidence is complete.` });
+      if (!checkStop && evidence.hasContext) {
+        const gaps = evidence.gaps();
+        if (gaps.length || inspectionErrors > 0) onEvent?.({ type: 'note', message: `Review continued with non-critical gaps (${gaps.join('; ') || `${inspectionErrors} failed inspection(s)`}); mandatory checkout evidence is complete.` });
+      }
 
       if (checkStop) {
         // Cezar killed agy at the request, so its exit code says nothing. The engine
         // still needs the turn boundary it would have seen, so the text streamed before
         // the request never joins the final review.
         if (resultError) throw new Error(resultError);
+        heldTurnEnd = false; // exactly one boundary, even if agy streamed its own turn-end
         onEvent?.({ type: 'turn-end' });
         return requestedCheck;
       }
@@ -635,10 +654,14 @@ export class AgyCliRunner implements AgentRunner {
       }
 
       if (resultError) throw new Error(resultError);
+      if (!spec.prReview) return undefined;
       // Fallback for a request split across stream events: a turn that is ONLY a request
       // is still one; a request mixed with other text is invalid (fail closed).
-      return spec.prReview ? parseReviewCheck(turnText) : undefined;
+      const fallback = parseReviewCheck(turnText);
+      if (!fallback) appendReviewCoverage();
+      return fallback;
     } finally {
+      if (heldTurnEnd) onEvent?.({ type: 'turn-end' });
       clearTimers();
       if (isolationCleanup) {
         isolationCleanup();
@@ -660,7 +683,7 @@ export class AgyCliRunner implements AgentRunner {
           reviewChecks = reviewCheckInstructions(detectReviewCapabilities(spec.cwd), spec.prReview.mergeBase, spec.prReview.headSha);
           // The same fact the evidence gate uses: AGENTS.md is required only when it exists.
           reviewAgents = existsSync(join(spec.cwd, 'AGENTS.md'))
-            ? `Checkout AGENTS.md: present at ${join(spec.cwd, 'AGENTS.md')}; read it before concluding.`
+            ? `Checkout AGENTS.md: present at ${join(spec.cwd, 'AGENTS.md')}; read it for the repository's rules.`
             : 'Checkout AGENTS.md: absent; do not look for it.';
         }
         do {
@@ -686,6 +709,8 @@ export class AgyCliRunner implements AgentRunner {
             if (terminatedByCezar) throw new Error('Review check cancelled; no partial verdict accepted');
           } finally { isolation.cleanup(); }
           onEvent?.({ type: 'note', message: checkResult });
+          const shown = check.args.every(safeReviewToken) ? check.args.join(' ') : `${safeReviewToken(check.args[0]!) ? check.args[0] : 'check'} (arguments omitted)`;
+          checksRun.push(`\`${shown}\`: ${summarizeCheckResult(checkResult)}`);
           const resultFile = reviewDiff.resultFile(checkRequests, checkResult);
           evidence.requireCheckResult(resultFile.path, resultFile.lines);
           reviewTranscript += `\nPrevious check request: ${CHECK_MARKER}${JSON.stringify(check)}\nCezar trusted check result: inspect the result file before concluding.\nCezar check result file: ${resultFile.path}\nResult lines: ${resultFile.lines}\n`;

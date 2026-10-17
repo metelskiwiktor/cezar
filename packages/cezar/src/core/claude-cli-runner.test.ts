@@ -13,6 +13,8 @@ import {
   CLAUDE_HEADLESS_GUIDANCE,
   ClaudeCliRunner,
   appendClaudeSystemPrompt,
+  DEFAULT_CLAUDE_RUN_TIMEOUT_MS,
+  DEFAULT_RUN_TIMEOUT_MS,
   EOF_KILL_GRACE_MS,
   EOF_TERM_GRACE_MS,
   KILL_GRACE_MS,
@@ -244,6 +246,38 @@ describe('SIGTERM→SIGKILL escalation for a CLI that survives SIGTERM', () => {
 
       vi.advanceTimersByTime(KILL_GRACE_MS);
       expect(fake.signals).toEqual(['SIGTERM', 'SIGKILL']);
+    });
+  });
+
+  it('defaults a non-interactive Claude run to a 60-minute cap; the shared default stays 30', () => {
+    expect(DEFAULT_CLAUDE_RUN_TIMEOUT_MS).toBe(60 * 60_000);
+    // Codex, Junie and OpenCode import the shared constant; their cap must not move.
+    expect(DEFAULT_RUN_TIMEOUT_MS).toBe(30 * 60_000);
+    withFakeChild((fake) => {
+      const session = new ClaudeCliRunner({ bin: 'claude' }).startSession({ userPrompt: 'do it', cwd: process.cwd() });
+      void session.result.catch(() => undefined);
+
+      vi.advanceTimersByTime(DEFAULT_RUN_TIMEOUT_MS);
+      expect(fake.signals).toEqual([]);
+      vi.advanceTimersByTime(DEFAULT_CLAUDE_RUN_TIMEOUT_MS - DEFAULT_RUN_TIMEOUT_MS);
+      expect(fake.signals).toEqual(['SIGTERM']);
+      vi.advanceTimersByTime(KILL_GRACE_MS);
+      expect(fake.signals).toEqual(['SIGTERM', 'SIGKILL']);
+    });
+  });
+
+  it('a per-run timeoutMs still overrides the default, and 0 disables the cap', () => {
+    withFakeChild((fake) => {
+      const session = new ClaudeCliRunner({ bin: 'claude' }).startSession({ userPrompt: 'do it', cwd: process.cwd(), timeoutMs: 0 });
+      void session.result.catch(() => undefined);
+      vi.advanceTimersByTime(2 * DEFAULT_CLAUDE_RUN_TIMEOUT_MS);
+      expect(fake.signals).toEqual([]);
+    });
+    withFakeChild((fake) => {
+      const session = new ClaudeCliRunner({ bin: 'claude' }).startSession({ userPrompt: 'do it', cwd: process.cwd(), timeoutMs: 50 });
+      void session.result.catch(() => undefined);
+      vi.advanceTimersByTime(50);
+      expect(fake.signals).toEqual(['SIGTERM']);
     });
   });
 

@@ -32,9 +32,14 @@ import {
   type ClaudeUiMapping,
 } from './claude-ui-mapper.ts';
 
-/** Default wall-clock cap for a single run before SIGTERM → SIGKILL.
- *  Interactive sessions pass `timeoutMs: 0` to disable it entirely. */
+/** Default wall-clock cap for a single run before SIGTERM → SIGKILL, shared by the
+ *  Codex, Junie and OpenCode runners. Interactive sessions pass `timeoutMs: 0` to
+ *  disable it entirely. */
 export const DEFAULT_RUN_TIMEOUT_MS = 30 * 60_000;
+/** The Claude CLI's own default cap: a non-interactive Claude run (an implement task
+ *  plus its verification) regularly needs more than 30 minutes. Same SIGTERM → SIGKILL
+ *  path, same per-run `timeoutMs` override, still disabled by `timeoutMs: 0`. */
+export const DEFAULT_CLAUDE_RUN_TIMEOUT_MS = 60 * 60_000;
 /** Grace period between SIGTERM and SIGKILL when a timeout fires. */
 export const KILL_GRACE_MS = 10_000;
 /** After `end()` closes stdin: claude in stream-json mode can ignore EOF and
@@ -103,7 +108,7 @@ export class ClaudeCliRunner implements AgentRunner {
 
   constructor(opts: ClaudeCliRunnerOptions = {}) {
     this.bin = resolveClaudeExecutable(opts.bin);
-    this.timeoutMs = opts.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS;
+    this.timeoutMs = opts.timeoutMs ?? DEFAULT_CLAUDE_RUN_TIMEOUT_MS;
   }
 
   /** One-shot run: start a session and auto-end it after the first turn. */

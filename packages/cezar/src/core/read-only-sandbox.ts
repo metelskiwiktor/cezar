@@ -23,6 +23,11 @@ export interface ReadOnlyIsolation {
   cleanup: () => void;
 }
 
+/** The push URL a read-only run sees for `origin`: any `git push origin` — the agent's, or a
+ * repository test pushing to a fixture remote — fails naming it. Check results that mention it
+ * are classified as guard-caused (`readOnlyGuardHits`), never worked around. */
+export const READ_ONLY_PUSH_URL = 'DISABLED_READ_ONLY_REVIEW';
+
 /**
  * Ephemeral env for read-only runs: empty GH_CONFIG_DIR, empty global/system
  * git config, no credential helper, no prompts, push URL disabled.
@@ -48,7 +53,7 @@ export function prepareReadOnlyIsolation(): ReadOnlyIsolation {
     GIT_CONFIG_KEY_0: 'credential.helper',
     GIT_CONFIG_VALUE_0: '',
     GIT_CONFIG_KEY_1: 'remote.origin.pushurl',
-    GIT_CONFIG_VALUE_1: 'DISABLED_READ_ONLY_REVIEW',
+    GIT_CONFIG_VALUE_1: READ_ONLY_PUSH_URL,
   };
 
   const cleanup = () => {
