@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { AgyCliRunner, reviewRoundsViolation } from './agy-cli-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
@@ -277,15 +277,25 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
 
   it('isolates check runtimeDir in OS tmpdir and never places it inside .ai/cezar/worktrees', () => {
     const r = repo();
-    const diff = prepareReviewDiff(r.cwd, r.base, r.head);
+    // A hosted cezar task legitimately points TEMP at `.ai/cezar/tmp/<run>`, so the assertion is
+    // relative to a controlled temp root rather than to whatever path the host happens to use.
+    const tempRoot = mkdtempSync(join(tmpdir(), 'cez-rt-root-'));
+    vi.stubEnv('TMPDIR', tempRoot);
+    vi.stubEnv('TMP', tempRoot);
+    vi.stubEnv('TEMP', tempRoot);
+    let diff: ReturnType<typeof prepareReviewDiff> | undefined;
     try {
-      expect(diff.runtimeDir).not.toContain('.ai');
-      expect(diff.runtimeDir).not.toContain('cezar');
-      expect(diff.runtimeDir).not.toContain(r.cwd);
+      diff = prepareReviewDiff(r.cwd, r.base, r.head);
+      const inRoot = relative(tempRoot, diff.runtimeDir);
+      expect(inRoot && !inRoot.startsWith('..') && !isAbsolute(inRoot)).toBe(true);
+      expect(relative(r.cwd, diff.runtimeDir).startsWith('..')).toBe(true);
+      expect(diff.runtimeDir.replace(/\\/g, '/')).not.toContain('.ai/cezar/worktrees');
       expect(existsSync(diff.runtimeDir)).toBe(true);
     } finally {
-      diff.cleanup();
-      expect(existsSync(diff.runtimeDir)).toBe(false);
+      vi.unstubAllEnvs();
+      diff?.cleanup();
+      if (diff) expect(existsSync(diff.runtimeDir)).toBe(false);
+      rmSync(tempRoot, { recursive: true, force: true });
     }
   });
 });
