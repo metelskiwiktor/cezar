@@ -16,7 +16,7 @@ named AGY / PR-review layer on top.
 
 History since the merge-base: fork **31 commits** (22 non-merge + 9 PR merges), upstream
 **79 commits** to `v0.15.2`. Fork diff vs merge-base: 101 files, +7273/−136. After the merge the
-fork's residual diff vs `v0.15.2` is 98 files, roughly +7.2k/−0.1k — almost all of it NEW files
+fork's residual diff vs `v0.15.2` is 97 files, +7366/−127 (this document included) — almost all of it NEW files
 (AGY runner, review checks, PR-review automation, PR-fork pinning) rather than edits to upstream code.
 
 ## 2. Strategy: MERGE (not rebase, not cherry-pick)
@@ -113,7 +113,10 @@ Nothing was dropped wholesale; dropped *code*: fork's PR-lookup/auth-retry branc
 
 Touches 11 fork-owned files; the only upstream-touched one is `claude-cli-runner.ts`, which
 auto-merges. `git merge-tree` of PR #14 against `v0.15.2` shows exactly the same 7 conflicts as
-fork `main` and none of its own, and against this merge it is checked in the PR description.
+fork `main` and none of its own; against this merge it is **conflict-free** (tree `06802901`).
+On that combined tree PR #14's suites (`claude-cli-runner`, `review-checks`, `agy-hardening`,
+`agy-cli-runner`, `automations/pr-review`) give 217/219 — the two failures are the `.ai/cezar/tmp`
+case (§6) and `claude-cli-runner` "exits 143", which fails identically on pristine `v0.15.2` here.
 Recommendation: land this integration first, then merge PR #14 on top (or rebase it — it is one
 commit). Nothing in this merge supersedes it.
 
