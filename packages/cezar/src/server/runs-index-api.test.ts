@@ -162,9 +162,11 @@ describe('workspace runs index API', () => {
     for (const key of [
       'pullRequestUrl',
       'referencedPullRequestUrl',
+      'referencedPrCandidates',
       'prNumber',
       'issueNumber',
       'referencedIssueUrl',
+      'referencedIssueCandidates',
       'markerRefs',
       'prRefs',
       'costUsd',
@@ -227,6 +229,56 @@ describe('workspace runs index API', () => {
     // Still the slim row — the expensive half never rides along.
     expect(row).not.toHaveProperty('steps');
     expect(row).not.toHaveProperty('workflowDef');
+  });
+
+  it('carries the issue candidates the client needs to refuse a foreign issue chip (#819)', async () => {
+    // The candidates are evidence, never a link: `taskIssueUrl` uses them to prove a bare
+    // `issueNumber` (which the auto-namer scrapes from a transcript, so it can name ANOTHER
+    // repository) is not this project's, and paints nothing rather than a 404 chip. Drop them
+    // from this row and the global Tasks page is the one surface that cannot run the check.
+    await registerProject(repoRoot);
+    await registerProject(otherRoot);
+    seedColdProject(otherRoot, [
+      storedRun({
+        id: 'foreign-number',
+        title: 'Fix PR in another repo',
+        issueNumber: 4143,
+        referencedIssueCandidates: ['https://github.com/open-mercato/open-mercato/issues/4143'],
+        markerRefs: { pr: 1977 },
+      }),
+    ]);
+
+    const body = await getIndex();
+    const row = body.runs.find((entry) => entry.id === 'foreign-number');
+
+    expect(row).toMatchObject({
+      issueNumber: 4143,
+      referencedIssueCandidates: ['https://github.com/open-mercato/open-mercato/issues/4143'],
+    });
+  });
+
+  it('carries the PR candidates the client needs to refuse a foreign PR chip (#854)', async () => {
+    // The PR half of the same evidence rule: `prNumber` is seeded by the auto-namer too, so a
+    // task driving another repository's pull request carries that repository's number. Without
+    // these on the row the global Tasks page is the one surface that cannot refuse it.
+    await registerProject(repoRoot);
+    await registerProject(otherRoot);
+    seedColdProject(otherRoot, [
+      storedRun({
+        id: 'foreign-pr-number',
+        title: 'Drive a PR in another repo',
+        prNumber: 1977,
+        referencedPrCandidates: ['https://github.com/open-mercato/open-mercato/pull/1977'],
+      }),
+    ]);
+
+    const body = await getIndex();
+    const row = body.runs.find((entry) => entry.id === 'foreign-pr-number');
+
+    expect(row).toMatchObject({
+      prNumber: 1977,
+      referencedPrCandidates: ['https://github.com/open-mercato/open-mercato/pull/1977'],
+    });
   });
 
   it('includes archived runs — findable from a project is findable from anywhere', async () => {
@@ -312,6 +364,44 @@ describe('workspace runs index API', () => {
       status: 'failed',
       awaitingAnswerSince: '2026-07-14T11:00:00.000Z',
     });
+  });
+
+  it('carries `automationId` from every provenance key, so the origin filter can split the rows', async () => {
+    await registerProject(repoRoot);
+    await registerProject(otherRoot);
+    const base = { automationRevision: 1, receiptId: 'rc' };
+    seedColdProject(otherRoot, [
+      storedRun({ id: 'mine', title: 'A person’s task', createdAt: '2026-07-14T10:04:00Z' }),
+      storedRun({
+        id: 'gh',
+        title: 'From a PR poll',
+        createdAt: '2026-07-14T10:03:00Z',
+        automation: { ...base, automationId: 'auto-gh', event: 'pull_request.opened', githubUrl: 'https://github.com/acme/demo/pull/1' },
+      }),
+      storedRun({
+        id: 'cron',
+        title: 'From a schedule',
+        createdAt: '2026-07-14T10:02:00Z',
+        automationTrigger: { ...base, automationId: 'auto-cron', trigger: 'schedule', occurrenceAt: '2026-07-14T10:00:00Z' },
+      }),
+      storedRun({
+        id: 'jira',
+        title: 'From a tracker',
+        createdAt: '2026-07-14T10:01:00Z',
+        automationTracker: { ...base, automationId: 'auto-jira', provider: 'jira', key: 'OPS-1', url: 'https://acme.atlassian.net/browse/OPS-1' },
+      }),
+    ]);
+
+    const body = await getIndex();
+
+    expect(body.runs.map((run) => [run.id, run.automationId])).toEqual([
+      ['mine', undefined],
+      ['gh', 'auto-gh'],
+      ['cron', 'auto-cron'],
+      ['jira', 'auto-jira'],
+    ]);
+    // Absent, not null, on a person's task — the slim row's rule for every optional key.
+    expect(Object.keys(body.runs[0]!)).not.toContain('automationId');
   });
 
   it('reads a crashed process’s `running` row as interrupted, exactly as opening it would', async () => {

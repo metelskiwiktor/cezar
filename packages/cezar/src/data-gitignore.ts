@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -28,6 +28,7 @@ export const DATA_GITIGNORE_ENTRIES = [
   'worktrees/',
   'tmp/', // per-run agent temp directories (#785)
   'drafts/', // unsent composer text + pasted screenshots (#939) — never in git history
+  'node-text/', // fork-local: per-run graph node text (review drafts) read by `github.review-comment`
   'todos.json',
   'todos.json.tmp',
   // Private, per-project MCP servers (spec 2026-10-07-private-project-mcp) — personal tokens.
@@ -56,7 +57,13 @@ export function ensureDataGitignore(repoRoot: string): void {
   const path = join(repoRoot, '.ai/cezar', '.gitignore');
   try {
     mkdirSync(join(repoRoot, '.ai/cezar'), { recursive: true });
-    const current = existsSync(path) ? readFileSync(path, 'utf8') : '';
+    // Read-or-empty rather than exists-then-read: one syscall, no window between them.
+    let current = '';
+    try {
+      current = readFileSync(path, 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
     const lines = current.split('\n');
     const missing = DATA_GITIGNORE_ENTRIES.filter((w) => !lines.includes(w));
     if (missing.length > 0) {

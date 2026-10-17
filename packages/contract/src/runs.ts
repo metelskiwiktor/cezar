@@ -8,6 +8,7 @@ import { workflowDefSchema, workflowStepDefSchema } from './workflows.ts';
 // one. `src/runs/store.ts` imports the SAME value for its persistence twin, so the two halves of
 // `contract-parity.runs.test.ts` cannot drift apart by construction.
 import { dispatchIntentSchema, dispatchSchema } from './dispatch.ts';
+import { trackerAssociationSchema, trackerAutomationEventSchema } from './tracker.ts';
 
 /** Machine-owned PR provenance, pinned before the first workflow step. Never accepted as input. */
 export const prForkBaseSchema = z.object({
@@ -106,6 +107,9 @@ export const stepStateSchema = z.object({
    *  that created it, so resume and Continue read this rather than the project's current
    *  selection. Absent on records written before accounts existed. */
   profileId: z.string().optional(),
+  /** Canonical provider/model identity resolved for this step; absent for auto-model steps and
+   *  records written before per-step attribution existed. */
+  modelIdentity: z.string().optional(),
   costUsd: z.number().optional(),
 });
 export type StepState = z.infer<typeof stepStateSchema>;
@@ -217,6 +221,34 @@ export const runRecordSchema = z.object({
     })
     .optional(),
   /**
+   * Provenance for a task a tracker (Jira/Linear) automation launched — its own key for the same
+   * downgrade reason as `automationTrigger`. The store has always persisted and served it; it is
+   * described here so the cockpit can tell an automation's task from a person's (the Tasks
+   * tables' origin filter) without reaching past the type. No secret rides on it.
+   */
+  automationTracker: z
+    .object({
+      automationId: z.string(),
+      automationRevision: z.number(),
+      receiptId: z.string(),
+      provider: z.enum(['jira', 'linear']),
+      association: trackerAssociationSchema.optional(),
+      eventId: z.string().optional(),
+      event: trackerAutomationEventSchema.optional(),
+      timestamp: z.string().optional(),
+      change: z
+        .object({
+          fromId: z.string().optional(),
+          toId: z.string().optional(),
+          labelId: z.string().optional(),
+          labelName: z.string().optional(),
+        })
+        .optional(),
+      key: z.string(),
+      url: z.string(),
+    })
+    .optional(),
+  /**
    * This run's place in a dispatch tree (spec `.ai/specs/2026-09-10-dispatch.md`): its root,
    * its parent, its budget, its report. Absent on a plain task, which behaves exactly as it
    * always has.
@@ -240,6 +272,21 @@ export const runRecordSchema = z.object({
    *  question was still unanswered. Present only on a `failed` run; the cockpit keeps such a run
    *  under "needs you" until the answer reopens it. Absent on records written before it existed. */
   awaitingAnswerSince: z.string().optional(),
+  /** A run a `checkout: 'pr-head'` automation launched on a pull request's head (spec
+   *  2026-10-06-agentic-e2e-checks Phase 3): the fetched head it tested. Absent on every other run. */
+  prHead: z
+    .object({
+      number: z.number(),
+      repo: z.string(),
+      headRepo: z.string(),
+      headRef: z.string(),
+      headSha: z.string(),
+      baseRef: z.string(),
+      ref: z.string(),
+    })
+    .optional(),
+  /** The PR head came from a fork: its check steps run without the project's or workspace's secrets. */
+  untrustedHead: z.boolean().optional(),
   createdAt: z.string(),
   startedAt: z.string().optional(),
   finishedAt: z.string().optional(),
@@ -306,6 +353,8 @@ export const runRecordSchema = z.object({
    *  runs, on any run not yet opened, and on one deliberately put back to unread via
    *  `POST /runs/:id/unread` (#775) — all three count as unread. */
   seenAt: z.string().optional(),
+  /** Highest event `seq` handed out for this run (ephemeral frames included). Absent on older runs. */
+  lastSeq: z.number().int().nonnegative().optional(),
   currentStepId: z.string().optional(),
   error: z.string().optional(),
   steps: z.array(stepStateSchema),
@@ -403,26 +452,41 @@ export const runIndexEntrySchema = z.object({
    *  page needs to nest a child under its parent, and the child's `kind` so a row can say
    *  `review` or `implement` next to its title. Absent on a plain task. */
   dispatch: dispatchSchema.pick({ rootRunId: true, parentRunId: true, kind: true }).optional(),
+  /** The automation that launched this run — GitHub, scheduled or tracker, whichever provenance
+   *  key the record carries. Absent on a task a person (or a dispatching task) started; the
+   *  global page's origin filter reads it, and a dispatched child inherits its root's answer
+   *  there through `dispatch.rootRunId` rather than through a copy here. */
+  automationId: z.string().optional(),
   /** When the agent actually started, as opposed to when the task was created. The global page's
    *  age column prefers it and falls back to `createdAt`, exactly as the per-project table does. */
   startedAt: z.string().optional(),
   /**
-   * The six fields `taskReference()` (`web/src/lib/tasks-table.ts`) reads to decide a task's PR
+   * The eight fields `taskReference()` (`web/src/lib/tasks-table.ts`) reads to decide a task's PR
    * or issue chip. Carried verbatim rather than pre-resolved into a `{kind, number, url}` on the
    * server, because the rule that picks between them is subtle (#407, #526: a run that REVIEWED
    * a PR must not claim it as its own, an issue-subject run must not adopt an incidental
    * transcript PR) and it already exists, tested, on the client. Resolving it a second time
    * server-side would be a second rule, and the two would drift.
    *
-   * Six scalars is still the slim row this schema exists to keep: `steps[]` and `workflowDef`,
+   * Both `referenced*Candidates` lists ride along as EVIDENCE — never as links. They are what
+   * prove a bare `issueNumber` (#819) or `prNumber` (#854) belongs to another repository, which
+   * is what lets the cockpit refuse to rebuild it as a local `…/issues/N` or `…/pull/N` link.
+   * Leave either off and this row is the one surface that cannot run its half of the check — the
+   * global page would keep painting the 404 chip every other surface suppresses, which is exactly
+   * the drift carrying the inputs verbatim prevents. They arrive together for the same reason the
+   * guard does: one half of a rule is how the two halves drift.
+   *
+   * Eight scalars is still the slim row this schema exists to keep: `steps[]` and `workflowDef`,
    * the expensive half, stay off it.
    */
   pullRequestUrl: z.string().optional(),
   referencedPullRequestUrl: z.string().optional(),
+  referencedPrCandidates: z.array(z.string()).optional(),
   prNumber: z.number().optional(),
   prRefs: z.array(runPrRefSchema).max(8).optional(),
   issueNumber: z.number().optional(),
   referencedIssueUrl: z.string().optional(),
+  referencedIssueCandidates: z.array(z.string()).optional(),
   markerRefs: z.object({ pr: z.number().optional(), issue: z.number().optional() }).optional(),
   /** What the run has cost so far. Absent means nothing was recorded, which is NOT `$0` — the
    *  cockpit prints an em dash rather than claiming a measurement that never happened. */
@@ -601,6 +665,19 @@ export const gitPushResponseSchema = z.object({
   upstreamSet: z.boolean(),
 });
 export type GitPushResponse = z.infer<typeof gitPushResponseSchema>;
+
+/** `GET /runs/:id/git/status` — what the run's worktree holds that has not left it yet: files
+ *  `git add -A` would commit, and commits its upstream has not seen. `unpushed` is null while the
+ *  branch has no upstream (never pushed) — "not pushed at all" is a different answer from "0".
+ *  `behind` counts the other direction: what the base has that the branch lacks. */
+export const gitStatusResponseSchema = z.object({
+  uncommitted: z.number(),
+  unpushed: z.number().nullable(),
+  /** Commits on the task's base branch (as last fetched) the branch does not have; null when the
+   *  base cannot be resolved (none recorded, a raw sha, or a ref the repo lacks). */
+  behind: z.number().nullable(),
+});
+export type GitStatusResponse = z.infer<typeof gitStatusResponseSchema>;
 
 /** A commit a run made on its worktree branch. */
 export const runCommitSchema = z.object({
@@ -805,6 +882,14 @@ function truncateToBounds(value: string, maxChars: number, maxBytes: number): st
   return out;
 }
 
+/** Drop trailing `.` and ` ` in one linear pass. The equivalent `/[. ]+$/` backtracks
+ *  quadratically on a long run of them followed by anything else. */
+function trimTrailingDotsAndSpaces(value: string): string {
+  let end = value.length;
+  while (end > 0 && (value[end - 1] === '.' || value[end - 1] === ' ')) end -= 1;
+  return value.slice(0, end);
+}
+
 /**
  * Turn the filename a browser reported into one that is safe to use as a path segment, or `null`
  * when nothing usable survives.
@@ -855,11 +940,11 @@ export function sanitizeAttachmentName(name: string, mediaType: string): string 
   const ext = dot > 0 ? cleaned.slice(dot + 1).toLowerCase() : '';
   const keepsExtension = allowed.includes(ext);
   const rawStem = keepsExtension ? cleaned.slice(0, dot) : cleaned;
-  const stem = truncateToBounds(rawStem, MAX_ATTACHMENT_NAME_STEM, MAX_ATTACHMENT_NAME_STEM_BYTES)
-    // Trailing dots and spaces last, after truncation could have exposed one: Windows refuses an
-    // entry that ends in either, and `notes.` would otherwise become `notes..txt`.
-    .replace(/[. ]+$/, '')
-    .trim();
+  // Trailing dots and spaces last, after truncation could have exposed one: Windows refuses an
+  // entry that ends in either, and `notes.` would otherwise become `notes..txt`.
+  const stem = trimTrailingDotsAndSpaces(
+    truncateToBounds(rawStem, MAX_ATTACHMENT_NAME_STEM, MAX_ATTACHMENT_NAME_STEM_BYTES),
+  ).trim();
   if (stem === '') return null;
   // The last Windows filename rule, and the only one that is not about characters: these stems
   // name DEVICES whatever extension follows, so `CON.txt` is the console rather than a file and a

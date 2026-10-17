@@ -33,7 +33,8 @@ vi.mock('node:child_process', async (original) => {
   return { ...actual, execFile };
 });
 import { resolvePrForkBase } from '../../pr-fork.ts';
-import { createDraftPr } from './github.ts';
+import { createDraftPr, prTargetRemote } from './github.ts';
+import { taskRemotes } from '../../git-worktree.ts';
 
 let root: string;
 let repo: string;
@@ -70,7 +71,7 @@ it('opens a draft by default and a ready-for-review PR when asked', async () => 
   expect((await createDraftPr(payload)).ok).toBe(true);
   expect(ghCalls[0]).toContain('--draft');
   ghCalls.length = 0;
-  expect((await createDraftPr({ ...payload, ready: true })).ok).toBe(true);
+  expect((await createDraftPr({ ...payload, draft: false })).ok).toBe(true);
   expect(ghCalls[0]?.slice(0, 2)).toEqual(['pr', 'create']);
   expect(ghCalls[0]).not.toContain('--draft');
 });
@@ -95,11 +96,11 @@ it('wrong HEAD blocks publication before autosave, push or gh and preserves task
   expect(() => git('--git-dir', remote, 'rev-parse', '--verify', 'refs/heads/cez/task')).toThrow();
 });
 
-it('retries transient post-push branch propagation errors while preserving ready: true and --base', async () => {
+it('retries transient post-push branch propagation errors while preserving draft: false and --base', async () => {
   const payload = await input();
   let createAttempts = 0;
   ghHandler.fn = (argv) => {
-    if (argv[0] === 'pr' && argv[1] === 'view') {
+    if (argv[0] === 'pr' && argv[1] === 'list') {
       return { err: new Error('no PR yet'), stderr: 'no pull requests found for branch "cez/task"' };
     }
     createAttempts++;
@@ -111,7 +112,7 @@ it('retries transient post-push branch propagation errors while preserving ready
     }
     return { stdout: 'https://github.com/test/repo/pull/9\n' };
   };
-  const outcome = await createDraftPr({ ...payload, ready: true });
+  const outcome = await createDraftPr({ ...payload, draft: false });
   expect(outcome).toEqual({ ok: true, url: 'https://github.com/test/repo/pull/9', dryRun: false });
   expect(createAttempts).toBe(3);
   const creates = ghCalls.filter((c) => c[0] === 'pr' && c[1] === 'create');
@@ -126,13 +127,13 @@ it('reuses an already-created PR instead of duplicating when gh pr create fails 
   const payload = await input();
   let createAttempts = 0;
   ghHandler.fn = (argv) => {
-    if (argv[0] === 'pr' && argv[1] === 'view') {
-      return { stdout: JSON.stringify({ url: 'https://github.com/test/repo/pull/9', state: 'OPEN' }) };
+    if (argv[0] === 'pr' && argv[1] === 'list') {
+      return { stdout: JSON.stringify([{ url: 'https://github.com/test/repo/pull/9', headRepositoryOwner: null }]) };
     }
     createAttempts++;
     return { err: new Error('exit 1'), stderr: "GraphQL: Head sha can't be blank" };
   };
-  const outcome = await createDraftPr({ ...payload, ready: true });
+  const outcome = await createDraftPr({ ...payload, draft: false });
   expect(outcome).toEqual({ ok: true, url: 'https://github.com/test/repo/pull/9', dryRun: false });
   expect(createAttempts).toBe(1);
 });
@@ -140,7 +141,8 @@ it('reuses an already-created PR instead of duplicating when gh pr create fails 
 it('does not retry authentication or permission errors', async () => {
   const payload = await input();
   let createAttempts = 0;
-  ghHandler.fn = () => {
+  ghHandler.fn = (argv) => {
+    if (argv[0] === 'pr' && argv[1] === 'list') return { stdout: '[]' };
     createAttempts++;
     return { err: new Error('exit 1'), stderr: 'HTTP 403: Resource not accessible by integration (createPullRequest)' };
   };
@@ -155,7 +157,7 @@ it('does not retry No commits between when the branch genuinely has zero commits
   rmSync(join(root, 'task.txt'));
   let createAttempts = 0;
   ghHandler.fn = (argv) => {
-    if (argv[0] === 'pr' && argv[1] === 'view') {
+    if (argv[0] === 'pr' && argv[1] === 'list') {
       return { err: new Error('none'), stderr: 'no pull requests found' };
     }
     createAttempts++;
@@ -164,4 +166,18 @@ it('does not retry No commits between when the branch genuinely has zero commits
   const emptyOutcome = await createDraftPr(payload);
   expect(emptyOutcome.ok).toBe(false);
   expect(createAttempts).toBe(1);
+});
+
+// Fork-local guard over upstream #1383: on a downstream fork whose `upstream` remote is the fork
+// parent and `gh repo set-default` marked it `gh-resolved base` (this very repository's setup),
+// upstream's detection picks `upstream` — a run pinned to `origin` must still open its PR there.
+it('a pinned run targets origin even when another remote is the gh-resolved fork parent', async () => {
+  git('remote', 'add', 'upstream', 'https://github.com/up/project.git');
+  git('config', 'remote.upstream.gh-resolved', 'base');
+  const remotes = await taskRemotes(repo);
+  expect(remotes.base).toBe('upstream');
+  expect(remotes.push).toBe('origin');
+  const pinned = await resolvePrForkBase(repo, 'develop');
+  expect(prTargetRemote({ prForkBase: pinned }, remotes.base!)).toBe('origin');
+  expect(prTargetRemote({}, remotes.base!)).toBe('upstream');
 });

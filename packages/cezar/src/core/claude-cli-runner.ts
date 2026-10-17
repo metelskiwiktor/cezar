@@ -206,6 +206,9 @@ export class ClaudeCliRunner implements AgentRunner {
     // SIGTERM itself, so `killed` is true while the process runs on; escalation
     // has to follow real termination or it never fires (#844).
     const hasExited = trackChildExit(child);
+    child.once('exit', () => {
+      stdinOpen = false;
+    });
 
     const end = (): void => {
       if (!stdinOpen) return;
@@ -492,6 +495,12 @@ export function buildAllowedTools(allowedTools: string[], bashAllowlist?: string
 
 function truncate(s: string, max = 200): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
+/** `claude --resume <id>` for a transcript the CLI no longer has — typically pruned by its own
+ *  `cleanupPeriodDays` (default 30) between two Continues of a long-lived task. */
+export function isClaudeMissingSessionError(message: string): boolean {
+  return /No conversation found with session ID/i.test(message);
 }
 
 /** Path to the bundled mock (`scripts/mock-claude.mjs`), for CEZ_DRY_RUN=1. */

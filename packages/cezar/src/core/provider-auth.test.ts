@@ -64,6 +64,8 @@ const connectedResults: Record<string, ProviderCommandResult> = {
     stderr: '',
     exitCode: 0,
   },
+  // Agy has no auth-status command; a version line from `agy --version` means it runs.
+  agy: { stdout: 'agy 1.0.0', stderr: '', exitCode: 0 },
 };
 
 const originalEnv = {
@@ -75,6 +77,7 @@ const originalEnv = {
   CEZ_PI_BIN: process.env.CEZ_PI_BIN,
   CURSOR_API_KEY: process.env.CURSOR_API_KEY,
   CEZ_COPILOT_BIN: process.env.CEZ_COPILOT_BIN,
+  CEZ_AGY_BIN: process.env.CEZ_AGY_BIN,
 };
 
 beforeEach(() => {
@@ -86,6 +89,8 @@ beforeEach(() => {
   delete process.env.CEZ_PI_BIN;
   delete process.env.CURSOR_API_KEY;
   delete process.env.CEZ_COPILOT_BIN;
+  // Pinned rather than deleted: without it `resolveAgyBin` probes the host's install locations.
+  process.env.CEZ_AGY_BIN = 'agy';
 });
 
 afterEach(() => {
@@ -107,6 +112,7 @@ function resultFor(executable: string): ProviderCommandResult {
   if (executable === 'agent' || executable.includes('cursor')) return connectedResults.cursor!;
   if (executable.includes('opencode')) return connectedResults.opencode!;
   if (executable.includes('copilot')) return connectedResults.copilot!;
+  if (executable === 'agy') return connectedResults.agy!;
   return connectedResults.pi!;
 }
 
@@ -661,6 +667,7 @@ describe('ProviderAuthService', () => {
         { provider: 'pi' },
         { provider: 'junie', status: 'connected' },
         { provider: 'copilot' },
+        { provider: 'agy' },
       ],
     });
   });
@@ -685,6 +692,7 @@ describe('ProviderAuthService', () => {
       { executable: 'agent', args: ['status', '--format', 'json'], timeoutMs: 10_000 },
       { executable: 'pi', args: ['--list-models'], timeoutMs: 10_000 },
       { executable: 'copilot', args: ['--acp'], timeoutMs: 10_000 },
+      { executable: 'agy', args: ['--version'], timeoutMs: 10_000 },
     ]);
     release();
     await expect(pending).resolves.toBeDefined();
@@ -1141,6 +1149,7 @@ describe('ProviderAuthService', () => {
         { provider: 'pi', status: 'connected' },
         { provider: 'junie', status: 'connected' },
         { provider: 'copilot', status: 'connected' },
+        { provider: 'agy', status: 'connected' },
       ],
     });
     expect(runCommand).not.toHaveBeenCalled();
@@ -1254,6 +1263,7 @@ describe('ProviderAuthService', () => {
         { provider: 'pi', status: 'connected' },
         { provider: 'junie', status: 'connected' },
         { provider: 'copilot', status: 'connected' },
+        { provider: 'agy', status: 'connected' },
       ],
     });
     expect(runCommand).not.toHaveBeenCalled();
@@ -1422,5 +1432,65 @@ describe('ProviderAuthService', () => {
       expect(new ProviderAuthService({ platform: 'linux' }).loginCommand('opencode', '/oc-work'))
         .toBe("'opencode' auth login");
     });
+  });
+});
+
+describe('inconclusive probe reports', () => {
+  const codexOnly = (result: ProviderCommandResult | (() => never)): RunProviderCommand => async (executable, args) => {
+    if (args[0] === '--version') return { stdout: 'codex-cli 0.46.0\n', stderr: '', exitCode: 0 };
+    if (executable === 'codex') {
+      if (typeof result === 'function') return result();
+      return result;
+    }
+    return { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' };
+  };
+
+  const reasonsFor = async (result: ProviderCommandResult | (() => never)) => {
+    const onInconclusive = vi.fn();
+    const service = new ProviderAuthService({ runCommand: codexOnly(result), onInconclusive });
+    const status = await service.status({ refresh: true });
+    expect(status.providers.find((row) => row.provider === 'codex')?.status).toBe('unknown');
+    return onInconclusive.mock.calls.map(([probe]) => probe);
+  };
+
+  it('names the reason, never the output', async () => {
+    const [probe] = await reasonsFor({ stdout: 'me@example.com is something new', stderr: 'tok', exitCode: 0 });
+    expect(probe).toMatchObject({
+      provider: 'codex',
+      reason: 'unrecognized_output',
+      profile: 'default',
+      binSource: 'path',
+      binExt: 'none',
+      errorCode: null,
+      exitCode: 0,
+      stdoutBytes: 31,
+      stdoutJson: false,
+      stderrBytes: 3,
+    });
+    expect(JSON.stringify(probe)).not.toContain('example.com');
+    expect(await probe.cliVersion()).toBe('0.46.0');
+  });
+
+  it('tells an unexpected exit, a spawn error, a timeout and a throw apart', async () => {
+    expect((await reasonsFor({ stdout: '', stderr: '', exitCode: 3 }))[0]?.reason).toBe('unexpected_exit');
+    expect((await reasonsFor({ stdout: '', stderr: '', exitCode: null, errorCode: 'EINVAL' }))[0])
+      .toMatchObject({ reason: 'spawn_error', errorCode: 'EINVAL' });
+    expect((await reasonsFor({ stdout: '', stderr: '', exitCode: null, errorCode: 'ETIMEDOUT', timedOut: true }))[0]?.reason)
+      .toBe('timeout');
+    expect((await reasonsFor(() => { throw new Error('boom'); }))[0]?.reason).toBe('spawn_threw');
+  });
+
+  it('reports each provider and reason once per process, and nothing for a conclusive answer', async () => {
+    const onInconclusive = vi.fn();
+    let codex: ProviderCommandResult = { stdout: '???', stderr: '', exitCode: 0 };
+    const service = new ProviderAuthService({ runCommand: async (executable, args) => (
+      executable === 'codex' && args[0] !== '--version' ? codex : { stdout: '', stderr: '', exitCode: null, errorCode: 'ENOENT' }
+    ), onInconclusive });
+    await service.status({ refresh: true });
+    await service.status({ refresh: true });
+    expect(onInconclusive).toHaveBeenCalledTimes(1);
+    codex = { stdout: 'Logged in using ChatGPT', stderr: '', exitCode: 0 };
+    await service.status({ refresh: true });
+    expect(onInconclusive).toHaveBeenCalledTimes(1);
   });
 });

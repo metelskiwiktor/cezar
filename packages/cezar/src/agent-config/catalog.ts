@@ -40,6 +40,8 @@ export interface AgentHomePaths {
   copilot: string;
   /** `~/.junie` — no relocation var documented (see `PROFILE_ENV_VAR.junie`) */
   junie: string;
+  /** `~/.gemini` — where Antigravity CLI keeps its Google login; no relocation var (`PROFILE_ENV_VAR.agy`) */
+  agy: string;
 }
 
 export interface ConfigFileDef {

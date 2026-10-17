@@ -1,3 +1,184 @@
+# 0.15.2 (2026-10-14)
+
+## Highlights
+GitHub Enterprise works on any domain, and sidebar rows get pin and archive actions on hover. The rest is fixes, most of them found through the new error reports: Continue works on tasks whose Claude conversation was pruned, a task's selected skill and its companions are installed into its worktree, runs check the agent account you actually picked, and publishing a PR adopts one that already exists.
+
+## ✨ Features
+- ✨ GitHub Enterprise works on any domain: the GitHub tab, PRs and automations follow each repo's own host, with no new config. (#1426) *(@hunger-programmer)*
+- ✨ Hovering a sidebar task shows pin and archive actions; the Tasks table groups pinned tasks under their own header. (#1417) *(@martaradziszewska)*
+- ✨ Telemetry counts session-resume fallbacks and task failures per backend, after you opt in. (#1440) *(@patzick)*
+- ✨ "Cannot reach the cezar server" error reports say which transport failure caused them (fixes #1437). (#1441) *(@patzick)*
+
+## 🐛 Fixes
+- 🐛 Continue on a task whose Claude conversation was pruned starts a fresh session in the same worktree instead of failing. (#1435) *(@martaradziszewska)*
+- 🐛 A task's selected skill and the skills it names are installed into its worktree, so the agent can run them. (#1429) *(@patzick)*
+- 🐛 Runs check the selected agent account's sign-in, not only the default login. (#1428) *(@patzick)*
+- 🐛 Publishing a PR adopts one that already exists for the branch and retries GitHub's transient errors once. (#1430) *(@patzick)*
+- 🐛 Connect opens the agent's login when its auth state cannot be read, instead of a "Try again" dead end. (#1431) *(@patzick)*
+- 🐛 The server outlives the browser's keep-alive pool, so a request no longer lands on a closed socket ("cannot reach the cezar server" in Safari). (#1436) *(@patzick)*
+- 🐛 Issue and PR numbers from another repository are no longer linked into the project's repo (fixes #819, #854). (#1390) *(@wojciechszyjka, via @lbajsarowicz)*
+
+## 👥 Contributors
+
+- @patzick
+- @martaradziszewska
+- @wojciechszyjka
+- @lbajsarowicz
+- @hunger-programmer
+
+# 0.15.1 (2026-10-13)
+
+## Highlights
+Create a brand-new project from cezar, optionally with a private GitHub repo. Task branches can be named from the first prompt, and project settings are regrouped into Agents, Instructions and Tasks. The run header gets one next-step git button, automations fire on merged or closed pull requests, and cezar can send anonymous usage metrics and error reports after you opt in. Forks work end to end: tasks fork from, and open PRs on, the PR-target remote. The desktop app installs its own Node.js when none is found. The rest is fixes.
+
+## ✨ Features
+- ✨ Create a new project: a fresh git repo, optionally a private GitHub repo, from a template. (#1402) *(@patzick)*
+- ✨ Branch naming instructions in Settings → Instructions: task branches are named from the first prompt; empty keeps `cez/<id>`. (#1398) *(@martaradziszewska)*
+- ✨ Project settings regrouped into Agents, Instructions and Tasks; old prompt-templates links redirect. (#1398) *(@martaradziszewska)*
+- ✨ Automations can fire when a pull request is merged (`pull_request.merged`) or closed without merging (`pull_request.closed`). (#1415) *(@patzick)*
+- ✨ The run header is regrouped around one git button that shows the next step: Create PR, Commit and push, Push, Update branch, Resolve conflicts or Fix errors. (#1337) *(@martaradziszewska)*
+- ✨ An expanded tool card shows the full command the agent ran (fixes #1306). (#1310) *(@kmrosiek)*
+- ✨ Anonymous telemetry: usage metrics and error reports, sent only after you opt in; `CEZ_TELEMETRY=0` or `DO_NOT_TRACK=1` turns it off. Error popups are reported too. (#1381, #1408) *(@patzick)*
+- ✨ The desktop app installs a managed Node.js when it finds no Node 20+ (shell 0.1.5). (#1405) *(@patzick)*
+- ✨ The desktop shell reports its own failures, or offers a button to (shell 0.1.6). (#1406) *(@patzick)*
+- ✨ The sidebar ⭐ star count refreshes every 10 seconds. (#1379) *(@pat-lewczuk)*
+
+## ⚡ Performance
+- ⚡ Reopening a task is cheap: history context is cached, replay is streamed and SSE resumes from the tail seq. (#1187) *(@lbajsarowicz)*
+
+## 🐛 Fixes
+- 🐛 Tasks fork from, and open PRs on, the PR-target remote instead of a hard-coded `origin`. (#1383) *(@martaradziszewska)*
+- 🐛 `issue.labeled` and `issue.unlabeled` automations no longer fail on every poll against a real repository (fixes #914). (#916) *(@sapersky)*
+- 🐛 `CEZ:DONE` and `CEZ:ASK` survive trailing task-reference markers (fixes #997). (#1154) *(@pat-lewczuk)*
+- 🐛 Multi-line code blocks in the thread keep their line breaks. (#1384) *(@patzick)*
+- 🐛 Oversized Markdown stays inside task-thread bubbles and scrolls horizontally. (#1356) *(@martaradziszewska)*
+- 🐛 Jumping to a file in the Changes tab scrolls only the diff, not the whole cockpit. (#1380) *(@martaradziszewska)*
+- 🐛 Buttons and menu items show the pointer cursor. (#1414) *(@martaradziszewska)*
+- 🐛 The desktop app finds Node 20+ wherever an installer or version manager put it (shell 0.1.4). (#1404) *(@patzick)*
+- 🐛 macOS privacy prompts in the desktop app name the agent, not "2.1.295" or "node". (#1407) *(@patzick)*
+
+## 🧪 Testing
+- 🧪 Telemetry tests key sends by endpoint, not arrival order. (#1395) *(@patzick)*
+
+## 🚀 CI/CD & Infrastructure
+- 🚀 CI runs vitest in three parallel shards. (#1416) *(@patzick)*
+- 🚀 The macOS desktop release legs get room for Apple notarization. (#1409) *(@patzick)*
+
+## 👥 Contributors
+
+- @patzick
+- @martaradziszewska
+- @pat-lewczuk
+- @lbajsarowicz
+- @kmrosiek
+- @sapersky
+
+# 0.15.0 (2026-10-11)
+
+## Highlights
+Workflows become graphs: a node editor with loops, gates, fan-out/join and a live graph view on every run, while v1 YAML workflows keep working. The Git tab gains a repository file browser, the Changes tab takes line comments that go to the agent as a review plus a Markdown preview, each project can keep private MCP servers for every agent, and check steps get encrypted secrets that agents never see. The GitHub tab loads faster, page by page. The cockpit can carry your own name and logo, and tasks started by automations no longer bury the ones you started. Plan mode is gone from the composer. The rest is fixes, mostly to runs, git and the runners.
+
+## ⚠️ Breaking
+- ⚠️ The composer's Start | Plan first switch and the plan review overlay are removed; Start always creates a run. (#1328) *(@pat-lewczuk)*
+- ⚠️ GitHub list rows no longer require `body`; it is optional during the deprecation window and comes from the detail payload. (#1362) *(@pat-lewczuk)*
+
+## ✨ Features
+- ✨ Workflow node editor and graph engine — loops, gates, dispatch/fork/join, composition, git and GitHub nodes, YAML import/export, simulation and a live graph on task runs; v1 workflows still run. (#1322) *(@kinelm)*
+- ✨ Browse the repository from the Git tab: file tree, viewer and path filter (fixes #1279). (#1299, #1280) *(@pat-lewczuk)*
+- ✨ Comment on diff lines in the Changes tab and send them to the agent as one review. (#1283) *(@martaradziszewska)*
+- ✨ Markdown preview toggle in the Changes diff. (#1349) *(@martaradziszewska)*
+- ✨ Private per-project MCP servers in `.ai/cezar/mcp.local.json`, git-ignored and passed to every agent that accepts MCP at launch. (#1324) *(@patzick)*
+- ✨ Customizable cockpit branding: display name and logo, set in Appearance settings. (#1327) *(@kinelm)*
+- ✨ Filter tasks by origin (Regular, Automations, All), defaulting to Regular. (#1336) *(@pat-lewczuk)*
+- ✨ Skills browsing, activation and preview live in one place. (#1082) *(@Igloczek)*
+- ✨ Check steps can gate their retry loop by exit code, so an e2e check that could not run stops blaming the diff. (#1265) *(@pat-lewczuk)*
+- ✨ Check steps get run context: run, branch, attempt, shared cache and GitHub provenance. (#1292) *(@pat-lewczuk)*
+- ✨ Automations can verify a pull request's head with `checkout: 'pr-head'`. (#1293) *(@pat-lewczuk)*
+- ✨ `cez runs list`, a human message for a missing `CEZ_API_URL`, and docs for the `/api/v1` API. (#1133) *(@KamilMichalski0)*
+- ✨ Encrypted project and workspace secrets for check steps and cezar, never for agents — Settings → Secrets and `cezar secrets`. (#1291) *(@pat-lewczuk)*
+
+## ⚡ Performance
+- ⚡ Per-run SSE connections share one store listener per project (fixes #1222). (#1342) *(@pat-lewczuk)*
+- ⚡ Runner model catalogs refresh in the background instead of blocking the picker (fixes #1220). (#1343) *(@pat-lewczuk)*
+- ⚡ The process sampler builds its PID indexes once per sample (fixes #1214). (#1333) *(@pat-lewczuk)*
+- ⚡ Repeated handoff heartbeats are coalesced and capped (fixes #1215). (#1332) *(@pat-lewczuk)*
+- ⚡ The GitHub tab loads faster: cursor-paged lists that load more on scroll and background detail hydration (fixes #1261). (#1362, #1366, #1374) *(@pat-lewczuk)*
+
+## 🔒 Security
+- 🔒 Cloud credentials are forwarded by backend identity, not by an env-prefix match (fixes #850). (#1228) *(@pat-lewczuk)*
+- 🔒 `server-install` allocates loopback ports machine-wide, so two unix users no longer share a cockpit (fixes #913). (#1003) *(@pat-lewczuk)*
+
+## 🐛 Fixes
+- 🐛 An unanswered `CEZ:ASK` stays under Needs you after the idle close, a crash or a restart. (#1290) *(@pat-lewczuk)*
+- 🐛 A workflow step that parked and later finished with `CEZ:DONE` no longer fails. (#1282) *(@pat-lewczuk)*
+- 🐛 A dispatched child stopped on an unanswered ask no longer reports a false outcome to its parent (fixes #1307). (#1331) *(@pat-lewczuk)*
+- 🐛 `CEZ:ASK` accepts more than four questions and options. (#1312) *(@pat-lewczuk)*
+- 🐛 A multi-question ask card keeps its picks when the thread unmounts it (fixes #1247). (#1249) *(@matgren)*
+- 🐛 A queued run starts with the workflow as it is at dequeue. (#1134) *(@KamilMichalski0)*
+- 🐛 SHA-pinned task diffs stay fresh when the base advances (fixes #1325). (#1329) *(@pat-lewczuk)*
+- 🐛 Concurrent worktree creation no longer fights over `.git/config` locks (fixes #1301). (#1318) *(@pat-lewczuk)*
+- 🐛 Numeric issue search no longer returns pull requests (fixes #949). (#1320) *(@pat-lewczuk)*
+- 🐛 Live sessions get the attachment library in their grants (fixes #987). (#1257) *(@pat-lewczuk)*
+- 🐛 Runner fixes: OpenCode port 0, string Codex RPC ids, a dead Claude stdin. (#1179) *(@lbajsarowicz)*
+- 🐛 Codex events stop after teardown (fixes #1105). (#1230) *(@pat-lewczuk)*
+- 🐛 Pi keeps markers intact across content parts (fixes #902, #903). (#1208) *(@pat-lewczuk)*
+- 🐛 OpenCode 2.x credential rows are recognized (fixes #1270). (#1271) *(@pat-lewczuk)*
+- 🐛 Claude explains headless permission denials instead of retrying (fixes #1248). (#1256) *(@pat-lewczuk)*
+- 🐛 Unsupported agent identities get a provider-specific explanation (fixes #1233). (#1258) *(@pat-lewczuk)*
+- 🐛 Dispatch and automation help derive their runner lists from the registry (fixes #1236). (#1278) *(@pat-lewczuk)*
+- 🐛 Dispatch settings offer the subtask runner's own models. (#1269) *(@pat-lewczuk)*
+- 🐛 The engine pick is remembered on the GitHub and Inbox hand-offs (fixes #906). (#907) *(@sapersky)*
+- 🐛 Drafts with only attachments survive a project switch (fixes #1095). (#1255) *(@pat-lewczuk)*
+- 🐛 Discarding a plan keeps its attachments (fixes #1094). (#1229) *(@pat-lewczuk)*
+- 🐛 Bookmark autostart keeps the form open when its runner is unavailable (fixes #874). (#1210) *(@pat-lewczuk)*
+- 🐛 The idle timeout setting is persisted (fixes #1232). (#1242) *(@pat-lewczuk)*
+- 🐛 Skills keep valid YAML frontmatter, and workspace JSON writes are atomic (fixes #1218). (#1231) *(@pat-lewczuk)*
+- 🐛 Reusable prompt templates hold up to 20,000 characters (fixes #908). (#1273) *(@pat-lewczuk)*
+- 🐛 Automation receipts with legacy keys deduplicate correctly. (#1127) *(@pat-lewczuk)*
+- 🐛 Directories are no longer accepted as launchers (fixes #1066). (#1153) *(@pat-lewczuk)*
+- 🐛 Rootless Linux finds staged agent-browser dependencies (fixes #890). (#1294) *(@pat-lewczuk)*
+- 🐛 `server-install` fails on nginx parse errors and on macOS restart errors (fixes #1001, #1011). (#1174, #1149) *(@pat-lewczuk)*
+- 🐛 Jump to latest lands at the tail without reloading the thread. (#1313) *(@martaradziszewska)*
+- 🐛 The Changes tree and diff scroll in their own columns. (#1305) *(@martaradziszewska)*
+- 🐛 Nested sidebar rows fit at minimum width; unread is shown by weight only. (#1311) *(@martaradziszewska)*
+- 🐛 The Subtasks panel collapses and scrolls instead of growing the header (fixes #1050). (#1051) *(@piotrchabros)*
+- 🐛 Long model-picker descriptions wrap (fixes #870). (#1298) *(@pat-lewczuk)*
+- 🐛 The mobile step-rail has a usable touch target (fixes #958). (#1244) *(@pat-lewczuk)*
+- 🐛 Each workflow step keeps the model it actually ran on (fixes #545). (#1353) *(@pat-lewczuk)*
+- 🐛 A follow-up to a parked task shows up at once, even without worktrees. (#1357) *(@matgren)*
+- 🐛 A brief stall no longer makes a live automation lease look compromised (fixes #1106). (#1355) *(@pat-lewczuk)*
+- 🐛 Autosave commits leave out artifacts written by failed checks (fixes #1079). (#1126) *(@pat-lewczuk)*
+- 🐛 Secret redaction no longer eats words like `task-…`. (#1373) *(@zawstudio)*
+- 🐛 Windows absolute paths are accepted in the project registry, checkout and workspace settings. (#1334) *(@matwiatrzyk)*
+- 🐛 macOS RAM matches Activity Monitor, and the host glance keeps updating. (#1363) *(@pat-lewczuk)*
+- 🐛 The Agents dock collapses once every sub-agent has settled (fixes #1237). (#1350) *(@pat-lewczuk)*
+
+## 🧪 Testing
+- 🧪 The test suite no longer calls a real model to name tasks. (#1254) *(@matgren)*
+- 🧪 Deterministic automation-gate warm-up and issue-804 teardown (fixes #930, #804). (#1330, #1297) *(@pat-lewczuk)*
+- 🧪 The parked-gate `maxParallel` test carries `mock:done` again. (#1348) *(@martaradziszewska)*
+- 🧪 Four stale e2e assertions repaired. (#1339) *(@kinelm)*
+- 🧪 Screenshots queued before task startup are covered. (#1246) *(@pat-lewczuk)*
+- 🧪 Browser e2e smoke tests. (#1364) *(@pat-lewczuk)*
+
+## 📝 Specs & Documentation
+- 📝 AGENTS.md asks for short comments, PR bodies and changelog entries. (#1361) *(@pat-lewczuk)*
+
+## 👥 Contributors
+
+- @pat-lewczuk
+- @kinelm
+- @martaradziszewska
+- @patzick
+- @KamilMichalski0
+- @matgren
+- @Igloczek
+- @lbajsarowicz
+- @piotrchabros
+- @sapersky
+- @zawstudio
+- @matwiatrzyk
+
 # 0.14.0 (2026-10-02)
 
 ## Highlights

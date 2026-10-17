@@ -105,6 +105,7 @@ describe('workspace provider API', () => {
   const savedModelsLocked = process.env.CEZ_AGENT_MODELS_LOCKED;
   const savedDryRun = process.env.CEZ_DRY_RUN;
   const savedRemote = process.env.CEZ_REMOTE;
+  const savedAgyBin = process.env.CEZ_AGY_BIN;
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), 'cez-providers-api-'));
@@ -112,6 +113,8 @@ describe('workspace provider API', () => {
     delete process.env.CEZ_AGENT_MODELS_LOCKED;
     delete process.env.CEZ_DRY_RUN;
     delete process.env.CEZ_REMOTE;
+    // Without it `resolveAgyBin` probes the host's install locations instead of naming `agy`.
+    process.env.CEZ_AGY_BIN = 'agy';
   });
 
   afterEach(() => {
@@ -123,6 +126,8 @@ describe('workspace provider API', () => {
     else process.env.CEZ_DRY_RUN = savedDryRun;
     if (savedRemote === undefined) delete process.env.CEZ_REMOTE;
     else process.env.CEZ_REMOTE = savedRemote;
+    if (savedAgyBin === undefined) delete process.env.CEZ_AGY_BIN;
+    else process.env.CEZ_AGY_BIN = savedAgyBin;
   });
 
   const service = (
@@ -156,6 +161,7 @@ describe('workspace provider API', () => {
     workspaceEvents?: WorkspaceEventBus;
     workspaceConfig?: ReturnType<typeof memoryWorkspaceConfig>;
     contexts?: ProjectContexts;
+    loginWatchOffsetsMs?: readonly number[];
   } = {}) => createApp({
     repoRoot: root,
     store,
@@ -167,6 +173,7 @@ describe('workspace provider API', () => {
     workspaceEvents: options.workspaceEvents,
     workspaceConfig: options.workspaceConfig,
     contexts: options.contexts,
+    loginWatchOffsetsMs: options.loginWatchOffsetsMs ?? [],
   });
 
   const connect = (server: ReturnType<typeof app>, provider: unknown) => apiRequest(
@@ -211,6 +218,7 @@ describe('workspace provider API', () => {
         { provider: 'pi', status: 'connected', enabled: true },
         { provider: 'junie', status: 'connected', enabled: true },
         { provider: 'copilot', status: 'connected', enabled: true },
+        { provider: 'agy', status: 'connected', enabled: true },
       ],
     });
   });
@@ -234,6 +242,7 @@ describe('workspace provider API', () => {
         { provider: 'pi', status: 'connected', enabled: true },
         { provider: 'junie', status: 'connected', enabled: true },
         { provider: 'copilot', status: 'connected', enabled: true },
+        { provider: 'agy', status: 'connected', enabled: true },
       ],
     });
     expect(runCommand).not.toHaveBeenCalled();
@@ -647,16 +656,52 @@ describe('workspace provider API', () => {
     expect(openTerminal).not.toHaveBeenCalled();
   });
 
-  it('POST returns 409 plus retry guidance when status is unknown', async () => {
+  it('POST opens the login command when status is unknown, so an unreadable probe is not a dead end', async () => {
     const openTerminal = vi.fn(async () => true);
     const response = await connect(app({
       providerAuth: service({ claude: 'unknown' }),
       openTerminal,
     }), 'claude');
 
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ opened: true, command: "'claude' auth login" });
+    expect(openTerminal).toHaveBeenCalledWith(root, "'claude' auth login");
+  });
+
+  it('POST re-checks the login it opened and tells the cockpit once it is connected', async () => {
+    const states: Partial<Record<ProviderId, ProviderConnectionState>> = { codex: 'disconnected' };
+    const workspaceEvents = new WorkspaceEventBus();
+    const events: unknown[] = [];
+    workspaceEvents.on((event, data) => {
+      if (event === 'provider-status') events.push(data);
+    });
+    const server = app({
+      providerAuth: service(states),
+      openTerminal: async () => {
+        states.codex = 'connected';
+        return true;
+      },
+      workspaceEvents,
+      loginWatchOffsetsMs: [0],
+    });
+
+    expect((await connect(server, 'codex')).status).toBe(200);
+    await vi.waitFor(() => expect(events).toEqual([
+      expect.objectContaining({ provider: 'codex', status: 'connected' }),
+    ]));
+  });
+
+  it('POST returns 409 plus command for an unknown status when localHandoff is false', async () => {
+    const openTerminal = vi.fn(async () => true);
+    const response = await connect(app({
+      providerAuth: service({ claude: 'unknown' }),
+      openTerminal,
+      bindHost: '0.0.0.0',
+    }), 'claude');
+
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({
-      error: 'Authentication could not be verified. Try again.',
+      error: 'Run this command on the machine hosting cezar.',
       command: "'claude' auth login",
     });
     expect(openTerminal).not.toHaveBeenCalled();

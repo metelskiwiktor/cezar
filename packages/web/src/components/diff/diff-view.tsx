@@ -16,6 +16,8 @@ import {
   widestLineChars,
 } from './diff-scroll'
 import { ImagePreview, shouldPreviewImage } from './image-preview'
+import { canPreviewMarkdown } from './markdown'
+import { MarkdownPreview } from './markdown-preview'
 import {
   AddCommentButton,
   anchorForLine,
@@ -54,6 +56,7 @@ import type {
   DiffProps,
   DiffRevealTarget,
 } from './types'
+import { diffScroller, scrollWithin } from './scroll-within'
 import { overlaySegments } from './word-diff'
 
 /**
@@ -116,6 +119,7 @@ export function DiffView({
   files,
   mode = 'unified',
   wrap = false,
+  preview = false,
   loadFileText,
   imageSrc,
   onOpenInApp,
@@ -186,6 +190,13 @@ export function DiffView({
   // from the top of the page after every comment.
   const returnFocus = useRef<{ element: HTMLElement | null; commentId?: string }>({ element: null })
   const rootForFocus = useRef<HTMLDivElement | null>(null)
+  // The scroller the virtualized list is bound to. virtua reads its scroll element once, at
+  // mount, so when the consumer's layout swaps it (the Changes tab's own column from md up, the
+  // app shell's `main` below) only the LIST is remounted, under a fresh key — never this view,
+  // whose state (the open comment editor and its unsent text, collapsed files, expanded context)
+  // must survive a window crossing the breakpoint.
+  const boundScroller = useRef<HTMLElement | null>(null)
+  const [scrollerEpoch, setScrollerEpoch] = useState(0)
   const captureOpener = (commentId?: string) => {
     const active = document.activeElement
     returnFocus.current = {
@@ -325,6 +336,7 @@ export function DiffView({
   const scrollElRef = useRef<HTMLElement | null>(null)
   const virtualizerRef = useRef<VirtualizerHandle | null>(null)
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const endRoom = useEndRoom(viewRef !== undefined, rootRef, scrollElRef, scrollerEpoch)
 
   useImperativeHandle(
     viewRef,
@@ -334,12 +346,16 @@ export function DiffView({
         if (index === -1) return
         const handle = virtualizerRef.current
         // Virtualized: the target may not be mounted, so the scroll goes through the index.
-        // Reserve the sticky chrome above the file in both modes. Flat jumps must be
-        // immediate: lazy content measurement can invalidate a smooth-scroll destination.
+        // Reserve the sticky chrome above the file in both modes. Flat moves only the diff's
+        // own scroller — `scrollWithin` says why that is not `scrollIntoView`.
         const root = rootRef.current
         const offset = root ? Number.parseFloat(getComputedStyle(root).scrollMarginTop) || 0 : 0
         if (handle) handle.scrollToIndex(index, { align: 'start', offset: -offset })
-        else findFileElement(root, path)?.scrollIntoView?.({ block: 'start', behavior: 'instant' })
+        else {
+          const element = findFileElement(root, path)
+          const scroller = scrollElRef.current
+          if (element && scroller) scrollWithin(scroller, element, offset)
+        }
       }
       return {
         scrollToPath: (path: string) => scrollToPath(path),
@@ -370,10 +386,10 @@ export function DiffView({
                 const margin = Number.parseFloat(getComputedStyle(element).scrollMarginBottom) || 0
                 handle.scrollTo(scroller.scrollTop + box.top - scroller.getBoundingClientRect().top
                   - (scroller.clientHeight - margin - box.height) / 2)
-              } else {
+              } else if (scroller) {
                 // An immediate jump lets content-visibility finish measuring before the next
                 // paint; a smooth jump can stop at the off-screen placeholder's old position.
-                element.scrollIntoView?.({ block: 'center', behavior: 'instant' })
+                scrollWithin(scroller, element, (scroller.clientHeight - element.getBoundingClientRect().height) / 2)
               }
               flash(element)
               return
@@ -398,6 +414,8 @@ export function DiffView({
         onExpand={(gap) => void expandGap(file, gap)}
         mode={mode}
         wrap={wrap}
+        preview={preview && canPreviewMarkdown(file)}
+        loadFileText={loadFileText}
         canExpand={loadFileText !== undefined}
         imageSrc={imageSrc}
         onOpenInApp={onOpenInApp}
@@ -411,7 +429,11 @@ export function DiffView({
       ref={(el) => {
         rootRef.current = el
         rootForFocus.current = el
-        if (el) scrollElRef.current = el.closest<HTMLElement>('[data-slot="main"]')
+        if (!el) return
+        const scroller = diffScroller(el)
+        scrollElRef.current = scroller
+        if (boundScroller.current && boundScroller.current !== scroller) setScrollerEpoch((epoch) => epoch + 1)
+        boundScroller.current = scroller
       }}
       data-slot="diff"
       data-mode={mode}
@@ -424,10 +446,17 @@ export function DiffView({
         <DiffStatLabel stat={stat} />
       </p>
       {renderMode === 'virtual' ? (
-        <VirtualFiles files={files} handleRef={virtualizerRef} scrollElRef={scrollElRef} card={card} />
+        <VirtualFiles
+          key={scrollerEpoch}
+          files={files}
+          handleRef={virtualizerRef}
+          scrollElRef={scrollElRef}
+          card={card}
+          endRoom={endRoom}
+        />
       ) : (
         <div data-slot="diff-files" data-virtualized="false">
-          {files.map((file) => (
+          {files.map((file, index) => (
             // content-visibility skips style/layout/paint for off-screen cards; the
             // intrinsic-size hint keeps the scrollbar stable before a skipped card is first
             // measured. The card spacing that used to be the column's `gap` is this wrapper's
@@ -435,7 +464,10 @@ export function DiffView({
             <div
               key={fileKey(file)}
               data-slot="diff-file-slot"
-              style={{ containIntrinsicBlockSize: `auto ${estimateFileHeight(file)}px` }}
+              style={{
+                containIntrinsicBlockSize: `auto ${estimateFileHeight(file)}px`,
+                ...(index === files.length - 1 && endRoom ? { minHeight: endRoom } : {}),
+              }}
               className="pb-3 [content-visibility:auto]"
             >
               {card(file)}
@@ -448,10 +480,39 @@ export function DiffView({
   )
 }
 
+/** Last slot's min-height, so a file jump can park even the last file under the header. Only
+ *  for consumers that jump (`viewRef`); elsewhere it would be blank space after a short diff. */
+function useEndRoom(
+  enabled: boolean,
+  rootRef: React.RefObject<HTMLElement | null>,
+  scrollElRef: React.RefObject<HTMLElement | null>,
+  scrollerEpoch: number,
+) {
+  const [room, setRoom] = useState(0)
+  useLayoutEffect(() => {
+    const root = rootRef.current
+    const scroller = scrollElRef.current
+    if (!enabled || !root || !scroller) {
+      setRoom(0)
+      return
+    }
+    const measure = () => {
+      const offset = Number.parseFloat(getComputedStyle(root).scrollMarginTop) || 0
+      setRoom(Math.max(0, Math.round(scroller.clientHeight - offset)))
+    }
+    measure()
+    if (typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(measure)
+    observer.observe(scroller)
+    return () => observer.disconnect()
+  }, [enabled, rootRef, scrollElRef, scrollerEpoch])
+  return room
+}
+
 /**
- * The file cards through virtua, on the app shell's scroller (`[data-slot="main"]`) — the one
- * scroll owner, exactly as the thread does it. No `shift`: a diff only ever changes in place,
- * so start-anchored offsets stay correct.
+ * The file cards through virtua, on the diff's scroller (`diffScroller`: the view's own column, or
+ * the app shell's `[data-slot="main"]`) — one scroll owner, exactly as the thread does it. No
+ * `shift`: a diff only ever changes in place, so start-anchored offsets stay correct.
  *
  * No measurement cache (the thread's `CacheSnapshot` trick): virtua's snapshot is only valid
  * at the item count it was taken at, and a diff's file list changes under an active run's
@@ -462,11 +523,13 @@ function VirtualFiles({
   handleRef,
   scrollElRef,
   card,
+  endRoom,
 }: {
   files: DiffFileChange[]
   handleRef: React.RefObject<VirtualizerHandle | null>
   scrollElRef: React.RefObject<HTMLElement | null>
   card: (file: DiffFileChange) => React.ReactNode
+  endRoom: number
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null)
 
@@ -503,14 +566,19 @@ function VirtualFiles({
     <div
       ref={(el) => {
         containerRef.current = el
-        if (el) scrollElRef.current = el.closest<HTMLElement>('[data-slot="main"]')
+        if (el) scrollElRef.current = diffScroller(el)
       }}
       data-slot="diff-files"
       data-virtualized="true"
     >
       <Virtualizer ref={handleRef} scrollRef={scrollElRef} startMargin={startMargin}>
-        {files.map((file) => (
-          <div key={fileKey(file)} data-slot="diff-file-slot" className="pb-3">
+        {files.map((file, index) => (
+          <div
+            key={fileKey(file)}
+            data-slot="diff-file-slot"
+            style={index === files.length - 1 && endRoom ? { minHeight: endRoom } : undefined}
+            className="pb-3"
+          >
             {card(file)}
           </div>
         ))}
@@ -540,6 +608,8 @@ function DiffFileCard({
   onExpand,
   mode,
   wrap,
+  preview,
+  loadFileText,
   canExpand,
   imageSrc,
   onOpenInApp,
@@ -551,6 +621,9 @@ function DiffFileCard({
   onExpand: (gap: ContextGap) => void
   mode: 'unified' | 'split'
   wrap: boolean
+  /** Render this (Markdown) file as a document — already narrowed by `canPreviewMarkdown`. */
+  preview: boolean
+  loadFileText?: (path: string) => Promise<string | null>
   canExpand: boolean
   imageSrc?: (path: string) => string
   onOpenInApp?: (path: string) => void
@@ -566,8 +639,17 @@ function DiffFileCard({
       {/* Sticky within the consumer's scroll container — the reader always knows which file.
           The offset is a consumer-set CSS var so the file header parks BELOW a sticky page
           header (Git / run header) rather than colliding with it; `z-10` keeps it beneath the
-          page header's higher layer. Defaults to 0 for consumers without a sticky header. */}
-      <header className="sticky top-[var(--diff-sticky-top,0px)] z-10 rounded-t-md border-b border-border/50 bg-card">
+          page header's higher layer. Defaults to 0 for consumers without a sticky header.
+          Fully opaque, because rows scroll UNDER it once it is stuck: no rounding of its own (the
+          card's `overflow-clip` already rounds it where it sits at the card's top, and once stuck
+          mid-card its own rounded corners were see-through), and its divider is the half-tone
+          border pre-mixed onto the card colour rather than a 50%-alpha line text shows through.
+          The 1px card-coloured shadow above it closes a sub-pixel seam: when the scroller's top
+          edge sits on a fractional pixel, WKWebView (the desktop app) snaps the scroller's clip and
+          the stuck header to different device pixels, and one row of scrolling text showed above
+          the header. Flush, the shadow lies outside the scroller and is clipped away; at the card's
+          top, the card's `overflow-clip` hides it. */}
+      <header className="sticky top-[var(--diff-sticky-top,0px)] z-10 border-b border-[color-mix(in_oklab,var(--border)_50%,var(--card))] bg-card shadow-[0_-1px_0_var(--card)]">
         <button
           type="button"
           data-slot="diff-file-header"
@@ -603,13 +685,20 @@ function DiffFileCard({
               binary
             </span>
           ) : null}
+          {preview ? (
+            <span className="shrink-0 rounded-sm bg-muted px-1.5 py-px text-[10px] font-medium text-muted-foreground">
+              preview
+            </span>
+          ) : null}
           <span className="ml-auto flex shrink-0 items-center gap-2">
             <CommentCount count={commentCount} />
             <DiffStatLabel stat={{ adds: file.adds, dels: file.dels, files: 1 }} className="text-[11px]" />
           </span>
         </button>
       </header>
-      {open ? (
+      {open && preview ? (
+        <MarkdownPreview file={file} loadFileText={loadFileText} imageSrc={imageSrc} />
+      ) : open ? (
         <DiffFileBody
           file={file}
           expanded={expanded}

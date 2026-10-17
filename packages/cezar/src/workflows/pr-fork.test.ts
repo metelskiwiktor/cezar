@@ -143,7 +143,8 @@ it('recovers the durable pre-worktree crash snapshot without repinning an advanc
   expect(record.prForkBase).toEqual({ sha, targetBranch: 'main', remoteUrl: remote });
   expect(record.baseBranch).toBe(sha);
   expect(JSON.parse(readFileSync(join(record.worktreePath!, 'ran.txt'), 'utf8'))).toEqual({ sha, target: 'main' });
-  expect(git(record.worktreePath!, 'rev-parse', 'HEAD~1')).toBe(sha);
+  // v0.15 keeps check output (ran.txt) out of autosave commits — the branch stays at its fork point.
+  expect(git(record.worktreePath!, 'rev-parse', 'HEAD')).toBe(sha);
   expect(git(record.worktreePath!, 'ls-tree', '--name-only', 'HEAD')).not.toMatch(/local-only|advanced/);
   expect(await validatePrFork(record.worktreePath!, record.branch!, record.prForkBase!)).toBe(advanced);
   expect(record.prForkBase?.sha).toBe(sha);
@@ -242,7 +243,8 @@ it('a controlled child PR graph keeps the committed parent branch as an explicit
     dispatch: { rootRunId: 'parent', parentRunId: 'parent' } }).id;
   const record = await settle(store, id);
   expect(record.prForkBase).toBeUndefined(); expect(record.baseBranch).toBe('cez/parent');
-  expect(git(record.worktreePath!, 'rev-parse', 'HEAD~1')).toBe(sha);
+  // v0.15 keeps check output (ran.txt) out of autosave commits — the branch stays at its fork point.
+  expect(git(record.worktreePath!, 'rev-parse', 'HEAD')).toBe(sha);
 });
 
 it('Continue after reopening the store keeps the pinned SHA and branch even if origin changed', async () => {
