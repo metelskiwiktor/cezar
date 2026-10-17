@@ -72,6 +72,7 @@ switch (mode) {
     if (!process.env.FAKE_AGY_SKIP_ERROR) read(process.env.FAKE_AGY_MISSING_PATH ?? 'src/models/index.ts', process.env.FAKE_AGY_ERROR ?? 'GetFileAttributesEx: The system cannot find the path specified.');
     for (let n = 0; n < Number(process.env.FAKE_AGY_EXTRA_MISSES ?? 0); n++) read(`docs/optional${n}/README.md`, 'ENOENT: no such file or directory');
     if (process.env.FAKE_AGY_OMIT !== 'correction') read('src/models.ts');
+    for (let n = 0; n < Number(process.env.FAKE_AGY_EXTRA_READS ?? 0); n++) read('src/models.ts');
     if (process.env.FAKE_AGY_OMIT !== 'agents') read('AGENTS.md');
     if (process.env.FAKE_AGY_OMIT !== 'changed') read('tracked.txt');
     if (process.env.FAKE_AGY_OMIT !== 'diff' && !suppliedDiff) tool('run_command', { CommandLine: process.env.FAKE_AGY_DIFF });

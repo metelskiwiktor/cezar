@@ -28,7 +28,7 @@ describe('buildAgyArgs', () => {
     expect(args.filter((arg) => arg === '--add-dir')).toHaveLength(1);
     expect(args.at(-1)).not.toContain('C:\\main');
     expect(args.at(-1)).toContain('Do not load implementation skills');
-    expect(args.at(-1)).toContain('Do not read or write run handoff');
+    expect(args.at(-1)).toContain('do not read or write run handoffs');
     expect(args).not.toContain('--dangerously-skip-permissions');
   });
   it('builds stream-json print mode args with default gemini-3.8-flash-medium model', () => {

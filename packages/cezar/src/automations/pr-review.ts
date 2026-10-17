@@ -93,11 +93,11 @@ export function renderPrReviewContext(checkout: PrReviewCheckout): string {
     `Base branch: ${checkout.baseRef}; merge base: ${checkout.mergeBase}.`,
     `The PR diff is: git diff ${checkout.mergeBase} ${checkout.headSha} (if your runner supplies it as a file, read that file instead).`,
     'This is a READ-ONLY review: do not edit, create or delete files, do not commit, push, merge or comment on GitHub.',
-    'Read what the review needs — the full diff, the affected code, its callers and tests, and AGENTS.md if the checkout has one — not every file ritually. Running tests is optional: only when a result could change the verdict, through the mechanism your runner provides, and never in a way that changes tracked files.',
+    'Depth follows the size and risk of the diff: read the full diff, then the changed code your verdict depends on, its callers and tests, and AGENTS.md if the checkout has one — not every file. Tests are optional: prefer the targeted tests of the changed code, only when a result could change the verdict; a failure caused by the read-only sandbox (e.g. a blocked git push) is unverified, not a regression.',
     'Your final message is the review; cezar publishes it after the run succeeds. Format:',
     '- Findings, most severe first, each as P0, P1, P2 or P3 + repo-relative path:line + the problem and why it matters (P0 blocker/data loss/security, P1 incorrect behaviour or regression, P2 risk or missing coverage, P3 minor). Say "Findings: none" when there are none.',
-    '- The checks you ran or requested with their outcome, and checks skipped with the reason.',
-    '- Exactly one final line, plain text: Recommendation: APPROVE or Recommendation: CHANGES REQUESTED (any P0/P1 finding means CHANGES REQUESTED).',
+    '- The checks you ran or requested with their outcome, checks skipped with the reason, and what you could not verify.',
+    '- Exactly one final line, plain text: Recommendation: APPROVE, Recommendation: CHANGES REQUESTED (any P0/P1 finding) or Recommendation: COMMENT (nothing blocking, but too much unverified to approve).',
     'Cite files as plain repo-relative path:line, never Markdown file links, file:// URLs or absolute local paths.',
     `Optional inline comments on changed lines (new side of the diff): end the review with ONE fenced block tagged ${INLINE_COMMENTS_TAG} holding a JSON array, e.g.`,
     '```' + INLINE_COMMENTS_TAG,
@@ -175,7 +175,7 @@ export function prReviewMarker(number: number, headSha: string): string {
   return `<!-- cez-pr-review pr=${number} head=${headSha} -->`;
 }
 
-const RECOMMENDATION_RE = /^\s*\**\s*Recommendation\s*:?\s*\**\s*:?\s*(APPROVE|CHANGES REQUESTED)\s*\**\s*$/gim;
+const RECOMMENDATION_RE = /^\s*\**\s*Recommendation\s*:?\s*\**\s*:?\s*(APPROVE|CHANGES REQUESTED|COMMENT)\s*\**\s*$/gim;
 
 // Fail closed: without a verified checkout-relative mapping, stripping a prefix could point
 // readers at a different file. Cover file URIs, Windows drives/UNC, Unix roots and home paths.
@@ -188,21 +188,23 @@ export const PRIVATE_OR_TRAVERSAL_PATH_RE = /(?:^|[\s`"'(<\[=\/\\])\.\.[\/\\]|\.
 /**
  * Whether an agent's final text is a complete review: non-blank, more than a bare
  * acknowledgement, and carrying exactly one unambiguous `Recommendation: APPROVE` /
- * `Recommendation: CHANGES REQUESTED` line.
+ * `Recommendation: CHANGES REQUESTED` / `Recommendation: COMMENT` line.
  */
-export function checkReviewText(text: string): { ok: true; recommendation: 'APPROVE' | 'CHANGES REQUESTED' } | { ok: false; reason: string } {
+export type ReviewRecommendation = 'APPROVE' | 'CHANGES REQUESTED' | 'COMMENT';
+
+export function checkReviewText(text: string): { ok: true; recommendation: ReviewRecommendation } | { ok: false; reason: string } {
   const body = text.trim();
   if (!body) return { ok: false, reason: 'the review is empty' };
   if (STRAY_INLINE_TAG_RE.test(body)) return { ok: false, reason: `the review contains an unparsed ${INLINE_COMMENTS_TAG} block` };
   if (LOCAL_PATH_RE.test(body)) return { ok: false, reason: LOCAL_PATH_REASON };
   if (PRIVATE_OR_TRAVERSAL_PATH_RE.test(body)) return { ok: false, reason: 'the review contains an external or private run path; cite only PR checkout files' };
   const found = [...body.matchAll(RECOMMENDATION_RE)].map((m) => (m[1] as string).toUpperCase());
-  if (found.length === 0) return { ok: false, reason: 'the review has no "Recommendation: APPROVE" or "Recommendation: CHANGES REQUESTED" line' };
+  if (found.length === 0) return { ok: false, reason: 'the review has no "Recommendation: APPROVE", "Recommendation: CHANGES REQUESTED" or "Recommendation: COMMENT" line' };
   if (found.length > 1) return { ok: false, reason: `the review has ${found.length} recommendation lines (${found.join(', ')}); exactly one is required` };
   // A recommendation line alone is not a review.
   const rest = body.replace(RECOMMENDATION_RE, '').trim();
   if (rest.length < 40) return { ok: false, reason: 'the review has no findings or assessment, only a recommendation' };
-  return { ok: true, recommendation: found[0] as 'APPROVE' | 'CHANGES REQUESTED' };
+  return { ok: true, recommendation: found[0] as ReviewRecommendation };
 }
 
 /** cezar's own in-band protocol lines (`CEZ:DONE`, `CEZ:PR=25`, …) — for cezar, not the PR. */

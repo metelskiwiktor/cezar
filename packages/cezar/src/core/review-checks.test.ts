@@ -67,8 +67,10 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     } }, (e) => { if (e.type === 'note') notes.push(e.message); if (e.type === 'text') texts.push(e.text); });
     expect(result.text).toContain('Recommendation: APPROVE');
     expect(result.text).not.toContain('CEZ_REVIEW_CHECK');
-    expect(texts).toHaveLength(1);
+    // The review, then Cezar's own coverage section naming the check it ran and its real outcome.
+    expect(texts).toHaveLength(2);
     expect(texts[0]).toContain('Recommendation: APPROVE');
+    expect(texts[1]).toContain(`### Review coverage (reported by Cezar)\n- Check \`${args.join(' ')}\`: exit 0`);
     expect(notes.some((n) => n.includes('Exit: 0; duration:'))).toBe(true);
     if (kind === 'test') expect(notes.join('\n')).toContain('targeted contract passed');
   });
@@ -103,8 +105,10 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     expect(result.text).toContain('just test file tracked.txt returned exit 0');
     expect(result.text).not.toMatch(/UNCHECKED|Planning verification|CEZ_REVIEW_CHECK/);
     expect(texts.join('\n')).not.toContain('UNCHECKED');
-    // The engine sees the stopped turn end before the final review begins.
-    expect(order).toEqual(['text', 'turn-end', 'text']);
+    expect(result.text).toContain('- Check `just test file tracked.txt`: exit 0');
+    // The engine sees the stopped turn end before the final review begins; the final review
+    // and Cezar's coverage section are the same (last) turn.
+    expect(order).toEqual(['text', 'turn-end', 'text', 'text']);
   });
 
   it('does not accept a late format error when the requested check result was never read', async () => {
@@ -123,12 +127,43 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     expect(notes.filter((n) => n.includes('Exit: 0; duration:'))).toHaveLength(1);
   });
 
-  it('does not approve without reading trusted check results', async () => {
+  it('discloses an unread trusted check result beside the review instead of withholding it', async () => {
     const r = repo();
-    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
       FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECK: JSON.stringify(['git', 'log']), FAKE_AGY_OMIT: 'check-result',
-    } })).rejects.toThrow(/evidence/);
+    } });
+    expect(result.text).toContain('Recommendation: APPROVE');
+    // Cezar states the real outcome itself, so an unread result cannot be misreported.
+    expect(result.text).toContain('- Check `git log`: exit 0');
+    expect(result.text).toContain("- Not verified: 1 check result(s) were not fully read by the reviewer (outcomes below are Cezar's)");
     expect(existsSync(join(r.cwd, '.cezar-review-tmp'))).toBe(false);
+  });
+
+  it('reports test failures caused by the read-only push guard as unverified, never bypassing the guard (live run f1082729)', async () => {
+    // A repository test that pushes to a local fixture remote, like Tabnote's prScopeGuard suite.
+    const r = repo([
+      'const { execFileSync } = require("child_process"); const { mkdtempSync } = require("fs"); const { join } = require("path");',
+      'const d = mkdtempSync(join(require("os").tmpdir(), "guard-")); const w = join(d, "w"); const g = (...a) => execFileSync("git", a, { cwd: w, stdio: "pipe" });',
+      'execFileSync("git", ["init", "-q", "--bare", join(d, "remote.git")]); execFileSync("git", ["init", "-q", w]);',
+      'g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x"); g("remote", "add", "origin", join(d, "remote.git"));',
+      'try { g("push", "-q", "origin", "HEAD:refs/heads/main"); console.log("PUSHED"); } catch (e) { console.error("push failed: " + String(e.stderr)); process.exit(1); }',
+    ].join('\n'));
+    const notes: string[] = [];
+    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+      FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECK: JSON.stringify(['just', 'test']),
+      FAKE_AGY_VERDICT: 'Findings: none. The only failing test pushes to a remote, which the read-only review blocks.\nRecommendation: COMMENT',
+    } }, (e) => { if (e.type === 'note') notes.push(e.message); });
+    const check = notes.find((n) => n.startsWith('Check: just test'))!;
+    // The guard stayed on: the push really failed, naming the sandbox's push URL.
+    expect(check).toMatch(/Exit: 1;/);
+    expect(check).not.toContain('PUSHED');
+    expect(check).toMatch(/Read-only guard: \d+ output line\(s\) show a git push refused by the review sandbox \(DISABLED_READ_ONLY_REVIEW\)/);
+    expect(check).toContain('not a PR regression and not a pass');
+    expect(result.text).toMatch(/- Check `just test`: exit 1 — \d+ failure line\(s\) caused by the read-only guard \(DISABLED_READ_ONLY_REVIEW\), unverified, not counted as regressions/);
+    const publish = await publishReviewFromRun({ repoRoot: r.cwd, text: result.text, runner: 'agy',
+      target: { repo: 'metelskiwiktor/cezar', number: 7, headSha: r.head, baseRef: 'origin/main', mergeBase: r.base },
+      run: async (_bin, args) => (args.includes('.head.sha') ? r.head : '') });
+    expect(publish).toEqual({ status: 'published' });
   });
   it('cancels a running trusted check, kills its process tree and never emits done', async () => {
     const r = repo('require("fs").writeFileSync(".cezar-review-tmp/cancel-ready","ready");setInterval(()=>{},1000)');
@@ -358,14 +393,18 @@ describe('trusted check policy and source integrity', { timeout: 30_000 }, () =>
         evidence.result(id, false, '');
       };
 
-      // Case 1: AGENTS.md exists in repo (repo() creates it) -> reading it is required
+      // Case 1: AGENTS.md exists in repo (repo() creates it) -> unread, it is a disclosed gap,
+      // never a reason to withhold the review (live run f1082729); the stricter bar still wants it.
       const evWithAgents = new AgyReviewEvidence({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: head } });
       evWithAgents.deliverTrustedDiff(diff.file, diff.lines, diff.parts);
       read(evWithAgents, 'diff', diff.file);
       read(evWithAgents, 'tracked', join(r.cwd, 'tracked.txt'));
-      expect(evWithAgents.complete()).toBe(false);
-      read(evWithAgents, 'agents', join(r.cwd, 'AGENTS.md'));
       expect(evWithAgents.complete()).toBe(true);
+      expect(evWithAgents.gaps()).toEqual(['AGENTS.md was not read']);
+      expect(evWithAgents.strictComplete()).toBe(false);
+      read(evWithAgents, 'agents', join(r.cwd, 'AGENTS.md'));
+      expect(evWithAgents.gaps()).toEqual([]);
+      expect(evWithAgents.strictComplete()).toBe(true);
 
       // Case 2: Repository WITHOUT AGENTS.md (e.g. cezar-adapter)
       rmSync(join(r.cwd, 'AGENTS.md'));
@@ -384,6 +423,33 @@ describe('trusted check policy and source integrity', { timeout: 30_000 }, () =>
     } finally {
       diff.cleanup();
     }
+  });
+  it('blocks only on critical evidence: the pinned diff and a changed file, never on a failed side read', () => {
+    const r = repo();
+    const diff = prepareReviewDiff(r.cwd, r.base, r.head);
+    try {
+      let n = 0;
+      const read = (evidence: AgyReviewEvidence, path: string, error?: string) => {
+        const id = `c${++n}`;
+        evidence.call({ id, name: 'view_file', input: { AbsolutePath: path } });
+        evidence.result(id, error !== undefined, error ?? '');
+      };
+      const ev = new AgyReviewEvidence({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head } });
+      ev.deliverTrustedDiff(diff.file, diff.lines, diff.parts);
+      expect(ev.missingCritical()).toEqual(['the full pinned PR diff was not read', 'no changed file was opened']);
+      read(ev, diff.file);
+      expect(ev.missingCritical()).toEqual(['no changed file was opened']);
+      read(ev, join(r.cwd, 'tracked.txt'));
+      // 1 failed read among 29 attempts (live run f1082729: `.github/workflows/release.yml`).
+      for (let i = 0; i < 26; i++) read(ev, join(r.cwd, 'AGENTS.md'));
+      read(ev, join(r.cwd, '.github', 'workflows', 'release.yml'), 'GetFileAttributesEx: The system cannot find the file specified.');
+      expect(ev.complete()).toBe(true);
+      expect(ev.gaps()).toEqual(['1 file read(s) failed: .github/workflows/release.yml']);
+      // Not at the pinned HEAD: nothing the review says is tied to the PR.
+      const moved = new AgyReviewEvidence({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.base } });
+      expect(moved.missingCritical()).toEqual([expect.stringContaining('not at the pinned PR HEAD')]);
+      expect(moved.complete()).toBe(false);
+    } finally { diff.cleanup(); }
   });
   it('cleans only new temporary artifacts and preserves sources', async () => {
     const r = repo('const fs=require("fs"); fs.mkdirSync("coverage",{recursive:true}); fs.writeFileSync("coverage/result.txt","temporary"); console.log("passed")');

@@ -4,9 +4,19 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from '
 import type { AgentRunSpec, AgentToolCallRecord } from './agent-runner.ts';
 import type { ReviewDiffPart } from './review-checks.ts';
 
-/** Narrow recovery for the observed module/index.ts -> module.ts discovery mistake.
- * Successful tool lifecycle events are evidence even when cortex omits result text.
- * Unknown errors, missing required files and paths outside the checkout never recover.
+/** A repo-relative path or argv token safe to echo in a published review (no host paths). */
+export const safeReviewToken = (s: string): boolean => /^[\w@.+=:,/-]{1,200}$/.test(s) && !s.split('/').includes('..') && !/^[a-z]:/i.test(s);
+
+/** What a PR review must have seen, split into two tiers.
+ *
+ * CRITICAL (`complete()`, blocks publication): the checkout is at the pinned HEAD, the full
+ * pinned diff was read, and at least one changed file was opened. Without these nothing the
+ * reviewer says is tied to the PR.
+ *
+ * NON-CRITICAL (`gaps()`, published beside the review): a failed or guessed read, AGENTS.md
+ * left unread, a check result not read, a tool call without a result. Live run f1082729
+ * (Tabnote #37) failed a clean APPROVE on one of these; they are now disclosed, not fatal.
+ * Permission denials, scope violations and checkout changes stay fatal in the runner.
  */
 export class AgyReviewEvidence {
   private readonly calls = new Map<string, AgentToolCallRecord>();
@@ -26,6 +36,8 @@ export class AgyReviewEvidence {
   private readonly diffCoverage = new Set<number>();
   private readonly checkFiles = new Map<string, { lines: number; read: boolean; coverage: Set<number> }>();
   private readonly affected = new Set<string>();
+  /** Checkout files whose last read attempt failed (absolute; reported repo-relative). */
+  private readonly failedReads = new Set<string>();
 
   constructor(private readonly spec: AgentRunSpec) {
     const base = spec.prReview?.mergeBase;
@@ -169,8 +181,10 @@ export class AgyReviewEvidence {
 
       // Only a subsequent read resolves the failed attempt.
       this.recoveries.delete(path);
+      this.failedReads.delete(path);
       return false;
     }
+    this.failedReads.add(path);
     if (!/\bENOENT\b|The system cannot find (?:the path|the file) specified\.|no such file or directory/i.test(message)) return false;
     if (existsSync(path) || this.required.has(path)) return false;
     // Only a known optional checkout doc, never an arbitrary missing source,
@@ -201,24 +215,53 @@ export class AgyReviewEvidence {
     return false;
   }
 
-  complete(): boolean {
-    const cwd = this.spec.cwd;
-    if (!cwd) return false;
-    // An unresolved guessed path (`recoveries`) no longer voids the review: only the mandatory
-    // evidence below does. `recoveries` still decides the stricter late-format-error path.
-    const agentsPath = resolve(cwd, 'AGENTS.md');
-    const agentsRead = !existsSync(agentsPath) || this.reads.has(agentsPath);
-    return this.validContext && this.diffRead && this.pending.size === 0 &&
-      [...this.checkFiles.values()].every((check) => check.read || check.coverage.size >= check.lines) &&
-      (this.trustedDiff
-        ? agentsRead &&
-          (this.affected.size === 0 || [...this.affected].some((path) => this.reads.has(path)))
-        : [...this.required].every((path) => existsSync(path) && this.reads.has(path)));
+  /** Why the CRITICAL evidence is missing; empty when the review may be published. */
+  missingCritical(): string[] {
+    if (!this.validContext) return ['the checkout is not at the pinned PR HEAD, or the pinned base/diff could not be resolved'];
+    const missing: string[] = [];
+    if (!this.diffRead) missing.push('the full pinned PR diff was not read');
+    if (this.trustedDiff) {
+      if (this.affected.size > 0 && ![...this.affected].some((path) => this.reads.has(path))) missing.push('no changed file was opened');
+    } else if (![...this.required].every((path) => existsSync(path) && this.reads.has(path))) {
+      missing.push('not every changed file was read');
+    }
+    return missing;
   }
 
-  /** `complete()` plus every guessed path corrected — the late-format-error recovery's bar. */
+  complete(): boolean {
+    return !!this.spec.cwd && this.missingCritical().length === 0;
+  }
+
+  private agentsRead(): boolean {
+    const agentsPath = resolve(this.spec.cwd ?? '', 'AGENTS.md');
+    return !existsSync(agentsPath) || this.reads.has(agentsPath);
+  }
+
+  private checksRead(): boolean {
+    return [...this.checkFiles.values()].every((check) => check.read || check.coverage.size >= check.lines);
+  }
+
+  /** Non-critical evidence the review lacks, phrased for the published review (repo-relative). */
+  gaps(): string[] {
+    const cwd = this.spec.cwd;
+    if (!cwd || !this.hasContext) return [];
+    const gaps: string[] = [];
+    const failed = [...this.failedReads].map((path) => relative(cwd, path).replace(/\\/g, '/'));
+    if (failed.length) {
+      const shown = failed.filter(safeReviewToken).slice(0, 5);
+      gaps.push(`${failed.length} file read(s) failed${shown.length ? `: ${shown.join(', ')}${failed.length > shown.length ? ', …' : ''}` : ''}`);
+    }
+    if (!this.agentsRead()) gaps.push('AGENTS.md was not read');
+    const unreadChecks = [...this.checkFiles.values()].filter((check) => !(check.read || check.coverage.size >= check.lines)).length;
+    if (unreadChecks) gaps.push(`${unreadChecks} check result(s) were not fully read by the reviewer (outcomes below are Cezar's)`);
+    if (this.pending.size) gaps.push(`${this.pending.size} tool call(s) never reported a result`);
+    return gaps;
+  }
+
+  /** The late-format-error recovery's bar — the old all-evidence one: critical evidence plus
+   * every call finished, AGENTS.md and every check result read, every guessed path corrected. */
   strictComplete(): boolean {
-    return this.complete() && this.recoveries.size === 0;
+    return this.complete() && this.pending.size === 0 && this.checksRead() && this.agentsRead() && this.recoveries.size === 0;
   }
 
   get hasContext(): boolean { return this.spec.prReview !== undefined || this.spec.userPrompt.includes('The PR diff is:'); }

@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -162,7 +162,7 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(verifyWorkspaceIntegrity(join(repo, 'missing-dir'), base).clean).toBe(false);
     });
 
-    async function recoveryRun(overrides: Record<string, string> = {}, posts: string[] = []) {
+    async function recoveryRun(overrides: Record<string, string> = {}, posts: string[] = [], bodies: string[] = []) {
       const repo = makeRepo();
       if (!overrides.FAKE_AGY_NO_AGENTS_FILE) {
         writeFileSync(join(repo, 'AGENTS.md'), 'Review instructions\n');
@@ -191,12 +191,15 @@ describe('AgyCliRunner security hardening & isolation', () => {
       const publish = await publishReviewFromRun({ repoRoot: repo, text: result.text, runner: 'agy',
         target: { repo: 'metelskiwiktor/cezar', number: 99, headSha: head, baseRef: 'origin/main', mergeBase: base },
         run: async (_bin, args) => {
-          if (args.includes('POST')) posts.push(args.join(' '));
+          if (args.includes('POST')) {
+            posts.push(args.join(' '));
+            bodies.push((JSON.parse(readFileSync(args.at(-1)!, 'utf8')) as { body: string }).body);
+          }
           if (overrides.FAKE_PUBLISH_MODE === 'stale' && args.includes('.head.sha')) return 'f'.repeat(40);
           if (overrides.FAKE_PUBLISH_MODE === 'duplicate' && args.includes('--paginate')) return prReviewMarker(99, head);
           return args.includes('.head.sha') ? head : '';
         } });
-      return { ...result, publish, notes };
+      return { ...result, publish, notes, head };
     }
 
     it('recovers a guessed index path only with corrected read and complete review evidence', async () => {
@@ -278,21 +281,43 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(calls).toEqual(['view_file']);
     });
 
-    it.each(['agents', 'changed', 'trusted-diff'])('optional ENOENT never substitutes for mandatory %s evidence', async (missing) => {
+    it.each<[string, RegExp]>([
+      ['changed', /Review evidence is incomplete: no changed file was opened\. Nothing is published/],
+      ['trusted-diff', /Review evidence is incomplete: the full pinned PR diff was not read\. Nothing is published/],
+    ])('optional ENOENT never substitutes for critical %s evidence', async (missing, error) => {
       const posts: string[] = [];
-      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: 'docs/README.md', FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/evidence/);
+      await expect(recoveryRun({ FAKE_AGY_MISSING_PATH: 'docs/README.md', FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(error);
       expect(posts).toEqual([]);
     });
 
-    it.each(['agents', 'changed'])('fails closed when recovery lacks %s evidence', async (missing) => {
+    it('requires a changed file to be opened even without any inspection error', async () => {
       const posts: string[] = [];
-      await expect(recoveryRun({ FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/inspection|evidence/);
+      await expect(recoveryRun({ FAKE_AGY_SKIP_ERROR: '1', FAKE_AGY_OMIT: 'changed' }, posts)).rejects.toThrow(/evidence/);
       expect(posts).toEqual([]);
     });
 
-    it.each(['agents', 'changed'])('requires %s evidence even without any inspection error', async (missing) => {
+    // Live run f1082729 (Tabnote #37): 28 good reads, one failed read of a file outside the PR,
+    // AGENTS.md never opened, and a clean APPROVE failed the whole run. Now it publishes once,
+    // at the pinned HEAD, with the gaps disclosed by Cezar.
+    it('publishes once with one failed read in 29 and AGENTS.md unread, disclosing both (live run f1082729)', async () => {
       const posts: string[] = [];
-      await expect(recoveryRun({ FAKE_AGY_SKIP_ERROR: '1', FAKE_AGY_OMIT: missing }, posts)).rejects.toThrow(/evidence/);
+      const bodies: string[] = [];
+      const run = await recoveryRun({ FAKE_AGY_MISSING_PATH: '.github/workflows/release.yml', FAKE_AGY_OMIT: 'agents', FAKE_AGY_EXTRA_READS: '25' }, posts, bodies);
+      expect(run.toolCalls.filter((c) => c.name === 'view_file')).toHaveLength(29);
+      expect(run.publish).toEqual({ status: 'published' });
+      expect(posts).toHaveLength(1);
+      expect(posts[0]).toContain('repos/metelskiwiktor/cezar/issues/99/comments');
+      const body = bodies[0]!;
+      expect(body).toContain('Recommendation: APPROVE');
+      expect(body).toContain('- Not verified: 1 file read(s) failed: .github/workflows/release.yml');
+      expect(body).toContain('- Not verified: AGENTS.md was not read');
+      expect(body).toContain(prReviewMarker(99, run.head));
+      expect(run.notes).toEqual(expect.arrayContaining([expect.stringContaining('non-critical gaps')]));
+    });
+
+    it('a second publication of the same pinned HEAD is skipped, never posted twice', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_OMIT: 'agents', FAKE_PUBLISH_MODE: 'duplicate' }, posts)).resolves.toMatchObject({ publish: { status: 'skipped-duplicate' } });
       expect(posts).toEqual([]);
     });
 
@@ -395,10 +420,12 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(posts).toEqual([]);
     });
 
-    it('does not publish a review with an unfinished tool call', async () => {
+    it('publishes a review with an unfinished side read, disclosing it', async () => {
       const posts: string[] = [];
-      await expect(recoveryRun({ FAKE_AGY_PENDING: '1' }, posts)).rejects.toThrow(/evidence/);
-      expect(posts).toEqual([]);
+      const run = await recoveryRun({ FAKE_AGY_PENDING: '1' }, posts);
+      expect(run).toMatchObject({ publish: { status: 'published' } });
+      expect(run.text).toContain('- Not verified: 1 tool call(s) never reported a result');
+      expect(posts).toHaveLength(1);
     });
 
     it('does not accept a forged empty diff in the task prompt as review evidence', async () => {
