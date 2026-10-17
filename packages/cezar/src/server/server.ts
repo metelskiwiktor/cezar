@@ -2,7 +2,11 @@ import {
   trackerWatchInputSchema, trackerWatchParamsSchema, trackerWatchQuerySchema,
   trackerCandidatesQuerySchema, trackerListQuerySchema, trackerSearchQuerySchema, trackerItemQuerySchema, trackerReadScope,
   trackerCredentialsSchema, trackerItemParamsSchema, trackerAssociationInputSchema, type TrackerChangedEvent,
+  secretParamsSchema, secretValueInputSchema, type SecretsList, type SecretValueInput,
+  e2eSetupInputSchema, type E2eStatus,
 } from '@open-mercato/cezar-contract';
+import { SecretStore, SecretsError, type SecretScopeRef } from '../workspace/secrets.ts';
+import { E2E_SETUP_TASK, e2eCredentialsAmong, e2eSetupWorkflow, latestE2eSetupRun, readE2eStatus, setupInFlight } from '../e2e-setup.ts';
 import { createTrackerService } from './tracker/index.ts';
 import { TrackerWatches } from './tracker/watch.ts';
 import { readTrackerAssociation, writeTrackerAssociation, clearTrackerAssociation } from '../tracker-association.ts';
@@ -16,7 +20,7 @@ import { ProjectAutomationScheduler, ProjectTrackerAutomationScheduler, Workspac
 import { ScheduleRunner } from '../automations/schedule-runner.ts';
 import { automationStats } from '../automations/stats.ts';
 import { automationTemplatesOf } from '../automations/templates.ts';
-import { launchAutomationRun, launchScheduledRun, launchTrackerAutomationRun, rebaselineIdleAutomations, reconcileAutomationReceipts, validateAutomationPrompt } from '../automations/task-template.ts';
+import { AutomationLaunchOutcome, launchAutomationRun, launchScheduledRun, launchTrackerAutomationRun, rebaselineIdleAutomations, reconcileAutomationReceipts, validateAutomationPrompt } from '../automations/task-template.ts';
 import {
   automationEventSchema,
   automationFiltersSchema,
@@ -37,6 +41,7 @@ import { Hono, type Context } from 'hono';
 import type { Next } from 'hono';
 import { serve, type ServerType } from '@hono/node-server';
 import { bodyLimit } from 'hono/body-limit';
+import { HTTPException } from 'hono/http-exception';
 import { streamSSE } from 'hono/streaming';
 import { jsonZodValidator, multipartZodValidator, paramZodValidator, queryZodValidator } from './validators.ts';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -53,6 +58,7 @@ import {
   type StarCountPayload,
   type WorkspaceConfigResponse,
   workspaceBrandingLogoResponseSchema,
+  githubListQuerySchema,
 } from '@open-mercato/cezar-contract';
 // A contract VALUE, like `workspaceUiStateSchema` in workspace/migrations.ts — the request
 // schema this route validates with is the same one the client compiles against.
@@ -81,6 +87,13 @@ import {
   type ProviderStatusResponse,
 } from '../core/provider-auth.ts';
 import { applyProviderEnablement } from '../core/provider-availability.ts';
+import {
+  LOGIN_WATCH_OFFSETS_MS,
+  reportInconclusiveProbe,
+  trackLoginNotOpened,
+  trackLoginOpened,
+  watchLogin,
+} from './provider-telemetry.ts';
 import { RunnerModelCatalog } from '../core/runner-model-catalog.ts';
 import { currentUsage, currentTimedUsage, onUsage } from '../core/process-usage.ts';
 import { DashboardReader } from '../workspace/dashboard.ts';
@@ -118,10 +131,12 @@ import {
   deriveRunContextEvents,
   readEventsAfterLiveCursor,
   readRunHistoryPage,
+  streamRunEvents,
   validateLiveCursor,
 } from '../runs/event-history.ts';
 import { readRunIndexFromDisk } from '../runs/run-index.ts';
 import { isV2WireEventType } from '../runs/ui-event-sink.ts';
+import { onRunDeleted, onRunEvent } from './sse-subscriptions.ts';
 import {
   countRunDraftImages,
   deleteRunDraftImage,
@@ -140,6 +155,7 @@ import {
   runHistoryQuerySchema,
   runIdParamSchema,
   setRunDraftInputSchema,
+  repoFileQuerySchema,
   type DeleteDraftResponse,
 } from '@open-mercato/cezar-contract';
 import { toPastedContent, type PastedContent, type RunManager } from '../workflows/run.ts';
@@ -154,8 +170,11 @@ import {
   createOrSwitchBranch,
   imageMimeType,
   isOsOpenableImage,
+  listRepoPaths,
   pushCurrentBranch,
+  worktreeGitStatus,
   readWorktreePath,
+  repoIndexContains,
 } from './git-changes.ts';
 import { gatedSkillsRepos, loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { findConfigFile } from '../agent-config/catalog.ts';
@@ -209,14 +228,18 @@ import {
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { mergeWriteWorkspaceUiState, readWorkspaceUiState } from '../workspace/ui-state.ts';
 import { checkoutRepo, type CloneRunner } from './checkout.ts';
+import { createProjectInputSchema } from '@open-mercato/cezar-contract';
+import { createProject, listGithubOwners, type CommandRunner } from './create-project.ts';
 import { ProjectContextError, ProjectContexts, type ProjectContext } from './project-context.ts';
 import { reviewGateEnabled } from '../runs/review-gate.ts';
 import { readUiState, uiStatePath } from '../ui-state.ts';
 import { agentHomePaths, assertCezarHomeWriteIsSandboxed, cezarHomeDir, expandTilde, isAbsolutePath } from '../paths.ts';
 import { isLoopbackHostHeader, normalizeHostname, resolveCapabilities } from './capabilities.ts';
 import { createSocketHub, type SocketHub, type WsUpgradeVerdict } from './ws.ts';
+import { applyKeepAlive } from './keep-alive.ts';
 import { browseDirectory, isInsideBrowseRoot, isLexicallyInsideBrowseRoot, resolveBrowseRoot } from './fs-browse.ts';
 import { parseRemote, resolveForge, type ForgeAvailability } from './forge/index.ts';
+import { isGithubHost } from '../github-hosts.ts';
 import { fetchGithub, fetchGithubChecks, fetchGithubComments, fetchGithubPrDiff, fetchGithubRefStatus, forgetRefStatus, readCachedRefStatuses, refNumberFromUrl, searchGithubItems, GithubPrNotFoundError, GH_CHECKS_MAX, GH_SEARCH_MAX, GH_REF_STATUS_MAX } from './github.ts';
 import { ensureLaunchKey } from './launch-key.ts';
 import { openInTerminal } from './open-in-terminal.ts';
@@ -228,12 +251,32 @@ import {
   withResolvedClaudeBin,
 } from './open-in-app.ts';
 import { createDraftPr } from './pr.ts';
+import {
+  DEFAULT_TELEMETRY_URL,
+  TELEMETRY_POLICY_VERSION,
+  deviceSid,
+  loadTelemetryConsent,
+  reportError,
+  setTelemetryConsent,
+  telemetryBlockedBy,
+  track,
+} from '../telemetry.ts';
+import {
+  setTelemetryConsentInputSchema,
+  telemetryErrorInputSchema,
+  telemetryEventInputSchema,
+  telemetryPageInputSchema,
+  type TelemetryConsentPayload,
+} from '@open-mercato/cezar-contract';
 import { ProviderRuntimeAuthObserver } from './provider-auth-runtime.ts';
 import {
   providerForActiveRun,
   providerForExistingRun,
   providersRequiredByWorkflow,
+  recordedProfileFor,
   unavailableProviderMessage,
+  withSelectedAccounts,
+  type ProviderAccountScope,
 } from './provider-action-gate.ts';
 import {
   ASSET_CACHE_CONTROL,
@@ -291,6 +334,10 @@ export interface ServerDeps {
    *  route's guards, cleanup and error surfacing are exercised for real
    *  against real temp dirs, without a network or a `gh` binary. */
   cloneRunner?: CloneRunner;
+  /** How `POST /api/projects/create` and `GET /api/projects/github-owners`
+   *  run `git`/`gh` (spec 2026-09-29-create-new-project). Defaults to real
+   *  commands (or the `CEZ_DRY_RUN=1` fake); injected by tests. */
+  projectCommandRunner?: CommandRunner;
   /** Host-wide model discovery service. Tests inject a deterministic adapter. */
   modelCatalog?: RunnerModelCatalog;
   /** Host-wide provider authentication discovery. Tests inject deterministic probes. */
@@ -306,6 +353,8 @@ export interface ServerDeps {
   providerRuntimeAuth?: ProviderRuntimeAuthObserver;
   /** Local terminal handoff for provider-owned login. */
   openTerminal?: typeof openInTerminal;
+  /** When Connect re-checks the login it opened (`LOGIN_WATCH_OFFSETS_MS`); tests pass `[]`. */
+  loginWatchOffsetsMs?: readonly number[];
   /** Hand a local FILE (or folder) to the OS default app. Injected so the account-file open route
    *  is testable without actually launching an editor. */
   openFile?: typeof openFileInDefaultApp;
@@ -316,12 +365,15 @@ export interface ServerDeps {
   /** Process-wide Open Mercato skills update detector. Injected in tests and
    * shared by every workspace route/project; createApp owns the default. */
   skillsUpdate?: SkillsUpdateService;
+  /** The project/workspace secret store (spec 2026-10-10-project-secrets-vault-options). Tests
+   *  inject one with a fake keychain; the default reads the OS keychain or a key file. */
+  secrets?: SecretStore;
   /** The cockpit's own updater (`/api/v1/workspace/self-update`, src/self-update/). Built by
    *  the CLI, which knows the entry file, the port and how to restart; absent in tests and for
    *  bare `createApp` callers, where the family answers a read-only "not available" status. */
   selfUpdate?: SelfUpdateService;
   /** cezar's own GitHub star count behind `GET /api/v1/star-count` (the cockpit's ⭐ ask).
-   *  Defaults to a reader that asks github.com at most once per six hours and caches the answer
+   *  Defaults to a reader that asks github.com at most once per ten seconds, paced to GitHub's rate limit, and caches the answer
    *  under `~/.cache/cez/`; tests inject their own so no suite ever reaches the network. */
   starCount?: { read(): Promise<StarCountPayload> };
   /** WebSocket subscription hub (`/api/v1/ws`, src/server/ws.ts). `createApp`
@@ -794,6 +846,8 @@ const uiStateSchema = z
     lastWorktree: z.boolean().optional(),
     lastAutonomous: z.boolean().optional(),
     lastGenerateFollowups: z.boolean().optional(),
+    // Default team-skill curation belongs to this repo's ui-state, never the workspace state.
+    importedSkills: z.array(z.string().min(1).max(200)).max(UI_STATE_MAX_KEYS).optional(),
     // Skill selection frequency (#408): name → times chosen, incremented on a successful run
     // start from EITHER composer (`/new`'s SourcePill and the follow-up `SkillsPicker`). Drives
     // the shared `orderSkillsByUsage` sort (web/app/src/lib/skills.ts) so both pickers float the
@@ -846,8 +900,7 @@ const uiStateSchema = z
       .optional(),
     // Skills promo banner (#391): set once the cockpit banner is dismissed, never unset.
     // Server-persisted (not a cookie) so the "shown once" promise holds across browsers.
-    // Retained for backward compatibility — the banner is gone, replaced by the workspace-level
-    // `importedSkills` curation (see `workspaceUiStateSchema`); `.passthrough()` would preserve
+    // Retained for backward compatibility — the banner is gone; `.passthrough()` would preserve
     // the key regardless, but keep it typed.
     dismissedSkillsBanner: z.boolean().optional(),
   })
@@ -859,6 +912,11 @@ const patchRunSchema = z.object({
   title: z.string().trim().min(1).max(300).optional(),
   task: z.string().trim().min(1).max(100_000).optional(),
 });
+
+// `POST /runs/:id/pr`: `draft` defaults to true — a bodyless POST still opens the draft PR every
+// caller got before the flag existed (the review gate's Draft PR); the run header's Create PR asks
+// for a ready-for-review one with `draft: false`.
+const createPrSchema = z.object({ draft: z.boolean().optional() });
 
 // Session commit (redesign R5 — §"Git/session API additions").
 const gitCommitSchema = z.object({
@@ -1224,7 +1282,8 @@ export function createApp(deps: ServerDeps) {
       cursor: { discover: () => discoverCursorModels() },
     },
   });
-  const providerAuth = deps.providerAuth ?? new ProviderAuthService({ cwd: bootRoot });
+  const providerAuth = deps.providerAuth
+    ?? new ProviderAuthService({ cwd: bootRoot, onInconclusive: (probe) => void reportInconclusiveProbe(probe) });
   const workspaceConfig = deps.workspaceConfig ?? {
     load: loadWorkspaceConfig,
     mergeWrite: mergeWriteWorkspaceConfig,
@@ -1262,8 +1321,16 @@ export function createApp(deps: ServerDeps) {
    */
   const providerActionError = async (
     required: readonly ProviderId[],
+    scope: ProviderAccountScope = {},
   ): Promise<string | null> => {
-    const known = await providerStatus();
+    // Judge the account the action runs on, not only the default login (telemetry ac53a6ef).
+    const judged = async (refresh: boolean): Promise<ProviderStatusResponse> => {
+      const rows = await providerStatus(refresh ? { refresh: true } : undefined);
+      return providerAuthChecksDisabled()
+        ? rows
+        : withSelectedAccounts(rows, required, scope, providerAuth, { refresh });
+    };
+    const known = await judged(false);
     const message = unavailableProviderMessage(required, known);
     if (message === null) return null;
     // A DISABLED provider is a settings fact, not a probe result — re-probing it learns nothing and
@@ -1271,7 +1338,7 @@ export function createApp(deps: ServerDeps) {
     const disabled = required.some((provider) =>
       known.providers.find((row) => row.provider === provider)?.enabled === false);
     if (disabled) return message;
-    return unavailableProviderMessage(required, await providerStatus({ refresh: true }));
+    return unavailableProviderMessage(required, await judged(true));
   };
   const openTerminal = deps.openTerminal ?? openInTerminal;
   const openFile = deps.openFile ?? openFileInDefaultApp;
@@ -1437,6 +1504,19 @@ export function createApp(deps: ServerDeps) {
   contexts.onContextBuilt((ctx) => providerRuntimeAuth.watch(ctx.store));
 
   const app = new Hono();
+
+  // Hono's default 500, plus an error report (a no-op until the user opted in).
+  app.onError((err, c) => {
+    if (err instanceof HTTPException) return err.getResponse();
+    console.error(err);
+    reportError(err, {
+      source: 'server',
+      'http.method': c.req.method,
+      'http.route': c.req.routePath,
+      'http.project_scoped': c.req.path.startsWith('/api/v1/p/'),
+    }, { code: 'http_handler_failed', sid: deviceSid(c.req.header('x-cezar-sid')) });
+    return c.text('Internal Server Error', 500);
+  });
 
   // Reject oversized request bodies before they reach any handler (#429). GETs
   // and SSE carry no body, so this only ever gates the mutating routes.
@@ -1942,6 +2022,28 @@ export function createApp(deps: ServerDeps) {
   };
 
   // ---- chained family: agent providers (workspace-level) ----
+  // One watch per account: a second Connect restarts its schedule instead of doubling it.
+  const loginWatches = new Map<string, () => void>();
+  const watchOpenedLogin = (provider: ProviderId, profile: { id: string; isDefault: boolean; path: string | null }, sid?: string) => {
+    const key = `${provider}\u0000${profile.id}`;
+    loginWatches.get(key)?.();
+    const check = async (): Promise<boolean> => {
+      if (profile.isDefault) {
+        const row = (await providerStatus({ refresh: true })).providers.find((candidate) => candidate.provider === provider);
+        // The cockpit does not poll provider status, so the card learns about the login here.
+        if (row?.status === 'connected') workspaceEvents.emit('provider-status', row);
+        return row?.status === 'connected';
+      }
+      providerAuth.forgetProfileStatus(provider, profile.id);
+      return (await providerAuth.profileStatus(provider, { id: profile.id, configDir: profile.path })).status === 'connected';
+    };
+    const cancel = watchLogin(check, () => {
+      loginWatches.delete(key);
+      track('provider_connected', { label: provider }, { sid });
+    }, deps.loginWatchOffsetsMs ?? LOGIN_WATCH_OFFSETS_MS);
+    loginWatches.set(key, cancel);
+  };
+
   const providersRoutes = new Hono<ProjectApiEnv>()
     .get(
       '/providers/status',
@@ -1999,6 +2101,7 @@ export function createApp(deps: ServerDeps) {
 
     .post('/providers/connect', jsonZodValidator(providerConnectSchema, { message: 'provider must be claude, codex, opencode, cursor, pi, or copilot' }), async (c) => {
       const body = { data: c.req.valid('json') };
+      const sid = deviceSid(c.req.header('x-cezar-sid'));
 
       const provider = body.data.provider as ProviderId;
       // A NAMED account is refused in hosted mode before anything is resolved, exactly like every
@@ -2024,6 +2127,7 @@ export function createApp(deps: ServerDeps) {
       // safe degradation. Running the bare command would sign the user into a DIFFERENT account
       // than the one they clicked, and nothing in the terminal would say so.
       if (command === null) {
+        trackLoginNotOpened(provider, 'invalid_folder', sid);
         return c.json({ error: `This account's folder cannot be used in a terminal command: ${profile.configDir}` }, 409);
       }
       // BOTH branches must mean "is this account signed in NOW". The default branch refreshes; the
@@ -2043,15 +2147,18 @@ export function createApp(deps: ServerDeps) {
       }
 
       if (row.status === 'connected') {
+        trackLoginNotOpened(provider, 'already_connected', sid);
         return c.json({ opened: false, connected: true, command });
       }
       if (row.status === 'not-installed') {
+        trackLoginNotOpened(provider, 'not_installed', sid);
         return c.json({ error: row.hint ?? providerAuth.installHint(provider), command }, 409);
       }
-      if (row.status === 'unknown') {
-        return c.json({ error: row.hint ?? 'Authentication could not be verified. Try again.', command }, 409);
-      }
+      // `unknown` (inconclusive output, timeout, unexpected exit) falls through to the login like
+      // `disconnected`: the CLI is installed, and its own login is the one surface that can say
+      // what is wrong. Refusing here left Connect a dead end that "Try again" re-probed into.
       if (!capabilities().localHandoff) {
+        trackLoginNotOpened(provider, 'hosted', sid);
         return c.json({ error: 'Run this command on the machine hosting cezar.', command }, 409);
       }
       let opened = false;
@@ -2064,8 +2171,11 @@ export function createApp(deps: ServerDeps) {
         // Terminal handoff is best-effort; the exact command remains the safe fallback.
       }
       if (!opened) {
+        trackLoginNotOpened(provider, 'no_terminal', sid);
         return c.json({ error: 'No terminal emulator could be opened. Run this command manually.', command }, 409);
       }
+      trackLoginOpened(provider, row.status === 'unknown' ? 'unknown' : 'disconnected', sid);
+      watchOpenedLogin(provider, { id: profile.id, isDefault: profile.isDefault, path: profile.isDefault ? null : profile.path }, sid);
       return c.json({ opened: true, command });
     });
 
@@ -2627,6 +2737,8 @@ export function createApp(deps: ServerDeps) {
       const parsed = { data: c.req.valid('json') };
       const registered = await registerFolder(parsed.data.root, 'local');
       if (registered.status !== 200) return c.json(registered.body, registered.status);
+      // Only a genuinely new project: a re-add answers 409 above and is not an event.
+      track('project_added', { label: 'local' }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
       return c.json(registered.body, 200);
     })
 
@@ -2816,6 +2928,53 @@ export function createApp(deps: ServerDeps) {
         const error = 'error' in body && body.error ? body.error : 'could not register the checkout';
         return c.json({ error: `${error} (the clone is at ${result.target})` }, registered.status);
       }
+      // The checkout dialog only clones GitHub repositories (`checkoutSchema`).
+      track('project_added', { label: 'github' }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
+      return c.json(registered.body, 200);
+    })
+
+    // ---- new project (spec 2026-09-29-create-new-project) ------------------
+    // "Add project → New project": a fresh git repo at `<projectsDir>/<name>`,
+    // optionally backed by a new PRIVATE GitHub repository (never public — the
+    // body has no visibility field to set), optionally generated from a
+    // template. Same progress stream, same `registerFolder` commit, same
+    // `{ error, reason }` degradation as the clone route above.
+    .get('/projects/github-owners', async (c) => c.json(await listGithubOwners(deps.projectCommandRunner)))
+
+    .post('/projects/create', jsonZodValidator(() => createProjectInputSchema, { message: 'project name must be a valid GitHub repository name — letters, digits, ".", "-" and "_" only, no spaces' }), async (c) => {
+      if (capabilities().singleProject) {
+        return c.json(singleProjectRefusal('adding projects'), 409);
+      }
+      const { name, github, checkoutId } = c.req.valid('json');
+      const result = await createProject({
+        name,
+        github,
+        checkoutId,
+        projectsDir: expandTilde(await workspaceProjectsDir()),
+        onProgress: (event) => workspaceEvents.emit('checkout-progress', event),
+        signal: c.req.raw.signal,
+        ...(deps.projectCommandRunner ? { run: deps.projectCommandRunner } : {}),
+      });
+      const sid = deviceSid(c.req.header('x-cezar-sid'));
+      if (!result.ok) {
+        // The stage, never the error text: that can carry paths and repository names.
+        track('project_create_failed', { label: result.stage }, { sid });
+        return c.json(
+          'reason' in result ? { error: result.error, reason: result.reason } : { error: result.error },
+          result.status,
+        );
+      }
+      // GitHub-backed projects register as `checkout` (they have an origin the
+      // clone flow would also produce); a local-only repo is `local`.
+      const registered = await registerFolder(result.target, result.slug ? 'checkout' : 'local');
+      if (registered.status !== 200) {
+        const { body } = registered;
+        const error = 'error' in body && body.error ? body.error : 'could not register the new project';
+        track('project_create_failed', { label: 'register' }, { sid });
+        return c.json({ error: `${error} (the project is at ${result.target})` }, registered.status);
+      }
+      // `new_local` / `new_github` / `new_template`, beside the folder and clone flows' labels.
+      track('project_added', { label: `new_${result.kind}` }, { sid });
       return c.json(registered.body, 200);
     });
 
@@ -3171,8 +3330,13 @@ export function createApp(deps: ServerDeps) {
     // the local cockpit gets them pushed over the `host` topic, but a remote one opens no
     // WebSocket, so this is its snapshot + reconcile target. Same staleness-ruled sampler read as
     // the topic — never a second compute path — and `cpuPct` is absent until a bounded delta
-    // window exists (the card renders `sampling…` and follows up once ~2.5 s later).
-    .get('/workspace/host-usage', async (c) => c.json(hostSampler.sampleHostUsage()))
+    // window exists (the card renders `sampling…` and follows up once ~2.5 s later). The read
+    // keeps the sampler warm, so a cockpit polling this route gets a fresh delta each time.
+    .get('/workspace/host-usage', async (c) => {
+      const usage = hostSampler.sampleHostUsage();
+      hostSampler.keepWarm();
+      return c.json(usage);
+    })
 
     .put('/workspace/config', jsonZodValidator(() => setWorkspaceConfigInputSchema), async (c) => {
       const parsed = { data: c.req.valid('json') };
@@ -3367,26 +3531,16 @@ export function createApp(deps: ServerDeps) {
       return c.json(await discoverSkills(repoRoot));
     })
 
-    // The opt-in catalog for the "Import skills" panel: every skill a default
-    // (vendor) repo offers — `open-mercato/skills` — regardless of import state,
-    // so the panel can present them all with a per-skill toggle. Empty once a repo
-    // configures its own `skillsRepos` (nothing is gated then). `wait=1` lets the
-    // panel wait out a cold team-skill cache, same as `GET /skills` (spec 005).
+    // Every skill a default (vendor) repo offers — `open-mercato/skills` — regardless of
+    // enabled state, so the Skills catalog can list and preview disabled entries. Empty once a
+    // repo configures its own `skillsRepos` (nothing is gated then). `wait=1` lets the page wait
+    // out a cold team-skill cache, same as `GET /skills` (spec 005).
     .get('/skills/importable', queryZodValidator(waitQuery), async (c) => {
       const repoRoot = c.get('project').root;
       const gated = await gatedSkillsRepos(repoRoot);
       if (gated.size === 0) return c.json([]);
       if (c.req.valid('query').wait === '1') await waitForTeamSkills(repoRoot);
-      const importable = getTeamSkillsCached(repoRoot)
-        .filter((skill) => skill.team && gated.has(skill.team.repo))
-        // Spread `description` rather than writing it unconditionally: an undefined VALUE is
-        // dropped by JSON.stringify, so the key is absent on the wire, and writing it always
-        // typed the route as sending a key it does not. contract/skills.ts says `.optional()`,
-        // which is what the client actually receives.
-        .map((skill) => ({
-          name: skill.name,
-          ...(skill.description !== undefined ? { description: skill.description } : {}),
-        }));
+      const importable = getTeamSkillsCached(repoRoot).filter((skill) => skill.team && gated.has(skill.team.repo));
       return c.json(importable);
     })
 
@@ -3571,7 +3725,7 @@ export function createApp(deps: ServerDeps) {
     .post('/plan', jsonZodValidator(planSchema), async (c) => {
       const { root: repoRoot } = c.get('project');
       const parsed = { data: c.req.valid('json') };
-      const blocked = await providerActionError([(await loadConfig(repoRoot)).defaultRunner]);
+      const blocked = await providerActionError([(await loadConfig(repoRoot)).defaultRunner], { repoRoot });
       if (blocked) return c.json({ error: blocked }, 409);
       return c.json(await planChain(repoRoot, parsed.data.task));
     });
@@ -3965,12 +4119,12 @@ export function createApp(deps: ServerDeps) {
             return;
           }
           const remote = parseRemote((await getRepoInfo(project.root))?.remote ?? '');
-          if (!remote || remote.host !== 'github.com') throw new Error('No GitHub remote is configured');
+          if (!remote || !isGithubHost(remote.host)) throw new Error('No GitHub remote is configured');
           const scheduler = new ProjectAutomationScheduler({
             projectId: project.id,
             timeZone: localTimeZone(),
             store,
-            github: { owner: remote.owner, repo: remote.repo, poller: new GithubPoller() },
+            github: { owner: remote.owner, repo: remote.repo, poller: new GithubPoller({ host: remote.host }) },
             launch: parsed.data.mode === 'execute'
               ? (definition, candidate, receiptId) => launchAutomationRun({ root: project.root, manager: project.manager, store: project.store, definition, candidate, receiptId, dispatchEnabled: capabilities().dispatch })
               : undefined,
@@ -4070,7 +4224,15 @@ export function createApp(deps: ServerDeps) {
         emitAutomationChange(project, definition.id, definition.revision);
         return c.json({ receiptId: receipt.receiptId, runId: launched.runId }, 202);
       } catch (error) {
-        store.appendReceipt({ ...reserved, status: 'launch-error', error: error instanceof Error ? error.message : String(error), updatedAt: new Date().toISOString() });
+        // A `pr-head` retry whose PR has since closed (or turned out a fork) is handled, not
+        // broken: a terminal `skipped` receipt, so Retry stops being offered for it.
+        const skipped = error instanceof AutomationLaunchOutcome && error.result === 'skipped';
+        store.appendReceipt({
+          ...reserved,
+          status: skipped ? 'skipped' : 'launch-error',
+          ...(skipped ? {} : { error: (error instanceof Error ? error.message : String(error)).slice(0, 2_000) }),
+          updatedAt: new Date().toISOString(),
+        });
         return c.json({ error: error instanceof Error ? error.message : String(error) }, 409);
       } finally {
         mutation.release();
@@ -4173,14 +4335,19 @@ export function createApp(deps: ServerDeps) {
 
     // Registered before the `/:id/...` routes so "archive-finished" and "read-all"
     // never match as a run id.
-    .post('/runs/archive-finished', (c) => c.json({ archived: c.get('project').store.archiveFinished() }))
+    .post('/runs/archive-finished', (c) => {
+      const archived = c.get('project').store.archiveFinished();
+      // One event for the sweep, `value` = how many it archived (summed on the dashboard).
+      if (archived > 0) track('task_archived', { label: 'bulk', value: archived }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
+      return c.json({ archived });
+    })
 
     // The read-receipt sweep (#unread-done-items) — the mark-read twin of the archive
     // sweep above, and under the same registration-order guard.
     .post('/runs/read-all', (c) => c.json({ read: c.get('project').store.markAllRead() }))
 
     .post('/runs/:id/archive', jsonZodValidator(archiveSchema, { absent: ({}) }), async (c) => {
-      const { store } = c.get('project');
+      const { store, manager } = c.get('project');
       const id = c.req.param('id');
       // An empty/absent body archives (the common case); a malformed body degrades
       // to `{}` just as before, but a wrong-typed `archived` is now a 400 (#429).
@@ -4188,7 +4355,11 @@ export function createApp(deps: ServerDeps) {
       // `setArchived` itself — the bulk sweep must obey it too (spec
       // 2026-08-03-auto-resume-after-usage-limit).
       const parsed = { data: c.req.valid('json') };
+      const retiresQuestion = parsed.data.archived !== false && store.getRun(id)?.awaitingAnswerSince !== undefined;
       const run = store.setArchived(id, parsed.data.archived !== false);
+      if (run && retiresQuestion) manager.notifyQuestionRetired?.(id);
+      // Labelled with the task's outcome: which results get kept, which get put away.
+      if (run) track(parsed.data.archived !== false ? 'task_archived' : 'task_unarchived', { label: run.status }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
       return run ? c.json(run) : c.json({ error: 'not found' }, 404);
     })
 
@@ -4198,7 +4369,9 @@ export function createApp(deps: ServerDeps) {
     // event and no new response shape.
     .post('/runs/:id/pin', jsonZodValidator(pinSchema, { absent: ({}) }), (c) => {
       const { store } = c.get('project');
-      const run = store.setPinned(c.req.param('id'), c.req.valid('json').pinned !== false);
+      const pinned = c.req.valid('json').pinned !== false;
+      const run = store.setPinned(c.req.param('id'), pinned);
+      if (run) track(pinned ? 'task_pinned' : 'task_unpinned', { label: run.status }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
       return run ? c.json(run) : c.json({ error: 'not found' }, 404);
     })
 
@@ -4250,7 +4423,10 @@ export function createApp(deps: ServerDeps) {
         if (!workflow) return c.json({ error: `unknown workflow: ${parsed.data.workflow}` }, 404);
       }
       const fallback = parsed.data.runner ?? (await loadConfig(repoRoot)).defaultRunner;
-      const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback));
+      const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), {
+        repoRoot,
+        profileFor: (provider) => (provider === fallback ? parsed.data.agentProfile : undefined),
+      });
       if (blocked) return c.json({ error: blocked }, 409);
       // A composer override names an account the user just picked, so a stale id (deleted since
       // the page loaded) is answered honestly instead of quietly running on the default — the
@@ -4294,6 +4470,7 @@ export function createApp(deps: ServerDeps) {
         // CEZ_TODOS_FILE alike (RunManager.agentEnv).
         generateFollowups: capabilities().followups ? parsed.data.generateFollowups : false,
         ...(parsed.data.dispatch && capabilities().dispatch ? { dispatchIntent: parsed.data.dispatch } : {}),
+        deviceSid: deviceSid(c.req.header('x-cezar-sid')),
       };
       if (variants > 1) {
         const runs = manager.startVariants(workflow, input, variants);
@@ -4394,7 +4571,7 @@ export function createApp(deps: ServerDeps) {
     // Live-session participation (spec 002): deliver a user message (text +
     // pasted screenshots) into the run's open claude session.
     .post('/runs/:id/messages', jsonZodValidator(messageSchema), async (c) => {
-      const { store, manager } = c.get('project');
+      const { root: repoRoot, store, manager } = c.get('project');
       const id = c.req.param('id');
       const run = store.getRun(id);
       if (!run) return c.json({ error: 'not found' }, 404);
@@ -4405,7 +4582,10 @@ export function createApp(deps: ServerDeps) {
       // disconnected (provider-auth spec: disabling never blocks existing-task mutations).
       // In the dequeue race, the ladder below safely turns this into a starting-state buffer.
       if (run.status !== 'queued') {
-        const blocked = await providerActionError([providerForActiveRun(run)]);
+        const blocked = await providerActionError([providerForActiveRun(run)], {
+          repoRoot,
+          profileFor: (provider) => recordedProfileFor(run, provider),
+        });
         if (blocked) return c.json({ error: blocked }, 409);
       }
       const content: PastedContent[] = [
@@ -4530,7 +4710,12 @@ export function createApp(deps: ServerDeps) {
       if (agentModelsLocked(repoRoot) && parsed.data.model?.trim()) {
         return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       }
-      const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)]);
+      const blocked = await providerActionError([providerForExistingRun(run, parsed.data.runner)], {
+        repoRoot,
+        // A runner switch drops the run's account (`continueRun`), so only the same runner inherits it.
+        profileFor: (provider) => parsed.data.agentProfile
+          ?? (provider === (run.runner ?? 'claude') ? recordedProfileFor(run, provider) : undefined),
+      });
       if (blocked) return c.json({ error: blocked }, 409);
       // The follow-up pill names an account the user just picked, so an id that has been deleted
       // since the thread loaded is answered honestly — the same asymmetry `POST /runs` keeps: a
@@ -4573,7 +4758,11 @@ export function createApp(deps: ServerDeps) {
       const sessionStep = [...run.steps].reverse().find((s) => s.sessionId);
       const sessionId = sessionStep?.sessionId;
       if (!sessionId) return c.json({ error: 'no agent session to resume' }, 409);
-      const blocked = await providerActionError([providerForExistingRun(run)]);
+      // Gate the account `handoffEnv` launches on below: the session's own, default when it recorded none.
+      const blocked = await providerActionError([providerForExistingRun(run)], {
+        repoRoot,
+        profileFor: () => sessionStep?.profileId ?? DEFAULT_AGENT_ACCOUNT_ID,
+      });
       if (blocked) return c.json({ error: blocked }, 409);
       const cwd = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
       const command = resumeCommand(run.runner, sessionId);
@@ -4592,6 +4781,7 @@ export function createApp(deps: ServerDeps) {
       if (!opened) {
         return c.json({ error: 'no terminal emulator found', command: fallback }, 409);
       }
+      track('open_in', { label: 'resume_in_terminal' }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
       return c.json({ opened: true, command });
     })
 
@@ -4613,6 +4803,9 @@ export function createApp(deps: ServerDeps) {
       // injection guard, this just validates the shape.
       const parsedBody = { data: c.req.valid('json') };
       const { target, path: relPath } = parsedBody.data;
+      // Telemetry counts an `open_in` only once it opened: `target` is free client text until
+      // `openApp`/`agentCliRunner` matched it, and labels must stay a closed set.
+      const trackOpened = (label: string) => track('open_in', { label }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
       const dir = run.worktreePath && existsSync(run.worktreePath) ? run.worktreePath : repoRoot;
 
       // Diff pane "open in OS default app" (#365): one worktree file, opened with the platform's
@@ -4658,6 +4851,7 @@ export function createApp(deps: ServerDeps) {
         const filePath = join(run.worktreePath, result.path);
         const opened = await openFile(filePath);
         if (!opened) return c.json({ error: `could not open ${result.path}`, path: filePath }, 409);
+        trackOpened('default');
         return c.json({ opened: true, path: filePath });
       }
 
@@ -4675,14 +4869,18 @@ export function createApp(deps: ServerDeps) {
       // and what the client's cliTargetResumes now labels. Resume-after-finish is untouched.
       const cliRunner = agentCliRunner(target);
       if (cliRunner) {
-        const blocked = await providerActionError([cliRunner]);
-        if (blocked) return c.json({ error: blocked }, 409);
         const engineOwnsSession = run.status === 'running' || run.status === 'queued' || run.status === 'waiting';
         const sessionStep = engineOwnsSession ? undefined : [...run.steps].reverse().find((s) => s.sessionId);
         const sessionId = sessionStep?.sessionId;
         // An id resumeCommand refuses (#431) degrades to a fresh CLI in the worktree,
         // exactly like a run that never recorded a session.
         const resume = sessionId && cliRunner === (run.runner ?? 'claude') ? resumeCommand(cliRunner, sessionId) : null;
+        // Gate the account the terminal opens on below: the session's for a resume, the project's otherwise.
+        const blocked = await providerActionError([cliRunner], {
+          repoRoot,
+          profileFor: () => (resume ? sessionStep?.profileId ?? DEFAULT_AGENT_ACCOUNT_ID : undefined),
+        });
+        if (blocked) return c.json({ error: blocked }, 409);
         // The terminal this opens does not share our PATH (see `withResolvedClaudeBin`), so a
         // claude found off PATH by detection has to be named by absolute path here too —
         // otherwise the menu offers a handoff that opens on `command not found`.
@@ -4703,11 +4901,13 @@ export function createApp(deps: ServerDeps) {
         if (!opened) {
           return c.json({ error: 'no terminal emulator found', command: fallback }, 409);
         }
+        trackOpened(`cli:${cliRunner}`);
         return c.json({ opened: true, path: dir, command });
       }
 
       const opened = await openApp(target, dir);
       if (!opened) return c.json({ error: `could not open ${target}`, path: dir }, 409);
+      trackOpened(target);
       return c.json({ opened: true, path: dir });
     })
 
@@ -4906,17 +5106,40 @@ export function createApp(deps: ServerDeps) {
       });
     })
 
+    // What the worktree holds that has not left it, and what its base has that it lacks — drives
+    // the header's one git button (Commit and push, Push, Update branch). Read-only.
+    .get('/runs/:id/git/status', async (c) => {
+      const { store } = c.get('project');
+      const run = store.getRun(c.req.param('id'));
+      if (!run) return c.json({ error: 'not found' }, 404);
+      const worktree = worktreeOf(run);
+      if (!worktree) return c.json({ error: NO_WORKTREE }, 409);
+      const result = await worktreeGitStatus(worktree, run.baseBranch);
+      if (!result.ok) return c.json({ error: result.error }, 409);
+      return c.json({ uncommitted: result.uncommitted, unpushed: result.unpushed, behind: result.behind });
+    })
+
     // Draft PR from the review gate (spec 009): final autosave → push →
     // `gh pr create --draft`; on success the run completes as done with the PR
     // badge. Failures come back as 409 with a `manual` merge command the GUI
     // shows next to the toast. CEZ_DRY_RUN=1 fakes the URL (no push, no gh).
-    .post('/runs/:id/pr', async (c) => {
+    .post('/runs/:id/pr', jsonZodValidator(createPrSchema, { absent: ({}) }), async (c) => {
       const { root: repoRoot, dataDir, store, manager } = c.get('project');
+      const draft = c.req.valid('json').draft ?? true;
       const id = c.req.param('id');
       const run = store.getRun(id);
       if (!run) return c.json({ error: 'not found' }, 404);
       if (run.readOnly) return c.json({ error: 'read-only runs cannot open a pull request' }, 409);
       if (manager.isActive(id)) return c.json({ error: 'run is still active — wait for the review gate' }, 409);
+      // A pull-request head run's branch holds the whole foreign PR under this run's changes: a
+      // draft PR from it into the default base would re-propose that PR (spec
+      // 2026-10-06-agentic-e2e-checks Phase 3). Refused until publishing back is designed.
+      if (run.prHead) {
+        return c.json(
+          { error: `this run verified pull request #${run.prHead.number}; publishing its changes is not supported yet` },
+          409,
+        );
+      }
       if (!run.worktreePath || !existsSync(run.worktreePath) || !run.branch) {
         return c.json(
           {
@@ -4929,6 +5152,7 @@ export function createApp(deps: ServerDeps) {
         repoRoot,
         run,
         handoffText: readHandoff(dataDir, id),
+        draft,
       });
       if (!outcome.ok) {
         return c.json({ error: outcome.error, manual: `git merge ${run.branch}` }, 409);
@@ -4945,7 +5169,7 @@ export function createApp(deps: ServerDeps) {
       });
       store.appendEvent(id, {
         type: 'note',
-        message: `draft PR created: ${outcome.url}${outcome.dryRun ? ' (dry run — no real PR)' : ''}`,
+        message: `${draft ? 'draft PR' : 'PR'} created: ${outcome.url}${outcome.dryRun ? ' (dry run — no real PR)' : ''}`,
       });
       return c.json({ url: outcome.url, dryRun: outcome.dryRun }, 201);
     })
@@ -4960,6 +5184,7 @@ export function createApp(deps: ServerDeps) {
       if (manager.isActive(id)) return c.json({ error: 'run is active — cancel it first' }, 409);
       if (run.worktreePath) await removeWorktree(repoRoot, run.worktreePath, run.branch);
       store.updateRun(id, { worktreePath: undefined, branch: undefined });
+      if (run.prHead) await manager.sweepPrHeadRefs();
       return c.json({ removed: true });
     })
 
@@ -4971,7 +5196,12 @@ export function createApp(deps: ServerDeps) {
       if (!run) return c.json({ error: 'not found' }, 404);
       // Delete cleans up after itself: worktree + branch go with the run (spec 006).
       if (run.worktreePath) await removeWorktree(repoRoot, run.worktreePath, run.branch);
-      return store.deleteRun(id) ? c.json({ deleted: true }) : c.json({ error: 'not found' }, 404);
+      const deleted = store.deleteRun(id);
+      // The run's `refs/cezar/pr/<n>` goes with the last run that needed it (Phase 3).
+      if (deleted && run.prHead) await manager.sweepPrHeadRefs();
+      if (!deleted) return c.json({ error: 'not found' }, 404);
+      track('task_deleted', { label: run.status }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
+      return c.json({ deleted: true });
     });
 
   // ---- chained family: in-task drafts (project-scoped) ----------------------
@@ -5168,6 +5398,7 @@ export function createApp(deps: ServerDeps) {
           message: `variant ${winner.variant ?? '?'} was picked — this variant is archived, its worktree removed`,
         });
       }
+      if (losers.some((loser) => loser.prHead)) await manager.sweepPrHeadRefs();
       // Spread: `getRun` may answer undefined, and an undefined VALUE is dropped by
       // JSON.stringify — so writing the key unconditionally typed the route as sending a key it
       // does not. contract/workflows.ts says `.optional()`, which is what a client receives.
@@ -5203,6 +5434,8 @@ export function createApp(deps: ServerDeps) {
       }
       const opened = await openApp(target, root);
       if (!opened) return c.json({ error: `could not open ${target}`, path: root }, 409);
+      // After the allowlist and the open: a closed label set (see the run route above).
+      track('open_in', { label: `project:${target}` }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
       return c.json({ opened: true as const, path: root });
     });
 
@@ -5379,7 +5612,7 @@ export function createApp(deps: ServerDeps) {
         }
 
         const fallback = parsed.data?.runner ?? (await loadConfig(repoRoot)).defaultRunner;
-        const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback));
+        const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), { repoRoot });
         if (blocked) return c.json({ error: blocked }, 409);
 
         const run = manager.startRun(workflow, {
@@ -5434,27 +5667,27 @@ export function createApp(deps: ServerDeps) {
             event: isV2WireEventType(event.type) ? 'ui-event' : 'run-event',
             data: JSON.stringify(event),
           });
-        const onEvent = (payload: { runId: string; event: RunEvent }) => {
-          if (payload.runId !== id) return;
-          if (replaying) buffered.push(payload.event);
-          else void writeEvent(payload.event);
+        const onEvent = (event: RunEvent) => {
+          if (replaying) buffered.push(event);
+          else void writeEvent(event);
         };
         const onRun = (run: RunRecord) => {
           if (run.id !== id) return;
           void stream.writeSSE({ event: 'run', data: JSON.stringify(run) });
         };
-        store.on('event', onEvent);
+        const offEvent = onRunEvent(store, id, onEvent);
         store.on('run', onRun);
         stream.onAbort(() => {
-          store.off('event', onEvent);
+          offEvent();
           store.off('run', onRun);
         });
 
         const replay = query.cursor
           ? await readEventsAfterLiveCursor(eventsPath, query.cursor)
-          : { events: store.readEvents(id), boundarySeq: 0 };
+          : { events: streamRunEvents(eventsPath), boundarySeq: 0 };
         maxSeq = Math.max(maxSeq, replay.boundarySeq);
-        for (const event of replay.events) {
+        for await (const event of replay.events) {
+          if (stream.aborted) break;
           if (event.seq <= maxSeq) continue;
           await writeEvent(event);
           maxSeq = event.seq;
@@ -5512,10 +5745,10 @@ export function createApp(deps: ServerDeps) {
           void stream.writeSSE({ event: 'usage', data: JSON.stringify(owned) });
         });
         store.on('run', onRun);
-        store.on('deleted', onDeleted);
+        const offDeleted = onRunDeleted(store, onDeleted);
         stream.onAbort(() => {
           store.off('run', onRun);
-          store.off('deleted', onDeleted);
+          offDeleted();
           offTodos();
           offUsage();
         });
@@ -5557,12 +5790,12 @@ export function createApp(deps: ServerDeps) {
           // watcher — and each subscription is scoped to its own dataDir (2.3).
           const offTodos = capabilities().followups ? onTodosChanged(dataDir, () => void sendTodos()) : () => undefined;
           store.on('run', onRun);
-          store.on('deleted', onDeleted);
+          const offDeleted = onRunDeleted(store, onDeleted);
           attached.set(project, {
             store,
             detach: () => {
               store.off('run', onRun);
-              store.off('deleted', onDeleted);
+              offDeleted();
               offTodos();
             },
           });
@@ -5684,6 +5917,124 @@ export function createApp(deps: ServerDeps) {
     };
     workspaceEvents.emit('tracker-changed', payload);
   };
+  // ---- chained family: project secrets ------------------------------------
+  // Spec 2026-10-10-project-secrets-vault-options. Write-only values: GET answers names and
+  // metadata and never a value, masked or not. The write gate is the one `/tracker/connection`
+  // has — the global request-origin guard (#426), no per-route capability — and the file is
+  // keyed by the same project id the run manager reads with, so the reserved boot alias of an
+  // unregistered boot project is refused rather than written somewhere nothing reads. The
+  // workspace scope has its own single-mount family below (`workspaceSecretsRoutes`), the same
+  // three handlers over the `workspace` scope.
+  const secretStore = deps.secrets ?? new SecretStore();
+  const unregisteredSecrets = { error: 'this project is not registered; project secrets need a project id' };
+  const secretsList = async (scope: SecretScopeRef): Promise<SecretsList> => {
+    const [listed, keyBackend] = await Promise.all([secretStore.list(scope), secretStore.keyBackend()]);
+    return { secrets: listed.secrets, keyBackend };
+  };
+  const putSecret = async (scope: SecretScopeRef, name: string, input: SecretValueInput) => {
+    try {
+      await secretStore.set(scope, name, input.value, input.audiences);
+    } catch (error) {
+      if (error instanceof SecretsError) return { status: 400 as const, error: error.message };
+      return { status: 409 as const, error: 'Could not save the secret. Check local storage permissions.' };
+    }
+    return null;
+  };
+  const deleteSecret = async (scope: SecretScopeRef, name: string) => {
+    let removed: boolean;
+    try {
+      removed = await secretStore.unset(scope, name);
+    } catch {
+      return { status: 409 as const, error: 'Could not remove the secret. Check local storage permissions.' };
+    }
+    return removed ? null : { status: 404 as const, error: 'no secret with that name' };
+  };
+  const secretsRoutes = new Hono<ProjectApiEnv>()
+    .get('/secrets', async (c) => {
+      const project = c.get('project');
+      return c.json(await secretsList({ kind: 'project', projectId: project.id, root: project.root }), 200);
+    })
+    .put('/secrets/:name', paramZodValidator(secretParamsSchema), jsonZodValidator(secretValueInputSchema), async (c) => {
+      const project = c.get('project');
+      if (project.id === 'default') return c.json(unregisteredSecrets, 409);
+      const failed = await putSecret({ kind: 'project', projectId: project.id, root: project.root }, c.req.valid('param').name, c.req.valid('json'));
+      if (failed) return c.json({ error: failed.error }, failed.status);
+      return c.body(null, 204);
+    })
+    .delete('/secrets/:name', paramZodValidator(secretParamsSchema), async (c) => {
+      const project = c.get('project');
+      if (project.id === 'default') return c.json(unregisteredSecrets, 409);
+      const failed = await deleteSecret({ kind: 'project', projectId: project.id, root: project.root }, c.req.valid('param').name);
+      if (failed) return c.json({ error: failed.error }, failed.status);
+      return c.body(null, 204);
+    });
+
+  // ---- chained family: one-click e2e setup ----------------------------------
+  // Spec 2026-10-10-e2e-one-click-setup. `GET /e2e` says what the project has; `POST /e2e/setup`
+  // stores the model key (when given) as a `checks` secret and starts the setup as an ordinary
+  // task — an ad-hoc workflow, never a catalog entry — whose branch the user merges.
+  const checkSecretNames = async (project: ProjectContext): Promise<string[]> => {
+    const scope = project.id === 'default' ? undefined : { projectId: project.id, root: project.root };
+    try {
+      return Object.keys((await secretStore.resolve(scope, 'checks')).values);
+    } catch {
+      return [];
+    }
+  };
+  const e2eRoutes = new Hono<ProjectApiEnv>()
+    .get('/e2e', async (c) => {
+      const project = c.get('project');
+      const status: E2eStatus = await readE2eStatus(project.root, project.store.listRuns(), await checkSecretNames(project));
+      return c.json(status, 200);
+    })
+    .post('/e2e/setup', jsonZodValidator(e2eSetupInputSchema), async (c) => {
+      const project = c.get('project');
+      const { credential } = c.req.valid('json');
+      const running = latestE2eSetupRun(project.store.listRuns());
+      if (running && setupInFlight(running)) {
+        return c.json({ error: `an e2e setup is already in progress (task ${running.id.slice(0, 8)})` }, 409);
+      }
+      if (!(await getRepoInfo(project.root))) {
+        return c.json({ error: 'e2e setup needs a git repository — it runs in its own worktree and finishes as a branch you merge' }, 409);
+      }
+      if (credential) {
+        if (project.id === 'default') return c.json(unregisteredSecrets, 409);
+        const failed = await putSecret(
+          { kind: 'project', projectId: project.id, root: project.root },
+          credential.name,
+          { value: credential.value, audiences: ['checks'] },
+        );
+        if (failed) return c.json({ error: failed.error }, 409);
+      }
+      const workflow = e2eSetupWorkflow(e2eCredentialsAmong(await checkSecretNames(project)));
+      const blocked = await providerActionError(
+        providersRequiredByWorkflow(workflow, (await loadConfig(project.root)).defaultRunner),
+        { repoRoot: project.root },
+      );
+      if (blocked) return c.json({ error: blocked }, 409);
+      // Not autonomous: an autonomous run skips the review gate (`settleSuccess`) a user may have
+      // turned on, and the setup's whole point is a branch the user reviews before it lands. Its agent step is not the last
+      // step, so it hands on to the checks without parking.
+      const run = project.manager.startRun(workflow, { task: E2E_SETUP_TASK });
+      return c.json({ runId: run.id }, 201);
+    });
+
+  // ---- chained family: workspace secrets (workspace-level) ------------------
+  // The user's own secrets, shared by every project — an LLM key for cezar's own features, a
+  // token every project's checks need. Single-mount like every workspace family.
+  const workspaceSecretsRoutes = new Hono()
+    .get('/workspace/secrets', async (c) => c.json(await secretsList({ kind: 'workspace' }), 200))
+    .put('/workspace/secrets/:name', paramZodValidator(secretParamsSchema), jsonZodValidator(secretValueInputSchema), async (c) => {
+      const failed = await putSecret({ kind: 'workspace' }, c.req.valid('param').name, c.req.valid('json'));
+      if (failed) return c.json({ error: failed.error }, failed.status);
+      return c.body(null, 204);
+    })
+    .delete('/workspace/secrets/:name', paramZodValidator(secretParamsSchema), async (c) => {
+      const failed = await deleteSecret({ kind: 'workspace' }, c.req.valid('param').name);
+      if (failed) return c.json({ error: failed.error }, failed.status);
+      return c.body(null, 204);
+    });
+
   const trackerRoutes = new Hono<ProjectApiEnv>()
     .get('/tracker/automation-options', queryZodValidator(trackerAutomationOptionsQuerySchema), async c => {
       const project = c.get('project');
@@ -5806,12 +6157,15 @@ export function createApp(deps: ServerDeps) {
       '/github',
       // `limit` stays a bare string: the handler's `Number.parseInt`/`Number.isFinite` fallback to
       // 30 already accepts `?limit=banana`, and a numeric schema would 400 it instead.
-      queryZodValidator(z.object({ limit: queryValue, refresh: queryValue })),
+      queryZodValidator(githubListQuerySchema),
       async (c) => {
         const { root: repoRoot } = c.get('project');
         const query = c.req.valid('query');
         const limit = Number.parseInt(query.limit ?? '', 10);
-        return c.json(await fetchGithub(repoRoot, query.refresh === '1', Number.isFinite(limit) ? limit : 30));
+        return c.json(await fetchGithub(repoRoot, query.refresh === '1', Number.isFinite(limit) ? limit : 50, {
+          issuesCursor: query.issuesCursor,
+          prsCursor: query.prsCursor,
+        }));
       },
     )
 
@@ -5972,7 +6326,7 @@ export function createApp(deps: ServerDeps) {
   // ---- chained family: repo / git (project-scoped) ----
   const repoRoutes = new Hono<ProjectApiEnv>()
     .get('/repo', async (c) => {
-      const { root: repoRoot } = c.get('project');
+      const { root: repoRoot, store } = c.get('project');
       const info = await getRepoInfo(repoRoot);
       if (!info)
         return c.json({
@@ -5982,10 +6336,12 @@ export function createApp(deps: ServerDeps) {
           branches: [],
           baseBranch: null,
         });
+      // Task branches are never a base: hide the named ones (no `cez/` prefix) by record.
+      const taskBranches = new Set(store.listRuns().flatMap((r) => (r.branch ? [r.branch] : [])));
       const [status, log, branches, config] = await Promise.all([
         getStatus(info.root),
         getLog(info.root),
-        getBranches(info.root),
+        getBranches(info.root, taskBranches),
         loadConfig(repoRoot),
       ]);
       return c.json({
@@ -6052,6 +6408,97 @@ export function createApp(deps: ServerDeps) {
       return c.json(result.changes);
     })
 
+    // The repository's whole path index in ONE bounded response (spec
+    // `.ai/specs/2026-10-05-repo-file-browser.md`, #1279) — the Git tab's Files sub-tab builds its
+    // tree from this and filters it client-side, which is why there is no search endpoint.
+    // `git ls-files` is the source, so `.gitignore`d build output and `node_modules` never appear,
+    // and the set it returns is the membership guard the content route below enforces.
+    .get('/repo/tree', async (c) => {
+      const { root: repoRoot } = c.get('project');
+      const info = await getRepoInfo(repoRoot);
+      // Same status AND the same words as /repo/changes: the Files tab reads this 409 as "the
+      // whole Git view has nothing to show", exactly as the Changes tab does.
+      if (!info) return c.json({ error: 'not a git repository' }, 409);
+      const result = await listRepoPaths(info.root);
+      if (!result.ok) return c.json({ error: result.error }, 409);
+      return c.json({ paths: result.paths, truncated: result.truncated });
+    })
+
+    // One repository file, for the Files sub-tab's viewer — the `/runs/:id/files` handler's shape
+    // with the run lookup replaced by `getRepoInfo`, plus ONE extra guard that the run route does
+    // not need and this one cannot do without.
+    //
+    // This serves the user's REAL checkout, not an isolated worktree. `readWorktreePath` stops
+    // traversal, `.git` and symlinks — it knows nothing about `.gitignore`, so on its own
+    // `?path=.env` would be served verbatim, and AGENTS.md § Zero config's promise that a
+    // repository `.env` is never read would be one fetch away from any cockpit client. The index
+    // membership check below is that control: only a path `git ls-files` returned is readable, so
+    // the reachable set is exactly what is committed or deliberately left untracked-and-unignored.
+    // A TRACKED `.env` stays readable, by design — it is in the index and in the remote already.
+    //
+    // The index is re-derived per request rather than cached: a cache would serve a file the user
+    // has since ignored, and `ls-files` is one bounded subprocess.
+    .get('/repo/files', queryZodValidator(repoFileQuerySchema), async (c) => {
+      const { root: repoRoot } = c.get('project');
+      const query = c.req.valid('query');
+      c.header('vary', 'Accept');
+      const wantsRaw =
+        query.raw !== undefined
+          ? query.raw === '1'
+          : negotiate(c.req.header('accept'), FILE_FORMATS) === 'image/*';
+      const info = await getRepoInfo(repoRoot);
+      if (!info) return c.json({ error: 'not a git repository' }, 409);
+      const index = await repoIndexContains(info.root, query.path);
+      if (!index.ok) return c.json({ error: index.error }, 409);
+      if (!index.indexed) {
+        // Deliberately ONE message for "ignored", "untracked and ignored" and "does not exist" —
+        // a distinct wording for the ignored case would disclose that an ignored file is present
+        // on disk, which is the very thing this guard exists to keep quiet about.
+        return c.json({ error: `path is not in the repository index: ${query.path}` }, 409);
+      }
+      const result = await readWorktreePath(info.root, query.path);
+      if (result.kind === 'invalid' || result.kind === 'missing') {
+        return c.json({ error: result.error }, 409);
+      }
+      if (result.kind === 'dir') {
+        // Reachable despite every indexed path being a file: a submodule is one `ls-files` entry
+        // that resolves to a directory. Refused in the resolver's own grammar rather than
+        // inventing a submodule view.
+        return c.json({ error: `not a regular file: ${result.path}` }, 409);
+      }
+      if (wantsRaw) {
+        const mime = imageMimeType(result.path);
+        if (mime === null || result.tooLarge) {
+          // `?raw=1` asked for bytes, so it hears why it cannot have them; a mere `Accept`
+          // preference falls through to the JSON answer. Same split as `/runs/:id/files`.
+          if (query.raw !== undefined) {
+            const error =
+              mime === null
+                ? `raw serving is limited to images: ${result.path}`
+                : `file too large to serve raw (${result.size} bytes): ${result.path}`;
+            return c.json({ error }, 409);
+          }
+        } else {
+          const bytes = await readFile(join(info.root, result.path));
+          return c.body(new Uint8Array(bytes).buffer as ArrayBuffer, 200, {
+            'content-type': mime,
+            'x-content-type-options': 'nosniff',
+            'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+          });
+        }
+      }
+      return c.json({
+        // `as const` or Hono's inference widens the literal to `string` and the consumer's
+        // discriminated narrowing collapses to `never` — the same trap `/runs/:id/files` documents.
+        type: 'file' as const,
+        path: result.path,
+        size: result.size,
+        binary: result.binary,
+        tooLarge: result.tooLarge,
+        ...(result.content !== undefined ? { content: result.content } : {}),
+      });
+    })
+
     .post('/repo/branch', jsonZodValidator(() => repoBranchSchema), async (c) => {
       const { root: repoRoot } = c.get('project');
       const info = await getRepoInfo(repoRoot);
@@ -6085,6 +6532,7 @@ export function createApp(deps: ServerDeps) {
       baseBranch: config.baseBranch ?? null,
       defaultRunner: config.defaultRunner,
       systemPrompt: config.systemPrompt ?? null,
+      branchNaming: config.branchNaming ?? null,
       // Native defaults seed each runner independently. A Cezar preset remains
       // selectable unless the operator opts into the fixed-model policy.
       // An explicit auto override (#906) answers `''` for that runner — the one
@@ -6149,6 +6597,14 @@ export function createApp(deps: ServerDeps) {
           delete raw.systemPrompt;
         } else {
           raw.systemPrompt = parsed.data.systemPrompt;
+        }
+      }
+      if (parsed.data.branchNaming !== undefined) {
+        // Same clearing rule as systemPrompt: an emptied textarea means `cez/<id8>` again.
+        if (parsed.data.branchNaming === null || parsed.data.branchNaming === '') {
+          delete raw.branchNaming;
+        } else {
+          raw.branchNaming = parsed.data.branchNaming;
         }
       }
       if (parsed.data.maxParallel !== undefined) raw.maxParallel = parsed.data.maxParallel;
@@ -6225,6 +6681,8 @@ export function createApp(deps: ServerDeps) {
     baseBranch: z.string().trim().min(1).max(200).nullable().optional(),
     defaultRunner: z.enum(RUNNER_IDS).optional(),
     systemPrompt: z.string().trim().max(20_000, 'must be at most 20000 characters').nullable().optional(),
+    // Branch naming instructions (spec 2026-10-11-branch-naming-instructions); null/'' clears.
+    branchNaming: z.string().trim().max(4_000, 'must be at most 4000 characters').nullable().optional(),
     defaultModels: z
       .object({
         claude: modelPresetSchema,
@@ -6355,6 +6813,8 @@ export function createApp(deps: ServerDeps) {
     .route('/', sseRoutes)
     .route('/', githubRoutes)
     .route('/', trackerRoutes)
+    .route('/', secretsRoutes)
+    .route('/', e2eRoutes)
     .route('/', repoRoutes)
     .route('/', configRoutes)
     .route('/', agentConfigRoutes);
@@ -6395,6 +6855,8 @@ export function createApp(deps: ServerDeps) {
 
   const runIndexEntry = (projectId: string, run: RunRecord): RunIndexEntry => {
     const usage = currentUsage(run.id);
+    const automationId =
+      run.automation?.automationId ?? run.automationTrigger?.automationId ?? run.automationTracker?.automationId;
     return {
     projectId,
     id: run.id,
@@ -6420,6 +6882,7 @@ export function createApp(deps: ServerDeps) {
           },
         }
       : {}),
+    ...(automationId !== undefined ? { automationId } : {}),
     ...(run.startedAt !== undefined ? { startedAt: run.startedAt } : {}),
     // The tracker-reference inputs, verbatim — the cockpit's `taskReference()` owns the rule
     // that picks between them (see the schema's note).
@@ -6427,10 +6890,20 @@ export function createApp(deps: ServerDeps) {
     ...(run.referencedPullRequestUrl !== undefined
       ? { referencedPullRequestUrl: run.referencedPullRequestUrl }
       : {}),
+    // #854: the PR half of the same evidence rule — a `prNumber` the auto-namer scraped off a
+    // task driving ANOTHER repository is refused by the client on the strength of these.
+    ...(run.referencedPrCandidates !== undefined
+      ? { referencedPrCandidates: run.referencedPrCandidates }
+      : {}),
     ...(run.prNumber !== undefined ? { prNumber: run.prNumber } : {}),
     ...(run.prRefs !== undefined ? { prRefs: run.prRefs } : {}),
     ...(run.issueNumber !== undefined ? { issueNumber: run.issueNumber } : {}),
     ...(run.referencedIssueUrl !== undefined ? { referencedIssueUrl: run.referencedIssueUrl } : {}),
+    // #819: evidence, not a link — the candidates are what let the client prove a bare
+    // `issueNumber` is another repository's and paint no chip rather than a 404 one.
+    ...(run.referencedIssueCandidates !== undefined
+      ? { referencedIssueCandidates: run.referencedIssueCandidates }
+      : {}),
     ...(run.markerRefs !== undefined ? { markerRefs: run.markerRefs } : {}),
     ...(run.costUsd !== undefined ? { costUsd: run.costUsd } : {}),
     ...(run.peakRssBytes !== undefined ? { peakRssBytes: run.peakRssBytes } : {}),
@@ -6552,6 +7025,80 @@ export function createApp(deps: ServerDeps) {
   });
   deps.onDispose?.(() => { offDashboardRegistry(); dashboard.dispose(); });
 
+  // The server's half of a cockpit error: is the bundle that page runs still the one being
+  // served? A page kept open across a rebuild or self-update asks for chunks that no longer
+  // exist — the stale-shell failure a WebKit "Importing a module script failed" usually is.
+  const servedBuildContext = (entry: unknown): Record<string, string | boolean> => {
+    const ctx: Record<string, string | boolean> = { 'server.version': version };
+    if (typeof entry !== 'string' || !isSafeAssetFilename(entry)) return ctx;
+    try {
+      ctx['build.entry_served'] = readFileSync(join(distDir, 'index.html'), 'utf8').includes(`/assets/${entry}`);
+      ctx['build.entry_exists'] = existsSync(join(distDir, 'assets', entry));
+    } catch {
+      ctx['build.entry_served'] = false; // no web/dist at all
+    }
+    return ctx;
+  };
+
+  // Cockpit telemetry (opt-in, docs/telemetry.md). The telemetry worker sends no CORS headers, so
+  // the browser reports through here; the relays answer 204 whether or not the user opted in, and
+  // only a closed set of page names is forwarded.
+  const telemetryConsentBody = (consent: TelemetryConsentPayload['consent']): TelemetryConsentPayload => ({
+    consent,
+    policyVersion: TELEMETRY_POLICY_VERSION,
+    blockedBy: telemetryBlockedBy(),
+    endpoint: (process.env.CEZ_TELEMETRY_URL || DEFAULT_TELEMETRY_URL).replace(/\/+$/, ''),
+  });
+  const telemetryRoutes = new Hono()
+    .get('/telemetry/consent', async (c) => c.json(telemetryConsentBody(await loadTelemetryConsent())))
+    .put(
+      '/telemetry/consent',
+      jsonZodValidator(setTelemetryConsentInputSchema, { message: 'consent must be granted or denied' }),
+      async (c) => {
+        const consent = await setTelemetryConsent(c.req.valid('json').consent);
+        return c.json(telemetryConsentBody(consent));
+      },
+    )
+    .post(
+      '/telemetry/page',
+      jsonZodValidator(telemetryPageInputSchema, { message: 'invalid route' }),
+      (c) => {
+        track('page_viewed', { label: c.req.valid('json').route }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
+        return c.body(null, 204);
+      },
+    )
+    .post(
+      '/telemetry/event',
+      jsonZodValidator(telemetryEventInputSchema, { message: 'invalid event' }),
+      (c) => {
+        const { event, label } = c.req.valid('json');
+        track(event, { label }, { sid: deviceSid(c.req.header('x-cezar-sid')) });
+        return c.body(null, 204);
+      },
+    )
+    .use('/telemetry/error', bodyLimit({ maxSize: 32 * 1024 }))
+    .post(
+      '/telemetry/error',
+      jsonZodValidator(telemetryErrorInputSchema, { message: 'invalid error report' }),
+      (c) => {
+        const body = c.req.valid('json');
+        const err = new Error(body.message);
+        err.name = body.type;
+        err.stack = body.stack;
+        reportError(
+          err,
+          {
+            ...body.context,
+            source: 'cockpit',
+            handler: body.handler,
+            ...servedBuildContext(body.context?.['build.entry']),
+          },
+          { code: body.code, fingerprint: body.fingerprint, sid: deviceSid(c.req.header('x-cezar-sid')) },
+        );
+        return c.body(null, 204);
+      },
+    );
+
   // Workspace-level families answer for the whole workspace, so they are single-mount: never a
   // project-scoped spelling, which would be a second surface to protect with no consumer.
   const workspaceV1 = new Hono()
@@ -6564,11 +7111,13 @@ export function createApp(deps: ServerDeps) {
     .route('/', selfUpdateRoutes)
     .route('/', starCountRoutes)
     .route('/', workspaceConfigRoutes)
+    .route('/', workspaceSecretsRoutes)
     .route('/', fsBrowseRoutes)
     .route('/', automationChecksRoutes)
     .route('/', runsIndexRoutes)
     .route('/', dashboardRoutes(dashboard, () => ({ tokens: capabilities().tokenUsageMetrics, cost: capabilities().costMetrics }), () => capabilities().automations))
-    .route('/', workspaceEventsRoutes);
+    .route('/', workspaceEventsRoutes)
+    .route('/', telemetryRoutes);
 
   // ---- mount ---------------------------------------------------------------
   // Scoped first, then the unscoped alias bound to the boot project. The paths are disjoint (no
@@ -6647,18 +7196,19 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
     port,
     hostname: deps.bindHost ?? '127.0.0.1',
   });
+  applyKeepAlive(server);
   const coordinator = new SkillsUpdateCoordinator(skillsUpdate, async () =>
     effectiveSkillsAutoUpdate(await loadWorkspaceConfig()));
   // Every registered project gets a handle (spec 2026-09-14): `github` only when the remote is
-  // on github.com — a project without one still fires its scheduled automations.
-  const automationProjects = new Map<string, { root: string; github?: { owner: string; repo: string } }>();
+  // on GitHub (github.com or Enterprise) — a project without one still fires its scheduled automations.
+  const automationProjects = new Map<string, { root: string; github?: { owner: string; repo: string; host: string } }>();
   // A second instance from the one the HTTP routes use (out of scope here, built inside the app
   // function) — cheap: `createTrackerService` performs no I/O at construction, only a small
   // per-connection provider cache that duplicating costs nothing correctness-wise.
   const automationTrackers = createTrackerService();
   const registerAutomationProject = async (id: string, root: string): Promise<void> => {
     const parsed = parseRemote((await getRepoInfo(root))?.remote ?? '');
-    automationProjects.set(id, { root, ...(parsed?.host === 'github.com' ? { github: { owner: parsed.owner, repo: parsed.repo } } : {}) });
+    automationProjects.set(id, { root, ...(parsed && isGithubHost(parsed.host) ? { github: { owner: parsed.owner, repo: parsed.repo, host: parsed.host } } : {}) });
   };
   const automationScheduler = new WorkspaceAutomationScheduler({
     coordinator: automationCoordinator,
@@ -6676,7 +7226,7 @@ export function startServer(deps: ServerDeps, port: number): ServerType {
         projectId,
         store,
         timeZone: localTimeZone(),
-        ...(project.github ? { github: { ...project.github, poller: new GithubPoller() } } : {}),
+        ...(project.github ? { github: { ...project.github, poller: new GithubPoller({ host: project.github.host }) } } : {}),
         // Present unconditionally (unlike `github`, precomputed above from a sync remote parse):
         // whether the project actually has a tracker connection is resolved lazily, at poll time,
         // by `getDriver()` — a project with none simply fails that call and the scheduler backs off.
