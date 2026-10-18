@@ -149,6 +149,7 @@ export function endCodexAppServer(
 
 export function waitForCodexAppServerExit(child: ChildProcessWithoutNullStreams): Promise<number | null> {
   if (child.exitCode != null) return Promise.resolve(child.exitCode);
+  if (child.signalCode != null) return Promise.resolve(null);
   return new Promise((resolve) => {
     let done = false;
     const finish = (code: number | null) => {
