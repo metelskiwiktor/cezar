@@ -29,7 +29,7 @@ import { resolveAgyBin } from './agy-bin.ts';
 import { AgyReviewEvidence, safeReviewToken } from './agy-review-evidence.ts';
 import {
   CHECK_MARKER, detectReviewCapabilities, executeReviewCheck, parseReviewCheck, prepareReviewDiff,
-  reviewCheckInstructions, reviewSourceChanges, reviewSourceFingerprint, summarizeCheckResult, type ReviewCheck,
+  reviewCheckInstructions, summarizeCheckResult, type ReviewCheck,
 } from './review-checks.ts';
 import { killAgyTree } from './kill-process-tree.ts';
 export { killAgyTree } from './kill-process-tree.ts';
@@ -78,31 +78,12 @@ export const READ_ONLY_REVIEW_PROMPT =
  * forms are generated from the check policy for the prepared checkout (`reviewCheckInstructions`). */
 export function prReviewScopePrompt(checkInstructions: string): string {
   return [
-    'You are an experienced second programmer reviewing a prepared PR checkout, READ-ONLY. Never edit sources, commit, push, merge, publish (OTA/EAS) or call gh. Your working directory is the only repository root. Do not load implementation skills or any other skill; do not read or write run handoffs, task journals or cockpit state. Repository instructions about implementation, committing and publication do not apply here.',
+    'You are an experienced second programmer reviewing a prepared PR checkout. The checkout is a scratch workspace: you may edit files locally to experiment, but never commit, push, merge, publish (OTA/EAS) or call gh. Your working directory is the only repository root. Do not load implementation skills or any other skill; do not read or write run handoffs, task journals or cockpit state. Repository instructions about implementation, committing and publication do not apply here.',
     'Cezar supplies the complete pinned PR diff as a checkout-local file (or part files): read it all with view_file. Then open the changed code the verdict depends on, and its callers and tests, with view_file, grep_search, list_dir or find_by_name — proportionate to the size and risk of the diff, not every file. Discover paths before opening them. No run_command or other terminal tool.',
     checkInstructions,
-    'Report requested checks with their outcome, and skipped ones with the reason; never present a check that did not run, or a failing one, as passing. Tests run repository code as the owner; any change to the checkout fails the review. A permission denial is fatal: stop, never retry another way. Shared node_modules are readable only through a Cezar rg check.',
+    'Report requested checks with their outcome, and skipped ones with the reason; never present a check that did not run, or a failing one, as passing. Tests run repository code as the owner and may regenerate files (README, dist, fixtures); that never fails the review. Findings must describe the ORIGINAL pinned PR diff, never your local edits; a check result obtained after local modifications is not confirmation of the original PR unless you state that it ran on unmodified code. A permission denial is fatal: stop, never retry another way. Shared node_modules are readable only through a Cezar rg check.',
     'Conclude after your analysis and every requested check result, in the review format the task specifies, without absolute local paths.',
   ].join('\n');
-}
-
-/**
- * The end-of-review integrity verdict across all review/check rounds: `undefined` when
- * the checkout is unchanged, otherwise a message naming what moved (HEAD, changed paths).
- * Names only — never file contents, hashes or environment values.
- */
-export function reviewRoundsViolation(cwd: string, baseline: string, fingerprint: string | undefined): string | undefined {
-  const integrity = verifyWorkspaceIntegrity(cwd, baseline);
-  const current = reviewSourceFingerprint(cwd);
-  if (integrity.clean && current === fingerprint) return undefined;
-  const reasons: string[] = [];
-  const head = getWorkspaceGitSnapshot(cwd)?.split('\n')[0];
-  if (head === undefined) reasons.push('git state could not be read');
-  else if (head !== baseline.split('\n')[0]) reasons.push(`HEAD moved (${baseline.split('\n')[0]!.slice(5, 17)} -> ${head.slice(5, 17)})`);
-  const paths = fingerprint === undefined ? [] : reviewSourceChanges(fingerprint, current);
-  if (paths.length) reasons.push(`changed paths: ${paths.slice(0, 20).join(', ')}${paths.length > 20 ? ` (+${paths.length - 20} more)` : ''}`);
-  if (!reasons.length) reasons.push('git status changed');
-  return `Read-only review violation: checkout changed across review/check rounds (${reasons.join('; ')}); preserve it for diagnosis`;
 }
 
 export function isReadOnlyTools(allowedTools?: string[]): boolean {
@@ -176,7 +157,7 @@ export interface BuildAgyArgsInput {
 /** CLI argv for headless print mode. */
 export function buildAgyArgs(input: BuildAgyArgsInput): string[] {
   const readOnly = input.prReview === true || input.readOnly === true || isReadOnlyTools(input.allowedTools);
-  const args = ['--output-format', 'stream-json', '--mode', input.prReview ? 'plan' : 'accept-edits'];
+  const args = ['--output-format', 'stream-json', '--mode', 'accept-edits'];
   if (input.prReview) args.push('--disable-slash-commands');
 
   const model = input.model?.trim() || DEFAULT_AGY_MODEL;
@@ -298,8 +279,6 @@ export class AgyCliRunner implements AgentRunner {
     let reviewChecks: string | undefined;
     let reviewAgents = '';
     let reviewSessionId: string | undefined;
-    let reviewBaseline: string | undefined;
-    let reviewFingerprint: string | undefined;
     /** One line per Cezar-run check, for the published coverage section. */
     const checksRun: string[] = [];
     /** Cezar's own account of the review, appended to the final review text: the checks it ran
@@ -393,9 +372,9 @@ export class AgyCliRunner implements AgentRunner {
 
       // Baseline of HEAD + every tracked/untracked change. Outside a git checkout
       // there is nothing to compare against, so the check is skipped (noted).
-      const initialSnapshot = readOnly && spec.cwd ? getWorkspaceGitSnapshot(spec.cwd) : undefined;
-      const sourceFingerprint = spec.prReview && spec.cwd ? reviewSourceFingerprint(spec.cwd) : undefined;
-      if (readOnly && initialSnapshot === undefined) {
+      // A PR-review worktree is a scratch workspace: no change detection there.
+      const initialSnapshot = readOnly && !spec.prReview && spec.cwd ? getWorkspaceGitSnapshot(spec.cwd) : undefined;
+      if (readOnly && !spec.prReview && initialSnapshot === undefined) {
         onEvent?.({ type: 'note', message: 'read-only run outside a git checkout — change detection skipped' });
       }
 
@@ -486,7 +465,7 @@ export class AgyCliRunner implements AgentRunner {
 
             // Best-effort tripwire, not a boundary: the event may arrive after the
             // tool already ran. The hard check is the workspace snapshot below.
-            if (readOnly && !resultError && MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
+            if (readOnly && !spec.prReview && !resultError && MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
               terminatedByCezar = true;
               resultError = `Read-only review violation: mutating tool "${event.tool}" is not allowed`;
               onEvent?.({ type: 'error', message: resultError });
@@ -561,7 +540,7 @@ export class AgyCliRunner implements AgentRunner {
         // that changed the checkout must never settle as a clean review.
         if (readOnly && initialSnapshot !== undefined && spec.cwd) {
           const integrity = verifyWorkspaceIntegrity(spec.cwd, initialSnapshot);
-          if (!integrity.clean || (sourceFingerprint !== undefined && sourceFingerprint !== reviewSourceFingerprint(spec.cwd))) {
+          if (!integrity.clean) {
             const msg = `Read-only review violation: the checkout changed during the run: ${integrity.details}`;
             onEvent?.({ type: 'error', message: msg });
             throw new Error(msg);
@@ -672,12 +651,9 @@ export class AgyCliRunner implements AgentRunner {
     let turnQueue: Promise<void> = Promise.resolve();
 
     const result = (async (): Promise<AgentRunResult> => {
-      let primaryFailed = false;
       try {
         if (spec.prReview) {
           if (!spec.cwd) throw new Error('PR review requires a checkout');
-          reviewBaseline = getWorkspaceGitSnapshot(spec.cwd);
-          reviewFingerprint = reviewSourceFingerprint(spec.cwd);
           reviewDiff = prepareReviewDiff(spec.cwd, spec.prReview.mergeBase, spec.prReview.headSha);
           evidence.deliverTrustedDiff(reviewDiff.file, reviewDiff.lines, reviewDiff.parts);
           reviewChecks = reviewCheckInstructions(detectReviewCapabilities(spec.cwd), spec.prReview.mergeBase, spec.prReview.headSha);
@@ -717,23 +693,10 @@ export class AgyCliRunner implements AgentRunner {
           textChunks.splice(textStart);
         } while (true);
       } catch (err) {
-        primaryFailed = true;
         throw err;
       } finally {
         if (spec.prReview || opts.autoEndAfterFirstTurn) open = false;
         reviewDiff?.cleanup();
-        if (spec.prReview && spec.cwd && reviewBaseline !== undefined) {
-          let violation: string | undefined;
-          try { violation = reviewRoundsViolation(spec.cwd, reviewBaseline, reviewFingerprint); }
-          catch (err) { violation = `Read-only review violation: the final checkout integrity check failed: ${err instanceof Error ? err.message : String(err)}`; }
-          if (violation) {
-            // The first failure (e.g. a check's own integrity violation naming the files)
-            // stays the run's error; this one is reported beside it, never instead of it.
-            // A note, not an error event: the engine keeps the FIRST error event as the run's.
-            if (primaryFailed) onEvent?.({ type: 'note', message: `Additionally: ${violation}` });
-            else throw new Error(violation);
-          }
-        }
       }
 
       // If non-interactive or auto-end, emit done and return

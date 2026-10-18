@@ -51,7 +51,7 @@ const trustedDiffReads = (tool) => {
 if (process.env.FAKE_AGY_ASSERT_PR_SCOPE) {
   const args = process.argv.slice(2);
   if (!args.includes('--disable-slash-commands') || args.includes('--sandbox') || args.includes('--dangerously-skip-permissions') ||
-      args[args.indexOf('--mode') + 1] !== 'plan' || args.filter((v) => v === '--add-dir').length !== 1 ||
+      args[args.indexOf('--mode') + 1] !== 'accept-edits' || args.filter((v) => v === '--add-dir').length !== 1 ||
       args.at(-1).includes('MAIN_IMPLEMENTATION_SKILL') || args.join(' ').length > 28000 ||
       ['CEZ_HANDOFF_FILE', 'CEZ_TODOS_FILE', 'CEZ_TREE_DIR', 'CEZ_BIN', 'GH_TOKEN', 'EXPO_TOKEN', 'EAS_TOKEN', 'EAS_ACCESS_TOKEN'].some((key) => process.env[key])) {
     process.stderr.write('PR review leaked implementation context or external roots');
