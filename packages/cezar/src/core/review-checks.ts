@@ -1,12 +1,11 @@
 /** Cezar-owned, shell-free review checks. Repository tests are trusted local code,
  * not an OS sandbox: they run as the owner and may have side effects. */
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, rmdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { killAgyTree } from './kill-process-tree.ts';
-import { getWorkspaceGitSnapshot, READ_ONLY_PUSH_URL, verifyWorkspaceIntegrity } from './read-only-sandbox.ts';
+import { READ_ONLY_PUSH_URL } from './read-only-sandbox.ts';
 import { z } from 'zod';
 
 export const CHECK_MARKER = 'CEZ_REVIEW_CHECK ';
@@ -31,7 +30,6 @@ function git(cwd: string, args: string[]): string {
 
 export function pinnedReviewDiff(cwd: string, base: string, head: string): string {
   if (![base, head].every((v) => /^[a-f0-9]{40}$/.test(v)) || git(cwd, ['rev-parse', 'HEAD']).trim() !== head) throw new Error('Invalid pinned review HEAD');
-  if (git(cwd, ['status', '--porcelain', '--untracked-files=all']).trim()) throw new Error('Review checkout is dirty; use a fresh prepared PR worktree and preserve this one for diagnosis');
   // Disable config-controlled external diff/textconv programs. Never truncate silently.
   return git(cwd, ['diff', '--no-ext-diff', '--no-textconv', base, head]);
 }
@@ -398,30 +396,6 @@ export function reviewCommand(cwd: string, args: string[], caps: ReviewCapabilit
   }
 }
 
-// Only NEW files in these narrowly named artifact roots can be removed. Existing
-// files, tracked files (even ignored), source changes and symlinks fail closed.
-const ARTIFACT = /^(?:coverage|\.cache|\.cezar-review-tmp)\//;
-function files(cwd: string): Map<string, string> {
-  const paths = git(cwd, ['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', '.', ':(exclude).cezar-review-tmp', ':(exclude).cezar-review-tmp/**']).split('\0').filter(Boolean);
-  const ignored = git(cwd, ['ls-files', '-z', '--others', '--ignored', '--exclude-standard', '--', '.', ':(exclude)node_modules', ':(exclude)**/node_modules/**', ':(exclude).cezar-review-tmp', ':(exclude).cezar-review-tmp/**']).split('\0').filter(Boolean);
-  return new Map([...new Set([...paths, ...ignored])].map((p) => {
-    const abs = resolve(cwd, p);
-    return [p, !existsSync(abs) ? 'missing' : lstatSync(abs).isSymbolicLink() ? 'symlink' : createHash('sha256').update(readFileSync(abs)).digest('hex')];
-  }));
-}
-
-export function reviewSourceFingerprint(cwd: string): string {
-  return JSON.stringify([...files(cwd)].sort(([a], [b]) => a.localeCompare(b)));
-}
-
-/** Paths that differ between two fingerprints: names only, never contents or hashes. */
-export function reviewSourceChanges(before: string, after: string): string[] {
-  const parse = (fp: string) => { try { return new Map(JSON.parse(fp) as [string, string][]); } catch { return new Map<string, string>(); } };
-  const a = parse(before);
-  const b = parse(after);
-  return [...new Set([...a.keys(), ...b.keys()])].filter((p) => a.get(p) !== b.get(p)).sort();
-}
-
 export async function executeReviewCheck(cwd: string, request: ReviewCheck, env: NodeJS.ProcessEnv, timeoutMs: number,
   onChild?: (child: ChildProcessWithoutNullStreams) => void): Promise<string> {
   if (request.args[0] === 'just' && ['flow', 'device', 'scenario'].includes(request.args[1] ?? '')) return 'UI/emulator check skipped: no separate resource authorization; no device was started.';
@@ -434,11 +408,6 @@ export async function executeReviewCheck(cwd: string, request: ReviewCheck, env:
   }
   const [bin, args] = command;
   if (timeoutMs <= 0) throw new Error('Review command budget exhausted');
-  const before = files(cwd);
-  const snapshot = getWorkspaceGitSnapshot(cwd);
-  if (snapshot === undefined) throw new Error('Review checkout snapshot unavailable');
-  const tracked = new Set(git(cwd, ['ls-files', '-z']).split('\0'));
-  const head = git(cwd, ['rev-parse', 'HEAD']);
   const started = Date.now();
   const child = spawn(bin, args, { cwd, env, windowsHide: true, shell: false });
   onChild?.(child);
@@ -463,15 +432,6 @@ export async function executeReviewCheck(cwd: string, request: ReviewCheck, env:
     });
   } finally {
     clearTimeout(timer);
-    const after = files(cwd);
-    const violations: string[] = [];
-    for (const [path, hash] of after) {
-      if (before.get(path) === hash) continue;
-      if (!before.has(path) && !tracked.has(path) && ARTIFACT.test(path) && hash !== 'symlink' && localPath(cwd, path)) rmSync(resolve(cwd, path));
-      else violations.push(path);
-    }
-    for (const path of before.keys()) if (!after.has(path)) violations.push(path);
-    if (git(cwd, ['rev-parse', 'HEAD']) !== head || violations.length || !verifyWorkspaceIntegrity(cwd, snapshot).clean) throw new Error(`Review source integrity violation: ${violations.join(', ') || 'git state changed'}`);
   }
   if (timedOut) throw new Error('Review command timed out; process tree stopped');
   if (tooLarge) throw new Error('Review command output budget exceeded; no truncated evidence accepted');

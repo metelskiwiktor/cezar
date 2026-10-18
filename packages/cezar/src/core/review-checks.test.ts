@@ -4,12 +4,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { AgyCliRunner, reviewRoundsViolation } from './agy-cli-runner.ts';
+import { AgyCliRunner } from './agy-cli-runner.ts';
 import { buildChildEnv } from './agent-env.ts';
-import { getWorkspaceGitSnapshot, prepareReadOnlyIsolation } from './read-only-sandbox.ts';
+import { prepareReadOnlyIsolation } from './read-only-sandbox.ts';
 import {
   detectReviewCapabilities, executeReviewCheck, parseReviewCheck, pinnedReviewDiff, prepareReviewDiff, reviewCheckInstructions,
-  reviewCommand, ReviewCheckRejected, reviewSourceFingerprint,
+  reviewCommand, ReviewCheckRejected,
 } from './review-checks.ts';
 import { publishReviewFromRun } from '../automations/pr-review.ts';
 import { AgyReviewEvidence } from './agy-review-evidence.ts';
@@ -341,10 +341,11 @@ describe('trusted check policy and source integrity', { timeout: 30_000 }, () =>
     expect(pinnedReviewDiff(r.cwd, r.base, r.head)).toContain('+v2');
     expect(() => pinnedReviewDiff(r.cwd, r.head, r.base)).toThrow(/HEAD/);
   });
-  it('refuses a dirty checkout instead of reviewing files that differ from pinned HEAD', () => {
+  it('does not refuse a locally modified checkout: the diff is computed from the pinned commits', () => {
     const r = repo();
     writeFileSync(join(r.cwd, 'tracked.txt'), 'drift\n');
-    expect(() => pinnedReviewDiff(r.cwd, r.base, r.head)).toThrow(/fresh prepared PR worktree/);
+    writeFileSync(join(r.cwd, 'scratch.txt'), 'x\n');
+    expect(pinnedReviewDiff(r.cwd, r.base, r.head)).toContain('+v2');
   });
   it('reads version-matched shared dependencies through Cezar rg without granting arbitrary external paths', async (context) => {
     const r = repo();
@@ -473,21 +474,18 @@ describe('trusted check policy and source integrity', { timeout: 30_000 }, () =>
       expect(moved.complete()).toBe(false);
     } finally { diff.cleanup(); }
   });
-  it('cleans only new temporary artifacts and preserves sources', async () => {
-    const r = repo('const fs=require("fs"); fs.mkdirSync("coverage",{recursive:true}); fs.writeFileSync("coverage/result.txt","temporary"); console.log("passed")');
+  it('keeps generated artifacts and local edits from a check without failing it', async () => {
+    const r = repo('const fs=require("fs"); fs.mkdirSync("coverage",{recursive:true}); fs.writeFileSync("coverage/result.txt","temporary"); fs.writeFileSync("tracked.txt","changed"); fs.mkdirSync("dist",{recursive:true}); fs.writeFileSync("dist/out.js","x"); console.log("passed")');
     await expect(executeReviewCheck(r.cwd, { args: ['just', 'test'], reason: 'contract' }, process.env, 10_000)).resolves.toContain('Exit: 0');
-    expect(existsSync(join(r.cwd, 'coverage/result.txt'))).toBe(false);
-    expect(readFileSync(join(r.cwd, 'tracked.txt'), 'utf8')).toBe('v2\n');
-  });
-  it('fails tracked source changes rather than silently reverting evidence', async () => {
-    const r = repo('require("fs").writeFileSync("tracked.txt","changed")');
-    await expect(executeReviewCheck(r.cwd, { args: ['just', 'check'], reason: 'contract' }, process.env, 10_000)).rejects.toThrow(/source integrity violation/);
+    expect(readFileSync(join(r.cwd, 'coverage/result.txt'), 'utf8')).toBe('temporary');
+    expect(readFileSync(join(r.cwd, 'dist/out.js'), 'utf8')).toBe('x');
     expect(readFileSync(join(r.cwd, 'tracked.txt'), 'utf8')).toBe('changed');
   });
-  it('fails changes to an existing ignored cache', async () => {
+  it('does not fail a check that rewrites an existing ignored cache', async () => {
     const r = repo('require("fs").writeFileSync(".cache/result.txt","changed")');
     execFileSync(process.execPath, ['-e', 'const fs=require("fs");fs.mkdirSync(".cache");fs.writeFileSync(".cache/result.txt","baseline")'], { cwd: r.cwd });
-    await expect(executeReviewCheck(r.cwd, { args: ['just', 'test'], reason: 'contract' }, process.env, 10_000)).rejects.toThrow(/source integrity violation/);
+    await expect(executeReviewCheck(r.cwd, { args: ['just', 'test'], reason: 'contract' }, process.env, 10_000)).resolves.toContain('Exit: 0');
+    expect(readFileSync(join(r.cwd, '.cache/result.txt'), 'utf8')).toBe('changed');
   });
   it('kills a hanging check at the deadline and rejects a spent budget', async () => {
     const r = repo('setInterval(()=>{},1000)');
@@ -547,11 +545,9 @@ describe('check policy follows the prepared checkout (cezar-adapter#8 run ee37f4
 
   it('runs the declared npm scripts and reports a red test as red', async () => {
     const r = repo('console.log("npm suite ran"); process.exit(process.argv.includes("fail") ? 1 : 0)', { justfile: false, scripts: { ...ADAPTER_SCRIPTS, check: 'node check.cjs fail' } });
-    const before = reviewSourceFingerprint(r.cwd);
     const green = await executeReviewCheck(r.cwd, { args: ['npm', 'test'], reason: 'contract' }, process.env, 60_000);
     expect(green).toMatch(/Exit: 0;[\s\S]*npm suite ran/);
     await expect(executeReviewCheck(r.cwd, { args: ['npm', 'run', 'check'], reason: 'contract' }, process.env, 60_000)).resolves.toMatch(/Exit: 1;/);
-    expect(reviewSourceFingerprint(r.cwd)).toBe(before);
   });
 
   it('lists files and matching files through rg, inside the checkout only', async () => {
@@ -579,7 +575,6 @@ describe('check policy follows the prepared checkout (cezar-adapter#8 run ee37f4
 
   it('feeds a rejected check back to fake Agy, runs the corrected one and publishes the review', async () => {
     const r = repo('console.log("adapter suite passed")', { justfile: false, agents: false, scripts: ADAPTER_SCRIPTS });
-    const before = reviewSourceFingerprint(r.cwd);
     const notes: string[] = [];
     const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
       FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECKS: JSON.stringify([['just', 'test'], ['npm', 'test']]), FAKE_AGY_ASSERT_PR_SCOPE: '1',
@@ -589,7 +584,6 @@ describe('check policy follows the prepared checkout (cezar-adapter#8 run ee37f4
     expect(notes.some((n) => n.startsWith('Check NOT RUN: just test') && n.includes('no justfile'))).toBe(true);
     expect(notes.some((n) => /Exit: 0;[\s\S]*adapter suite passed/.test(n))).toBe(true);
     expect(result.text).toContain('Recommendation: APPROVE');
-    expect(reviewSourceFingerprint(r.cwd)).toBe(before);
     expect(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: r.cwd, encoding: 'utf8' }).trim()).toBe(r.head);
     expect(existsSync(join(r.cwd, '.cezar-review-tmp'))).toBe(false);
 
@@ -605,39 +599,17 @@ describe('check policy follows the prepared checkout (cezar-adapter#8 run ee37f4
     expect(posts.join('')).toContain('Recommendation: APPROVE');
   });
 
-  it('keeps the check\'s own integrity violation as the run error and reports the final one beside it (cezar-adapter#8 run 00f1416a)', async () => {
-    const r = repo('const fs=require("fs");fs.mkdirSync(".ai/cezar/runs",{recursive:true});fs.writeFileSync(".ai/cezar/runs/1707342b.ndjson","{}")',
-      { justfile: false, scripts: ADAPTER_SCRIPTS });
-    // An ignored tree, like the adapter's: the files a test writes there are not ARTIFACTs.
-    mkdirSync(join(r.cwd, '.ai'));
-    writeFileSync(join(r.cwd, '.ai/.gitignore'), '*\n');
+  it('publishes a review after a check changes source and dist, and reports its non-zero exit as a failed check (PR #16)', async () => {
+    const r = repo('const fs=require("fs");fs.writeFileSync("tracked.txt","regenerated");fs.mkdirSync("dist",{recursive:true});fs.writeFileSync("dist/a.js","x");process.exit(process.argv.includes("fail")?1:0)',
+      { justfile: false, scripts: { ...ADAPTER_SCRIPTS, check: 'node check.cjs fail' } });
     const notes: string[] = [];
-    const errors: string[] = [];
     const outcome = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
-      FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECKS: JSON.stringify([['npm', 'test']]),
-    } }, (e) => { if (e.type === 'note') notes.push(e.message); if (e.type === 'error') errors.push(e.message); }).catch((e: unknown) => e as Error);
-    expect(outcome).toBeInstanceOf(Error);
-    expect((outcome as Error).message).toMatch(/^Review source integrity violation: .ai\/cezar\/runs\/1707342b\.ndjson$/);
-    expect(errors.join('\n')).not.toContain('across review/check rounds');
-    const extra = notes.find((n) => n.startsWith('Additionally: Read-only review violation: checkout changed across review/check rounds'));
-    expect(extra).toContain('changed paths: .ai/cezar/runs/1707342b.ndjson');
-    expect(extra).not.toContain('{}');
-    // Nothing is silently reverted: the evidence stays for diagnosis.
-    expect(existsSync(join(r.cwd, '.ai/cezar/runs/1707342b.ndjson'))).toBe(true);
-  });
-
-  it('names a moved HEAD and changed sources in the final verdict, and is silent when nothing changed', () => {
-    const r = repo('', { justfile: false, scripts: ADAPTER_SCRIPTS });
-    const baseline = getWorkspaceGitSnapshot(r.cwd)!;
-    const fingerprint = reviewSourceFingerprint(r.cwd);
-    expect(reviewRoundsViolation(r.cwd, baseline, fingerprint)).toBeUndefined();
-    writeFileSync(join(r.cwd, 'tracked.txt'), 'SECRET_CONTENT\n');
-    const changed = reviewRoundsViolation(r.cwd, baseline, fingerprint);
-    expect(changed).toMatch(/^Read-only review violation: checkout changed across review\/check rounds \(changed paths: tracked\.txt\)/);
-    expect(changed).not.toContain('SECRET_CONTENT');
-    execFileSync('git', ['checkout', '-q', '--', 'tracked.txt'], { cwd: r.cwd });
-    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '--allow-empty', '-m', 'moved'], { cwd: r.cwd });
-    expect(reviewRoundsViolation(r.cwd, baseline, fingerprint)).toMatch(/HEAD moved \([0-9a-f]{12} -> [0-9a-f]{12}\)/);
+      FAKE_AGY_MODE: 'broker', FAKE_AGY_CHECKS: JSON.stringify([['npm', 'test'], ['npm', 'run', 'check']]),
+    } }, (e) => { if (e.type === 'note') notes.push(e.message); });
+    expect(outcome.text).toContain('Recommendation:');
+    expect(notes.some((n) => /Exit: 1;/.test(n))).toBe(true);
+    expect(readFileSync(join(r.cwd, 'tracked.txt'), 'utf8')).toBe('regenerated');
+    expect(existsSync(join(r.cwd, 'dist/a.js'))).toBe(true);
   });
 
   it('ends the review fatally when a requested check escapes the checkout', async () => {
