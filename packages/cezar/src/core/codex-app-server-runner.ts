@@ -43,6 +43,8 @@ export interface CodexRunnerOptions {
   timeoutMs?: number;
 }
 
+const EXIT_DRAIN_MS = 250;
+
 /**
  * `AgentRunner` over `codex app-server` — the same JSONL transport the VS Code
  * extension and desktop app use (JSON-RPC 2.0, newline-delimited, over
@@ -197,24 +199,43 @@ class CodexSession implements AgentSession {
 
     this.result = (async (): Promise<AgentRunResult> => {
       let sessionError: unknown;
+      let drainExpired = false;
+      let drainTimer: NodeJS.Timeout | undefined;
+      // Descendants can retain stdout after app-server exits. Drain its final frames,
+      // then release the reader; EOF alone is not a process-liveness signal.
+      const onExit = () => {
+        drainTimer = setTimeout(() => {
+          drainExpired = true;
+          this.child.stdout.destroy();
+        }, EXIT_DRAIN_MS);
+        drainTimer.unref?.();
+      };
+      this.child.once('exit', onExit);
       try {
         const readLoop = async () => {
-          for await (const line of readNdjson(this.child.stdout)) {
-            if (this.timedOut) break;
-            let msg: CodexAppServerMessage;
-            try {
-              msg = JSON.parse(line) as CodexAppServerMessage;
-            } catch {
-              continue; // not JSON-RPC — skip
+          try {
+            for await (const line of readNdjson(this.child.stdout)) {
+              if (this.timedOut) break;
+              let msg: CodexAppServerMessage;
+              try {
+                msg = JSON.parse(line) as CodexAppServerMessage;
+              } catch {
+                continue; // not JSON-RPC — skip
+              }
+              // A sub-agent child thread's turn lifecycle must reach neither channel (#600):
+              // v1 would emit a bogus `turn-end`, and the v2 mapper — which carries no thread
+              // identity — would record the child turn as the parent's, clearing its turn-scoped
+              // plan/reasoning state and resetting the current turn id. Child ITEM events still
+              // flow, so nested sub-agent activity keeps rendering.
+              if (this.isForeignTurnLifecycle(msg)) continue;
+              this.emitUi((state) => mapCodexNotification(msg, state));
+              this.dispatch(msg);
             }
-            // A sub-agent child thread's turn lifecycle must reach neither channel (#600):
-            // v1 would emit a bogus `turn-end`, and the v2 mapper — which carries no thread
-            // identity — would record the child turn as the parent's, clearing its turn-scoped
-            // plan/reasoning state and resetting the current turn id. Child ITEM events still
-            // flow, so nested sub-agent activity keeps rendering.
-            if (this.isForeignTurnLifecycle(msg)) continue;
-            this.emitUi((state) => mapCodexNotification(msg, state));
-            this.dispatch(msg);
+          } catch (err) {
+            if (!drainExpired || (err as NodeJS.ErrnoException).code !== 'ERR_STREAM_PREMATURE_CLOSE') throw err;
+          } finally {
+            // EOF/exit can arrive with bootstrap still awaiting a response.
+            this.rpc.rejectPending();
           }
         };
         // Start consuming stdout before awaiting bootstrap: JSON-RPC responses
@@ -230,6 +251,8 @@ class CodexSession implements AgentSession {
           this.end();
         }
       } finally {
+        this.child.off('exit', onExit);
+        if (drainTimer) clearTimeout(drainTimer);
         if (deadline) clearTimeout(deadline);
         if (killTimer) clearTimeout(killTimer);
         if (this.autoEndTimer) clearTimeout(this.autoEndTimer);

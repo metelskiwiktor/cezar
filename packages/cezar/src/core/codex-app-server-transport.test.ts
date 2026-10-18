@@ -8,6 +8,7 @@ import {
   CodexAppServerRpc,
   endCodexAppServer,
   resolveCodexExecutable,
+  waitForCodexAppServerExit,
 } from './codex-app-server-transport.ts';
 
 const originalBin = process.env.CEZ_CODEX_BIN;
@@ -29,6 +30,12 @@ function fakeChild(): { child: ChildProcessWithoutNullStreams; writes: string[] 
 }
 
 describe('Codex app-server transport', () => {
+  it('recognizes a signal exit that preceded the wait, even before stdio closes', async () => {
+    const child = Object.assign(new EventEmitter(), { exitCode: null, signalCode: 'SIGTERM' });
+    await expect(waitForCodexAppServerExit(child as ChildProcessWithoutNullStreams)).resolves.toBeNull();
+    expect(child.listenerCount('exit')).toBe(0);
+  });
+
   it('resolves an explicit executable before the environment fallback', () => {
     process.env.CEZ_CODEX_BIN = '/host/codex';
     expect(resolveCodexExecutable('/configured/codex')).toBe('/configured/codex');
