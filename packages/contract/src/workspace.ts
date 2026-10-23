@@ -397,6 +397,8 @@ export const runnerModelsSchema = z.object({
   agy: z.string().optional(),
 });
 export type RunnerModels = z.infer<typeof runnerModelsSchema>;
+export const workflowModelsSchema = z.record(z.string().min(1).max(80), runnerModelsSchema);
+export const workflowRunnersSchema = z.record(z.string().min(1).max(80), runnerSchema);
 
 /** `GET /api/v1/config` — every Settings → Agents knob in one read. */
 export const configResponseSchema = z.object({
@@ -407,6 +409,8 @@ export const configResponseSchema = z.object({
    *  task branches stay `cez/<id8>`. */
   branchNaming: z.string().nullable(),
   defaultModels: runnerModelsSchema,
+  workflowModels: workflowModelsSchema.optional(),
+  workflowRunners: workflowRunnersSchema.optional(),
   /** True when native coding-agent settings are authoritative and model picks are read-only. */
   modelsLocked: z.boolean(),
   /** How many tasks run at once (1–16). */
@@ -436,6 +440,9 @@ export type SetConfigResponse = z.infer<typeof setConfigResponseSchema>;
  * another runner's preset.
  */
 export const setConfigInputSchema = z.object({
+  /** Replaces the workflow defaults map; null removes it. */
+  workflowModels: workflowModelsSchema.nullable().optional(),
+  workflowRunners: workflowRunnersSchema.nullable().optional(),
   baseBranch: z.string().trim().min(1).max(200).nullable().optional(),
   defaultRunner: runnerSchema.optional(),
   systemPrompt: z.string().trim().max(20_000).nullable().optional(),

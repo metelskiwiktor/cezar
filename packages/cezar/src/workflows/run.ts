@@ -70,7 +70,7 @@ import { getTeamSkillsCached, materializeSkillDir, waitForTeamSkills } from '../
 import { provisionSkills } from '../skills-provision.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { readAgentModelProvider } from '../agent-config/models.ts';
-import { loadConfig, resolveWorktreeRetention } from '../config.ts';
+import { loadConfig, resolveTaskModel, resolveTaskRunner, resolveWorktreeRetention } from '../config.ts';
 import { producesPullRequest, resolvePrForkBase, validatePrFork, validateStoredPrForkBase } from '../pr-fork.ts';
 import {
   autosaveCommit,
@@ -1727,10 +1727,10 @@ export class RunManager {
         const anyHold = holds.deadline.size > 0 || holds.inFlight.size > 0;
         // Only pay for the config read when something is actually held: a queued record may name
         // no runner, and then the account it would use is the configured default.
-        const defaultRunner = anyHold ? (await loadConfig(this.repoRoot)).defaultRunner : undefined;
+        const runnerConfig = anyHold ? await loadConfig(this.repoRoot) : undefined;
         const startable = (id: string): boolean => {
           const queued = this.store.getRun(id);
-          if (queued && anyHold && accountHeldFor(queued, holds, defaultRunner ?? 'claude')) return false;
+          if (queued && runnerConfig && accountHeldFor(queued, holds, resolveTaskRunner(runnerConfig, queued.workflow))) return false;
           return capacity();
         };
         // The catalog as it is NOW (#1078), read once per sweep and only when a fresh run can
@@ -4238,7 +4238,9 @@ export class RunManager {
     try {
       const normalized = normalizeModelForBackend(
         continueBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : record?.model,
+        agentModelsLocked(this.repoRoot) ? undefined : resolveTaskModel(
+          await loadConfig(this.repoRoot), record?.workflow ?? '', continueBackend, record?.model,
+        ),
         { configuredProvider: await configuredModelProvider(continueBackend, state.cwd) },
       );
       continueModel = normalized?.backendModel;
@@ -4494,7 +4496,9 @@ export class RunManager {
     // Resolve the agent backend for this run: the task choice (GUI) wins over
     // the config default. Per-step `runner` can still override it below.
     const config = await loadConfig(this.repoRoot);
-    const taskBackend: RunnerId = input.runner ?? config.defaultRunner;
+    const taskBackend: RunnerId = resolveTaskRunner(config, workflow.name, input.runner);
+    const taskModel = agentModelsLocked(this.repoRoot)
+      ? undefined : resolveTaskModel(config, workflow.name, taskBackend, input.model);
     // The account may have gone into a usage-limit hold since this run was dequeued — the queue
     // gate cannot be the only one, because dequeue is not the moment of no return. Nothing has
     // happened yet here, so the run goes back to the queue untouched (spec
@@ -4511,7 +4515,7 @@ export class RunManager {
     try {
       const normalized = normalizeModelForBackend(
         taskBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : input.model,
+        taskModel,
         { configuredProvider: await configuredModelProvider(taskBackend, this.repoRoot) },
       );
       modelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
@@ -4523,6 +4527,7 @@ export class RunManager {
       status: 'running',
       startedAt: new Date().toISOString(),
       runner: taskBackend,
+      model: taskModel,
       systemPrompt: extraSystemPrompt,
       modelIdentity,
     });
@@ -6437,7 +6442,10 @@ export class RunManager {
     try {
       const normalized = normalizeModelForBackend(
         stepBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : step.model ?? input.model,
+        agentModelsLocked(this.repoRoot) ? undefined : step.model ?? resolveTaskModel(
+          await loadConfig(this.repoRoot), this.store.getRun(runId)?.workflow ?? '', stepBackend,
+          input.model,
+        ),
         { configuredProvider: await configuredModelProvider(stepBackend, state.cwd) },
       );
       backendModel = normalized?.backendModel;

@@ -229,19 +229,24 @@ export function NewTaskRoute() {
 
   const providers = useProviderStatus()
   const runners = usableRunners(providers.data)
-  const defaultRunner = config.data?.defaultRunner
+  const workflowName = source?.source === 'workflow' ? source.ref : 'quick-task'
+  const defaultRunner = config.data?.workflowRunners?.[workflowName] ?? config.data?.defaultRunner
   const preferredRunner = defaultRunner ?? 'claude'
   const runner = runners.length > 0 ? resolveRunner(draft.runner, runners, preferredRunner) : null
   const displayRunner = runner ?? preferredRunner
   const providersReady = providers.isSuccess && runners.length > 0
   const catalog = useRunnerModels(displayRunner)
   const modelsLocked = config.data?.modelsLocked === true
+  const modelDefaults = modelsLocked ? config.data?.defaultModels : {
+    ...config.data?.defaultModels,
+    ...config.data?.workflowModels?.[workflowName],
+  }
   const models = runner === null
     ? []
-    : modelsForRunner(runner, catalog.data, [draft.model, config.data?.defaultModels?.[runner]])
+    : modelsForRunner(runner, catalog.data, [draft.model, modelDefaults?.[runner]])
   const model = runner === null
     ? ''
-    : resolveModel(modelsLocked ? null : draft.model, runner, config.data?.defaultModels, catalog.data)
+    : resolveModel(modelsLocked ? null : draft.model, runner, modelDefaults, catalog.data)
   // Agent accounts (spec 2026-07-29-agent-profiles). These are rows of the RUNNER pill rather than
   // a pill of their own — `claude · Default` / `claude · Klaudiusz` / `codex` — so what will run is
   // readable at a glance instead of assembled from two controls. An agent with a single login stays
@@ -475,6 +480,7 @@ export function NewTaskRoute() {
         task: text,
         source,
         model,
+        modelExplicit: draft.model !== null,
         modelsLocked,
         runner,
         runnerExplicit: draft.runner !== null,

@@ -52,13 +52,16 @@ describe('model identity wiring (dry run)', () => {
     manager = new RunManager(store, repoRoot);
   });
 
-  afterAll(() => {
+  afterAll(async () => {
+    for (const record of store.listRuns()) manager.cancel(record.id);
+    manager.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 500));
     for (const [key, value] of Object.entries(savedEnv)) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
     store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(repoRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   // Agent step + trailing check, so the agent session auto-ends and the run
@@ -97,6 +100,25 @@ describe('model identity wiring (dry run)', () => {
     const idx = argv.indexOf('--model');
     return idx < 0 ? undefined : argv[idx + 1];
   }
+
+  it('workflow defaults reach the runner, persist for Continue and allow explicit overrides', async () => {
+    const configPath = join(repoRoot, '.ai/cezar', 'config.json');
+    const original = readFileSync(configPath, 'utf8');
+    writeFileSync(configPath, JSON.stringify({ maxParallel: 1, defaultModels: { claude: 'sonnet' },
+      workflowModels: { [workflow.name]: { claude: 'opus', codex: 'gpt-6.1-sol' } } }));
+    try {
+      const id = await runToEnd({ task: 'do the thing' });
+      expect(capturedModel()).toBe('opus');
+      expect(store.getRun(id)?.model).toBe('opus');
+      expect(store.getRun(id)?.modelIdentity).toBe('anthropic/opus');
+      await runToEnd({ task: 'do the thing', model: 'haiku' });
+      expect(capturedModel()).toBe('haiku');
+      await runToEnd({ task: 'do the thing', model: '' });
+      expect(capturedModel()).toBeUndefined();
+    } finally {
+      writeFileSync(configPath, original);
+    }
+  }, 40_000);
 
   it('a bare preset reaches the CLI bare and persists provider-qualified', async () => {
     const id = await runToEnd({ task: 'do the thing', model: 'opus' });
@@ -195,7 +217,7 @@ describe('model identity wiring (dry run)', () => {
   it('Claude gateway models run with their provider-qualified wire id', async () => {
     const id = await runToEnd({ task: 'do the thing', model: 'deepseek/deepseek-v4-flash' });
     const record = store.getRun(id);
-    expect(record?.status).toBe('done');
+    expect(record?.status, record?.error).toBe('done');
     expect(record?.modelIdentity).toBe('deepseek/deepseek-v4-flash');
     expect(capturedModel(0)).toBe('deepseek/deepseek-v4-flash');
   }, 30_000);

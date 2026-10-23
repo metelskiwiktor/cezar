@@ -23,7 +23,7 @@ describe('lightweight workflow definitions', () => {
     const root = mkdtempSync(join(tmpdir(), 'cez-light-load-'));
     try {
       const names = (await loadWorkflows(root)).workflows.map((w) => w.name);
-      expect(names).toEqual(expect.arrayContaining(['implement', 'analysis', 'pr-review', 'quick-task', 'implement-and-verify']));
+      expect(names).toEqual(['analysis', 'implement', 'pr-review', 'quick-task']);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

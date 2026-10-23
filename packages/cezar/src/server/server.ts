@@ -121,6 +121,7 @@ import { discoverSkills } from '../skills.ts';
 import { SkillsUpdateConflictError, SkillsUpdateCoordinator, SkillsUpdateService, type SkillsUpdateState } from '../skills-update.ts';
 import { selfUpdateApplyRequestSchema, selfUpdateChannelRequestSchema, selfUpdateDevelopmentQuerySchema } from '@open-mercato/cezar-contract';
 import { SelfUpdateBusyError, SelfUpdateService } from '../self-update/service.ts';
+import { workflowModelsSchema, workflowRunnersSchema } from '@open-mercato/cezar-contract';
 import { StarCountReader } from './star-count.ts';
 import { getTeamSkillsCached, refreshTeamSkills, waitForTeamSkills } from '../skills-remote.ts';
 import { appendHandoffHeartbeat, handoffProgressExcerpt, readHandoff } from '../handoff.ts';
@@ -176,7 +177,7 @@ import {
   readWorktreePath,
   repoIndexContains,
 } from './git-changes.ts';
-import { gatedSkillsRepos, loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
+import { gatedSkillsRepos, loadConfig, resolveTaskRunner, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { findConfigFile } from '../agent-config/catalog.ts';
 import { readConfigFile, statConfigPath, writeConfigFile } from '../agent-config/files.ts';
 import { type AgentModelDefaults, readAgentModelDefaults } from '../agent-config/models.ts';
@@ -4427,7 +4428,7 @@ export function createApp(deps: ServerDeps) {
         workflow = workflows.find((w) => w.name === parsed.data.workflow);
         if (!workflow) return c.json({ error: `unknown workflow: ${parsed.data.workflow}` }, 404);
       }
-      const fallback = parsed.data.runner ?? (await loadConfig(repoRoot)).defaultRunner;
+      const fallback = resolveTaskRunner(await loadConfig(repoRoot), workflow.name, parsed.data.runner);
       const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), {
         repoRoot,
         profileFor: (provider) => (provider === fallback ? parsed.data.agentProfile : undefined),
@@ -5616,7 +5617,7 @@ export function createApp(deps: ServerDeps) {
           workflow = workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
         }
 
-        const fallback = parsed.data?.runner ?? (await loadConfig(repoRoot)).defaultRunner;
+        const fallback = resolveTaskRunner(await loadConfig(repoRoot), workflow.name, parsed.data?.runner);
         const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), { repoRoot });
         if (blocked) return c.json({ error: blocked }, 409);
 
@@ -6552,6 +6553,8 @@ export function createApp(deps: ServerDeps) {
             ...(config.defaultModels ?? {}),
           },
       modelsLocked,
+      ...(config.workflowModels !== undefined ? { workflowModels: config.workflowModels } : {}),
+      ...(config.workflowRunners !== undefined ? { workflowRunners: config.workflowRunners } : {}),
       maxParallel: config.maxParallel,
       memoryLimitMb: config.memoryLimitMb ?? null,
       // Count-based worktree retention (#483): keep the last N finished worktrees
@@ -6579,7 +6582,7 @@ export function createApp(deps: ServerDeps) {
       // policy refuses it on exactly the same terms as a preset.
       if (
         agentModelsLocked(repoRoot) &&
-        (parsed.data.defaultModels !== undefined || parsed.data.defaultModelsAuto !== undefined)
+        (parsed.data.defaultModels !== undefined || parsed.data.defaultModelsAuto !== undefined || parsed.data.workflowModels !== undefined)
       ) {
         return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       }
@@ -6596,6 +6599,14 @@ export function createApp(deps: ServerDeps) {
         else raw.baseBranch = parsed.data.baseBranch;
       }
       if (parsed.data.defaultRunner !== undefined) raw.defaultRunner = parsed.data.defaultRunner;
+      if (parsed.data.workflowModels !== undefined) {
+        if (parsed.data.workflowModels === null) delete raw.workflowModels;
+        else raw.workflowModels = parsed.data.workflowModels;
+      }
+      if (parsed.data.workflowRunners !== undefined) {
+        if (parsed.data.workflowRunners === null) delete raw.workflowRunners;
+        else raw.workflowRunners = parsed.data.workflowRunners;
+      }
       if (parsed.data.systemPrompt !== undefined) {
         // '' and null both clear: an emptied textarea means "no extra prompt".
         if (parsed.data.systemPrompt === null || parsed.data.systemPrompt === '') {
@@ -6683,6 +6694,8 @@ export function createApp(deps: ServerDeps) {
   const modelPresetSchema = z.string().trim().max(200).nullable().optional();
   const autoModelSchema = z.boolean().nullable().optional();
   const setConfigSchema = z.object({
+    workflowModels: workflowModelsSchema.nullable().optional(),
+    workflowRunners: workflowRunnersSchema.nullable().optional(),
     baseBranch: z.string().trim().min(1).max(200).nullable().optional(),
     defaultRunner: z.enum(RUNNER_IDS).optional(),
     systemPrompt: z.string().trim().max(20_000, 'must be at most 20000 characters').nullable().optional(),

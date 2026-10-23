@@ -287,6 +287,13 @@ describe('resolveSource (the draft pick, validated — no cold default)', () => 
 })
 
 describe('buildCreateRunBody — the exact POST /api/v1/runs payloads legacy sends', () => {
+  it('keeps an explicit auto override on the wire, but omits an untouched auto default', () => {
+    const opts = { task: 'investigate', source: null, model: '', runner: 'claude' as const,
+      defaultRunner: 'claude' as const, variants: 1, images: [] }
+    expect(buildCreateRunBody(opts).model).toBeUndefined()
+    expect(buildCreateRunBody({ ...opts, modelExplicit: true }).model).toBe('')
+    expect(buildCreateRunBody({ ...opts, modelExplicit: true, modelsLocked: true }).model).toBeUndefined()
+  })
   it('workflow source → { workflow, task }, defaults omitted', () => {
     const body = buildCreateRunBody({
       task: 'do the thing',

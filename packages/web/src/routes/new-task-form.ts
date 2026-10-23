@@ -56,6 +56,7 @@ export const RUNNERS: readonly RunnerOption[] = [
   { id: 'cursor', label: 'cursor', desc: 'Cursor Agent CLI' },
   { id: 'pi', label: 'pi', desc: 'pi CLI (provider/model)' },
   { id: 'copilot', label: 'copilot', desc: 'GitHub Copilot CLI (ACP)' },
+  { id: 'agy', label: 'agy', desc: 'Google Antigravity CLI' },
 ]
 
 export interface ModelPreset {
@@ -319,13 +320,15 @@ export function resolveSource(
  *  - an explicit/sticky `runner` always rides the request; an untouched runner is omitted only
  *    when it equals the active project's known default (unknown defaults and connected fallbacks
  *    stay explicit);
- *  - `model`/`variants`/`images` only when they say something (`''`/1/empty mean "default").
+ *  - an explicit auto model stays `''`; an untouched auto, one variant and empty images are omitted.
  */
 export function buildCreateRunBody(opts: {
   task: string
   /** `null` — nothing picked — runs the built-in `quick-task`. */
   source: TaskSource | null
   model: string
+  /** Preserve an explicit auto selection instead of falling back to workflow defaults. */
+  modelExplicit?: boolean
   /** Native coding-agent settings stay visible, but a locked model is never a request override. */
   modelsLocked?: boolean
   runner: Runner
@@ -359,6 +362,7 @@ export function buildCreateRunBody(opts: {
     task,
     source,
     model,
+    modelExplicit,
     modelsLocked,
     runner,
     runnerExplicit,
@@ -377,7 +381,7 @@ export function buildCreateRunBody(opts: {
     ...(source?.source === 'skill'
       ? { steps: [{ id: 'task', name: source.ref, skill: source.ref, prompt: '{{task}}' }] }
       : { workflow: source?.ref ?? QUICK_TASK }),
-    model: modelsLocked ? undefined : model || undefined,
+    model: modelsLocked ? undefined : modelExplicit ? model : model || undefined,
     runner: runnerOverride(runner, defaultRunner, runnerExplicit),
     // Sent only when the user picked one — an absent key is "follow the project", which is what
     // every launch that never touched the control means.

@@ -49,12 +49,14 @@ describe('a queued run re-resolves its workflow at dequeue (#1078)', () => {
     manager = new RunManager(store, repoRoot, { semaphore: new WorkspaceSemaphore({ initial: { maxParallel: 1 } }) });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    for (const record of store.listRuns()) manager.cancel(record.id);
     manager.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 500));
     if (savedDryRun === undefined) delete process.env.CEZ_DRY_RUN;
     else process.env.CEZ_DRY_RUN = savedDryRun;
     store.flush();
-    rmSync(repoRoot, { recursive: true, force: true });
+    rmSync(repoRoot, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
   });
 
   const demo = async (): Promise<WorkflowDef> => {

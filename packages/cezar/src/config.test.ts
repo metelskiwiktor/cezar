@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_SKILLS_REPOS, gatedSkillsRepos, loadConfig, resolveWorktreeRetention } from './config.ts';
+import { DEFAULT_SKILLS_REPOS, gatedSkillsRepos, loadConfig, resolveTaskModel, resolveTaskRunner, resolveWorktreeRetention } from './config.ts';
 
 /**
  * `config.json` schema roundtrips (R2 2.3: `systemPrompt?`). The invariants
@@ -28,6 +28,41 @@ describe('loadConfig systemPrompt', () => {
   it('is undefined when no config file exists (zero-config default)', async () => {
     const config = await loadConfig(repoRoot);
     expect(config.systemPrompt).toBeUndefined();
+  });
+
+  it('resolves workflow defaults by runner, below explicit choices and above project defaults', async () => {
+    write({ defaultModels: { claude: 'sonnet' }, workflowModels: {
+      analysis: { claude: 'opus', codex: 'gpt-6.1-sol' },
+      implement: { claude: 'sonnet', codex: 'gpt-6.1-sol' },
+    } });
+    const config = await loadConfig(repoRoot);
+    expect(resolveTaskModel(config, 'analysis', 'claude', undefined)).toBe('opus');
+    expect(resolveTaskModel(config, 'implement', 'claude', undefined)).toBe('sonnet');
+    expect(resolveTaskModel(config, 'analysis', 'codex', undefined)).toBe('gpt-6.1-sol');
+    expect(resolveTaskModel(config, 'implement', 'codex', undefined)).toBe('gpt-6.1-sol');
+    expect(resolveTaskModel(config, 'analysis', 'claude', 'haiku')).toBe('haiku');
+    expect(resolveTaskModel(config, 'analysis', 'claude', '')).toBe('');
+    expect(resolveTaskModel(config, 'quick-task', 'claude', undefined)).toBe('sonnet');
+    expect(resolveTaskModel(config, 'analysis', 'agy', undefined)).toBeUndefined();
+  });
+
+  it('invalid workflow defaults do not discard the rest of the project config', async () => {
+    write({ workflowModels: 123, maxParallel: 3 });
+    const config = await loadConfig(repoRoot);
+    expect(config.workflowModels).toBeUndefined();
+    expect(config.maxParallel).toBe(3);
+  });
+
+  it('review runner defaults apply only to pr-review and allow explicit overrides', async () => {
+    write({ defaultRunner: 'claude', workflowRunners: { 'pr-review': 'agy' },
+      workflowModels: { 'pr-review': { agy: 'gemini-3.8-flash-medium' } } });
+    const config = await loadConfig(repoRoot);
+    expect(resolveTaskRunner(config, 'pr-review')).toBe('agy');
+    expect(resolveTaskRunner(config, 'pr-review', 'codex')).toBe('codex');
+    expect(resolveTaskRunner(config, 'implement-review-pr')).toBe('claude');
+    expect(resolveTaskRunner(config, 'review-council')).toBe('claude');
+    expect(resolveTaskModel(config, 'pr-review', 'agy', undefined)).toBe('gemini-3.8-flash-medium');
+    expect(resolveTaskModel(config, 'pr-review', 'agy', 'another-model')).toBe('another-model');
   });
 
   it('old config files without the key still load unchanged (additive proof)', async () => {

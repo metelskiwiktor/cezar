@@ -93,6 +93,19 @@ describe('the config API', () => {
     });
   });
 
+  it('roundtrips workflow defaults independently of project presets and clears on null', async () => {
+    const workflowModels = { analysis: { claude: 'opus', codex: 'gpt-6.1-sol' } };
+    const workflowRunners = { 'pr-review': 'agy' };
+    expect((await put({ workflowModels, workflowRunners, defaultModels: { claude: 'sonnet' } })).status).toBe(200);
+    expect(await getBody()).toMatchObject({ workflowModels, defaultModels: { claude: 'sonnet' } });
+    expect(rawFile().workflowModels).toEqual(workflowModels);
+    expect((await getBody()).workflowRunners).toEqual(workflowRunners);
+    await put({ workflowModels: null, workflowRunners: null });
+    expect((await getBody()).workflowRunners).toBeUndefined();
+    expect((await getBody()).workflowModels).toBeUndefined();
+    expect(rawFile().defaultModels).toEqual({ claude: 'sonnet' });
+  });
+
   it("uses the coding agents' native model settings as the initial defaults", async () => {
     mkdirSync(join(homeRoot, '.claude'), { recursive: true });
     mkdirSync(join(homeRoot, '.codex'), { recursive: true });

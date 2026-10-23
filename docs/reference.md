@@ -417,9 +417,8 @@ whose counter never resets within a run, so every run is finite.
 - **`git.sync-base`** merges the freshest base into the task branch. On a conflict it
   leaves the merge in progress and leaves by `conflict` — wire that to an agent to
   resolve it (`{{nodes.<id>.conflicts}}` lists the files).
-- **Built-in templates** — `implement-and-verify`, `implement-review-pr`, `review-council`
-  (three fresh reviewers at once, then a judge that ships or sends it back), `fix-ci` — sit
-  next to `quick-task` (still the default). Open one in the editor; it saves as your copy.
+- **Built-in catalog** — `analysis`, `implement`, `pr-review`, and `quick-task` (the default).
+  Project workflow files add their own entries. Historical runs retain their saved definitions.
 - **Lightweight workflows** — three built-ins where the agent owns the work and its own
   self-check in ONE session, and cezar owns the worktree, the pinned base, the push and the PR:
   - `implement` — one agent session implements, runs the verification the change warrants,
@@ -746,6 +745,13 @@ never blocks startup):
   // exactly that commit, and reports it as `team.commit`.
   "worktreeRetention": 10,   // keep the last N finished worktrees on disk; 0 = unlimited (branch always kept)
   "defaultRunner": "claude", // agent backend: "claude" (default) · "codex" · "junie" · "opencode" · "pi"
+  "workflowModels": {
+    "quick-task": { "claude": "sonnet", "codex": "gpt-6.1-sol" },
+    "pr-review": { "agy": "gemini-3.8-flash-medium" },
+    "analysis": { "claude": "opus", "codex": "gpt-6.1-sol" },
+    "implement": { "claude": "sonnet", "codex": "gpt-6.1-sol" }
+  }, // defaults per workflow and runner; an explicit task model (including auto) wins
+  "workflowRunners": { "pr-review": "agy" }, // an explicit task runner wins
   "modelsLocked": true,      // optional: native per-runner model is fixed/read-only; runner stays selectable
   "plannerModel": "sonnet",  // model the "Plan first" button uses to draft chains
   "baseBranch": "develop",   // branch worktrees fork from + PRs target (also settable in the Git tab)
@@ -754,6 +760,13 @@ never blocks startup):
                              // instructions (Settings → Instructions); absent = cez/<id8>
 }
 ```
+
+`workflowModels` applies to the selected runner only, in both the task form and
+API/CLI execution. An explicit task model (including `""` for auto) wins over
+the workflow default, then `defaultModels` supplies the project fallback, then
+the coding agent uses its own settings. Existing per-step `model`/`runner`
+assignments remain fixed overrides. `modelsLocked` bypasses these model choices.
+Codex reasoning effort remains controlled by its native `config.toml`.
 
 Put the same `"modelsLocked": true` key in `~/.cezar/config.json` to apply it
 to every registered project. When the key is absent or `false` in both config

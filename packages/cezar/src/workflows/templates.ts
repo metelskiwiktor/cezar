@@ -288,9 +288,5 @@ export const PR_REVIEW = builtIn(
 export const BUILT_IN_GRAPH_WORKFLOWS: readonly WorkflowDef[] = [
   IMPLEMENT,
   ANALYSIS,
-  IMPLEMENT_AND_VERIFY,
-  IMPLEMENT_REVIEW_PR,
-  REVIEW_COUNCIL,
-  FIX_CI,
   PR_REVIEW,
 ];

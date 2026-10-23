@@ -1155,6 +1155,60 @@ describe('submit', () => {
     await waitFor(() => expect(location()).toBe('/tasks/v-a'))
   })
 
+  it('uses the workflow default and preserves a manual model pick', async () => {
+    serve({ config: { defaultModels: { claude: 'sonnet' },
+      workflowModels: { 'quick-task': { claude: 'opus', codex: 'gpt-6.1-sol' } } } })
+    renderNewTask()
+    await pillReady()
+    expect(document.querySelector('[data-slot="model-pill"]')?.textContent).toContain('opus')
+    fireEvent.pointerDown(document.querySelector('[data-slot="model-pill"]') as HTMLElement)
+    const options = await screen.findAllByRole('menuitemradio')
+    fireEvent.click(options.find((option) => option.textContent?.includes('sonnet')) as HTMLElement)
+    fireEvent.change(textarea(), { target: { value: 'Use my model choice' } })
+    await startTask()
+    expect(postedBody()).toMatchObject({ model: 'sonnet' })
+  })
+
+  it('sends an explicit auto pick so the server can bypass a workflow model preset', async () => {
+    writeDraft({ ...readDraft(), model: '' })
+    serve({ config: { workflowModels: { 'quick-task': { claude: 'sonnet' } } } })
+    renderNewTask()
+    await pillReady()
+    fireEvent.change(textarea(), { target: { value: 'Let Claude select its native model' } })
+    await startTask()
+    expect(postedBody()).toMatchObject({ model: '' })
+  })
+
+  it('uses the Codex workflow default independently of the Claude model', async () => {
+    writeDraft({ ...readDraft(), runner: 'codex', model: null })
+    serve({ providerStatus: PROVIDERS_MULTI, config: {
+      workflowModels: { 'quick-task': { claude: 'opus', codex: 'gpt-6.1-sol' } },
+    } })
+    renderNewTask()
+    await pillReady()
+    expect(document.querySelector('[data-slot="model-pill"]')?.textContent).toContain('gpt-6.1-sol')
+    fireEvent.change(textarea(), { target: { value: 'Use Codex defaults' } })
+    await startTask()
+    expect(postedBody()).toMatchObject({ runner: 'codex', model: 'gpt-6.1-sol' })
+  })
+
+  it('defaults a standalone review to agy and its configured Gemini model', async () => {
+    writeDraft({ ...readDraft(), source: { source: 'workflow', ref: 'pr-review' }, runner: null, model: null })
+    serve({ providerStatus: { providers: [...PROVIDERS_MULTI.providers,
+      { provider: 'agy', status: 'connected', enabled: true }] },
+      workflows: { workflows: [...WORKFLOWS.workflows, { name: 'pr-review', source: 'built-in', steps: [] }], issues: [] },
+      config: { workflowRunners: { 'pr-review': 'agy' },
+        workflowModels: { 'pr-review': { agy: 'gemini-3.8-flash-medium' } } },
+    })
+    renderNewTask()
+    await pillReady('pr-review')
+    expect(document.querySelector('[data-slot="model-pill"]')?.textContent).toContain('gemini-3.8-flash-medium')
+    fireEvent.change(textarea(), { target: { value: 'Review PR #12' } })
+    await startTask()
+    expect(postedBody()).toMatchObject({ workflow: 'pr-review', model: 'gemini-3.8-flash-medium' })
+    expect((postedBody() as Record<string, unknown>).runner).toBeUndefined()
+  })
+
   it('shows a locked native default but omits it from the direct run request', async () => {
     writeDraft({ ...readDraft(), model: 'opus' })
     serve({

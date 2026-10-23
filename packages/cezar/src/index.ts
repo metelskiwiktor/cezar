@@ -14,7 +14,7 @@ import { applyProviderEnablement } from './core/provider-availability.ts';
 import { ensureDataGitignore } from './data-gitignore.ts';
 import { pruneOrphans } from './git-worktree.ts';
 import { getRepoInfo } from './server/git.ts';
-import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveWorktreeRetention } from './config.ts';
+import { DEFAULT_WORKTREE_RETENTION, loadConfig, resolveTaskRunner, resolveWorktreeRetention } from './config.ts';
 import { reclaimWorktrees } from './runs/retention.ts';
 import { armRepoHandle } from './runs/arm-repo-handle.ts';
 import { RunStore } from './runs/store.ts';
@@ -523,7 +523,7 @@ async function runCommand(
   const providerAuth = new ProviderAuthService({ cwd: repoRoot, onInconclusive: (probe) => void reportInconclusiveProbe(probe) });
   const requiredProviders = providersRequiredByWorkflow(
     workflow,
-    (await loadConfig(repoRoot)).defaultRunner,
+    resolveTaskRunner(await loadConfig(repoRoot), workflow.name),
   );
   if (requiredProviders.length > 0 && !providerAuthChecksDisabled()) {
     const [discovered, workspace] = await Promise.all([
