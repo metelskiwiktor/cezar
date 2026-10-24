@@ -85,10 +85,11 @@ export class AgyReviewEvidence {
     this.checkFiles.set(resolve(file), { lines, read: false, coverage: new Set() });
   }
 
-  private file(input: unknown): string | undefined {
+  private file(input: unknown, toolName: string): string | undefined {
     if (!input || typeof input !== 'object' || !this.spec.cwd) return;
     const params = input as Record<string, unknown>;
-    const path = params.AbsolutePath ?? params.DirectoryPath ?? params.SearchPath ?? params.SearchDirectory ?? params.File;
+    // Agy's read_file uses Path; never let an unrelated AbsolutePath hide it.
+    const path = toolName.toLowerCase() === 'read_file' ? params.Path : params.AbsolutePath ?? params.DirectoryPath ?? params.SearchPath ?? params.SearchDirectory ?? params.File;
     if (typeof path !== 'string' || !isAbsolute(path)) return;
     const absolute = resolve(path);
     const local = relative(this.spec.cwd, absolute);
@@ -105,7 +106,7 @@ export class AgyReviewEvidence {
   }
 
   allowsFileInspection(record: AgentToolCallRecord): boolean {
-    return !['view_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name'].includes(record.name.toLowerCase()) || this.file(record.input) !== undefined;
+    return !['view_file', 'read_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name'].includes(record.name.toLowerCase()) || this.file(record.input, record.name) !== undefined;
   }
 
   result(id: string, error: boolean, message: string): boolean {
@@ -113,8 +114,8 @@ export class AgyReviewEvidence {
     if (!call) return false;
     this.pending.delete(id);
     if (!error && call.name === 'run_command' && (call.input as Record<string, unknown>)?.CommandLine === this.diff) this.diffRead = true;
-    if (call.name !== 'view_file') return false;
-    const path = this.file(call.input);
+    if (!['view_file', 'read_file'].includes(call.name.toLowerCase())) return false;
+    const path = this.file(call.input, call.name);
     if (!path) return false;
     if (!error) {
       if (!existsSync(path)) return false;
