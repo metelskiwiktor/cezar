@@ -280,6 +280,13 @@ describe('AgyCliRunner security hardening & isolation', () => {
         expect(serveCheckoutRead(repo, join(repo, 'ten.txt'), 11, 12)).toHaveProperty('error');
         expect(serveCheckoutRead(repo, join(repo, 'bin.dat'))).toEqual({ error: 'bin.dat is a binary file' });
         expect(serveCheckoutRead(repo, join(repo, 'nope.txt'))).toHaveProperty('error');
+        // A leaf link swapped in after containment was checked must not leak the outside file.
+        const outside = mkdtempSync(join(tmpdir(), 'cez-agy-outside-'));
+        repos.push(outside);
+        writeFileSync(join(outside, 'secret.txt'), 'secret\n');
+        let linked = true;
+        try { symlinkSync(join(outside, 'secret.txt'), join(repo, 'leak.txt')); } catch { linked = false; }
+        if (linked) expect(serveCheckoutRead(repo, join(repo, 'leak.txt'))).toEqual({ error: 'leak.txt changed while it was read' });
       });
     });
 

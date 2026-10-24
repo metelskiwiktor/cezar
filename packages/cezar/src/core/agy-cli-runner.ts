@@ -8,8 +8,8 @@
  * `UiEvent`s alongside.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { closeSync, existsSync, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
   AgentEvent,
@@ -142,10 +142,24 @@ const SERVED_READ_MAX_REQUESTS = 10;
 export function serveCheckoutRead(cwd: string, path: string, start?: number, end?: number): { text: string; first: number; last: number } | { error: string } {
   try {
     const shown = relative(cwd, path).replace(/\\/g, '/');
-    const stat = statSync(path);
-    if (!stat.isFile()) return { error: `${shown} is not a regular file` };
-    if (stat.size > SERVED_READ_MAX_BYTES) return { error: `${shown} is larger than ${SERVED_READ_MAX_BYTES} bytes` };
-    const raw = readFileSync(path, 'utf8');
+    // One open file descriptor for check and read (no stat→read race), then the opened file must
+    // still be the realpath-contained checkout file (no swap to a link leaving the checkout).
+    const fd = openSync(path, 'r');
+    let raw: string;
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) return { error: `${shown} is not a regular file` };
+      if (stat.size > SERVED_READ_MAX_BYTES) return { error: `${shown} is larger than ${SERVED_READ_MAX_BYTES} bytes` };
+      const buf = Buffer.alloc(Math.min(stat.size, SERVED_READ_MAX_BYTES) + 1);
+      let got = 0;
+      for (let n = 1; n > 0 && got < buf.length; got += n) n = readSync(fd, buf, got, buf.length - got, null);
+      if (got > SERVED_READ_MAX_BYTES) return { error: `${shown} is larger than ${SERVED_READ_MAX_BYTES} bytes` };
+      const actual = realpathSync(path);
+      const local = relative(realpathSync(cwd), actual);
+      const same = statSync(actual);
+      if (local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local) || same.ino !== stat.ino || same.dev !== stat.dev) return { error: `${shown} changed while it was read` };
+      raw = buf.subarray(0, got).toString('utf8');
+    } finally { closeSync(fd); }
     if (raw.includes('\0')) return { error: `${shown} is a binary file` };
     const rows = raw.split('\n');
     if (rows.at(-1) === '') rows.pop();

@@ -105,7 +105,9 @@ export class AgyReviewEvidence {
     const params = record.input as Record<string, unknown>;
     const given = name === 'read_file' ? params.Path : params.AbsolutePath;
     if (typeof given !== 'string' || !given || given.includes('\0') || isAbsolute(given) || /^[a-z]:/i.test(given) || /^[\\/]/.test(given)) return;
-    const path = this.contained(resolve(this.spec.cwd, given));
+    // A backslash is a separator in the Windows-style paths a model writes; on POSIX it would
+    // otherwise be a filename character. Containment and realpath still run on the result.
+    const path = this.contained(resolve(this.spec.cwd, given.replace(/\\/g, '/')));
     if (!path) return;
     const num = (v: unknown) => (v === undefined ? undefined : Number(v));
     const start = num(params.StartLine);
