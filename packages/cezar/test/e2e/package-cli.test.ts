@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile as execFileCallback } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -9,7 +10,24 @@ import { promisify } from 'node:util';
 
 const execFile = promisify(execFileCallback);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+
+// Node >=20.12 refuses to spawn .cmd files without a shell (spawn EINVAL), so on Windows run
+// npm's JS entry through node with an argument array — no shell involved.
+function npmCommand(args: string[]): [string, string[]] {
+  const candidates = [
+    process.env.npm_execpath,
+    join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+  ];
+  const cli = candidates.find((path) => path && /npm-cli\.[cm]?js$/.test(path) && existsSync(path));
+  if (cli) return [process.execPath, [cli, ...args]];
+  if (process.platform === 'win32') throw new Error('could not locate npm-cli.js next to node or via npm_execpath');
+  return ['npm', args];
+}
+
+async function npm(args: string[], options: { cwd: string; maxBuffer: number }) {
+  const [command, commandArgs] = npmCommand(args);
+  return execFile(command, commandArgs, options);
+}
 
 test('the release tarball installs and runs the dry-run CLI workflow', { timeout: 120_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'cezar-package-e2e-'));
@@ -17,8 +35,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
   try {
     const packDir = join(root, 'pack');
     await mkdir(packDir);
-    const packed = await execFile(
-      npm,
+    const packed = await npm(
       ['pack', '--json', '--ignore-scripts', '--pack-destination', packDir],
       { cwd: repoRoot, maxBuffer: 10 * 1024 * 1024 },
     );
@@ -40,8 +57,7 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     await mkdir(consumerDir);
     await writeFile(join(consumerDir, 'package.json'), '{"private":true}\n', 'utf8');
     const tarball = join(packDir, record.filename);
-    await execFile(
-      npm,
+    await npm(
       ['install', '--ignore-scripts', '--no-audit', '--no-fund', '--no-package-lock', tarball],
       { cwd: consumerDir, maxBuffer: 10 * 1024 * 1024 },
     );
@@ -128,51 +144,55 @@ test('the release tarball installs and runs the dry-run CLI workflow', { timeout
     workspace.disabledProviders = [];
     await writeFile(join(cezHome, 'config.json'), `${JSON.stringify(workspace, null, 2)}\n`, 'utf8');
 
-    const claudeShim = join(root, 'claude-shim.mjs');
-    await writeFile(
-      claudeShim,
-      `#!/usr/bin/env node
-const args = process.argv.slice(2);
-if (args.join(' ') === 'auth status --json') {
-  process.stdout.write('{"loggedIn":true}\\n');
-} else {
-  process.stdout.write('{"type":"system","subtype":"init","session_id":"auth-failure-session"}\\n');
-  process.stdout.write('{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 401 OAuth access token has been revoked.","usage":{"input_tokens":0,"output_tokens":0},"total_cost_usd":0}\\n');
-}
-`,
-      { mode: 0o755 },
-    );
-    await execFile(
-      process.execPath,
-      [cliPath, 'run', 'exercise runtime auth rejection', '--repo', fixtureRepo],
-      {
-        cwd: consumerDir,
-        env: {
-          ...process.env,
-          CEZ_CLAUDE_BIN: claudeShim,
-          CEZ_HOME: cezHome,
+    // The shim is a script run directly as CEZ_CLAUDE_BIN; native Windows cannot exec a .mjs/.cmd
+    // without a shell, so this runtime-auth segment is POSIX-only (docs/windows-validation.md).
+    if (process.platform !== 'win32') {
+      const claudeShim = join(root, 'claude-shim.mjs');
+      await writeFile(
+        claudeShim,
+        `#!/usr/bin/env node
+  const args = process.argv.slice(2);
+  if (args.join(' ') === 'auth status --json') {
+    process.stdout.write('{"loggedIn":true}\\n');
+  } else {
+    process.stdout.write('{"type":"system","subtype":"init","session_id":"auth-failure-session"}\\n');
+    process.stdout.write('{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 401 OAuth access token has been revoked.","usage":{"input_tokens":0,"output_tokens":0},"total_cost_usd":0}\\n');
+  }
+  `,
+        { mode: 0o755 },
+      );
+      await execFile(
+        process.execPath,
+        [cliPath, 'run', 'exercise runtime auth rejection', '--repo', fixtureRepo],
+        {
+          cwd: consumerDir,
+          env: {
+            ...process.env,
+            CEZ_CLAUDE_BIN: claudeShim,
+            CEZ_HOME: cezHome,
+          },
+          timeout: 60_000,
+          maxBuffer: 10 * 1024 * 1024,
         },
-        timeout: 60_000,
-        maxBuffer: 10 * 1024 * 1024,
-      },
-    ).catch(() => undefined);
-    const runsAfterAuthFailure = JSON.parse(
-      await readFile(join(fixtureRepo, '.ai', 'cezar', 'runs.json'), 'utf8'),
-    ) as Array<{ id: string }>;
-    assert.equal(runsAfterAuthFailure.length, 2, 'the runtime-auth fixture creates exactly one run');
-    const authFailureRun = runsAfterAuthFailure.at(0);
-    assert.ok(authFailureRun, 'the auth-failure fixture creates a run');
-    const authFailureEvents = (await readFile(
-      join(fixtureRepo, '.ai', 'cezar', 'runs', `${authFailureRun.id}.ndjson`),
-      'utf8',
-    )).trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
-    assert.ok(
-      authFailureEvents.some((event) =>
-        event.type === 'provider-auth-required'
-        && event.provider === 'claude'
-        && typeof event.authFailureId === 'string'),
-      'headless runtime rejection must persist provider recovery guidance',
-    );
+      ).catch(() => undefined);
+      const runsAfterAuthFailure = JSON.parse(
+        await readFile(join(fixtureRepo, '.ai', 'cezar', 'runs.json'), 'utf8'),
+      ) as Array<{ id: string }>;
+      assert.equal(runsAfterAuthFailure.length, 2, 'the runtime-auth fixture creates exactly one run');
+      const authFailureRun = runsAfterAuthFailure.at(0);
+      assert.ok(authFailureRun, 'the auth-failure fixture creates a run');
+      const authFailureEvents = (await readFile(
+        join(fixtureRepo, '.ai', 'cezar', 'runs', `${authFailureRun.id}.ndjson`),
+        'utf8',
+      )).trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+      assert.ok(
+        authFailureEvents.some((event) =>
+          event.type === 'provider-auth-required'
+          && event.provider === 'claude'
+          && typeof event.authFailureId === 'string'),
+        'headless runtime rejection must persist provider recovery guidance',
+      );
+    }
 
     // `cezar projects` (step 5.2) reads the same registry with no server
     // running — the ssh-into-the-box view of Settings → Projects.
