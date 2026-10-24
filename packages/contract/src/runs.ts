@@ -1077,3 +1077,17 @@ export const patchRunInputSchema = z.object({
   task: z.string().trim().min(1).max(100_000).optional(),
 });
 export type PatchRunInput = z.input<typeof patchRunInputSchema>;
+
+/**
+ * `GET /runs/:id/review-publication` and `POST /runs/:id/review-publication/republish` — a PR
+ * review run's ANALYSIS and its PUBLICATION as two facts. A finished analysis whose comment was
+ * refused is `complete` + `blocked` (with `reason`), never "failed review"; `canRepublish` says
+ * whether the saved result can be posted again without rerunning the agent.
+ */
+export const reviewPublicationSchema = z.object({
+  analysis: z.enum(['complete', 'incomplete']),
+  publication: z.enum(['pending', 'published', 'duplicate', 'blocked', 'stale']),
+  reason: z.string().optional(),
+  canRepublish: z.boolean(),
+});
+export type ReviewPublication = z.infer<typeof reviewPublicationSchema>;

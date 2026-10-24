@@ -62,6 +62,8 @@ import {
   preparePrReviewCheckout,
   publishReviewFromRun,
   renderPrReviewContext,
+  reviewPublicationState,
+  reviewPublishNode,
   type CommandRunner,
   type PrReviewTarget,
 } from '../automations/pr-review.ts';
@@ -95,6 +97,7 @@ import type { QueuedMessage, RunRecord, RunStore, StepState } from '../runs/stor
 // Task dispatch (spec 2026-09-10-dispatch). Every import below is inert unless the feature is
 // ON *and* the run carries a `dispatch`: `dispatchOf()` is the single gate, and a run without one
 // takes byte-for-byte the path it took before this feature existed.
+import type { ReviewPublication } from '@open-mercato/cezar-contract';
 import type { DispatchInput, DispatchIntent, DispatchReport, RunDispatch } from '@open-mercato/cezar-contract';
 import { resolveCapabilities } from '../server/capabilities.ts';
 import { composeDispatchPrompt } from '../dispatch/prompts.ts';
@@ -3718,6 +3721,67 @@ export class RunManager {
    * behaves exactly like an interactive step: `waiting` after each turn,
    * messages via sendMessage, closed by finish/idle/cancel.
    */
+  private readonly republishing = new Set<string>();
+
+  /** Current analysis/publication state of a PR review run, or undefined for any other run. */
+  reviewPublication(runId: string): ReviewPublication | undefined {
+    const run = this.store.getRun(runId);
+    const node = run ? reviewPublishNode(run) : undefined;
+    if (!run || !node) return undefined;
+    return reviewPublicationState(run, readNodeText(this.dataDir, runId, node.from) !== undefined, this.active.has(runId));
+  }
+
+  /**
+   * Posts the SAVED review of a finished analysis again (a blocked publication), without
+   * running the agent. Same target pin, stale-HEAD check, validation and PR+HEAD dedup as the
+   * graph node: it reuses `publishReviewFromRun`, nothing is bypassed.
+   */
+  async republishReview(runId: string): Promise<{ ok: true; state: ReviewPublication } | { ok: false; error: string }> {
+    const run = this.store.getRun(runId);
+    const node = run ? reviewPublishNode(run) : undefined;
+    if (!run || !node || !run.prReview) return { ok: false, error: 'not a PR review run' };
+    // One republish at a time per run; PR+HEAD dedup in the publisher covers cross-process races.
+    if (this.republishing.has(runId)) return { ok: false, error: 'a republish is already in progress' };
+    const state = this.reviewPublication(runId);
+    if (!state?.canRepublish) {
+      return { ok: false, error: state?.analysis === 'incomplete' ? 'the analysis did not complete; nothing to republish' : 'nothing to republish' };
+    }
+    const text = readNodeText(this.dataDir, runId, node.from) as string;
+    const sourceModel = run.graphState?.outputs?.[node.from]?.model;
+    const model = typeof sourceModel === 'string' && sourceModel ? sourceModel : undefined;
+    const runner = run.steps.find((s) => s.id === node.from)?.backend ?? run.runner;
+    const target = run.prReview;
+    let status: string;
+    let reason: string | undefined;
+    this.republishing.add(runId);
+    try {
+      const res = await publishReviewFromRun({
+        repoRoot: this.repoRoot,
+        target,
+        text,
+        ...(model ? { model } : {}),
+        ...(runner ? { runner } : {}),
+        dryRun: process.env.CEZ_PR_REVIEW_DRY_RUN === '1',
+        ...(this.prReviewCommandRunner ? { run: this.prReviewCommandRunner } : {}),
+      });
+      status = res.status === 'skipped-duplicate' ? 'duplicate' : res.status;
+      if (res.status === 'invalid') reason = res.reason;
+    } catch (err) {
+      status = 'failed';
+      reason = (err instanceof Error ? err.message.split('\n')[0] : String(err)) ?? '';
+    } finally {
+      this.republishing.delete(runId);
+    }
+    if (status === 'dry-run') return { ok: false, error: 'dry run — nothing was posted' };
+    const outputs = { ...(this.store.getRun(runId)?.graphState?.outputs ?? {}) };
+    outputs[node.id] = { status, headSha: target.headSha, ...(reason ? { reason: reason.slice(0, 300) } : {}) };
+    const gs = this.store.getRun(runId)?.graphState ?? { loops: {}, taken: [] };
+    this.store.updateRun(runId, { graphState: { ...gs, outputs } });
+    this.store.appendEvent(runId, { type: 'note', message: `review republish: ${status}${reason ? ` — ${reason}` : ''}` });
+    const next = this.reviewPublication(runId);
+    return next ? { ok: true, state: next } : { ok: false, error: 'not a PR review run' };
+  }
+
   continueRun(
     runId: string,
     opts: {
@@ -5566,7 +5630,7 @@ export class RunManager {
           switch (res.status) {
             case 'invalid':
               note(`review not published — ${res.reason}`, 'danger');
-              outputs.set(node.id, { status: 'invalid' });
+              outputs.set(node.id, { status: 'invalid', reason: res.reason.slice(0, 300) });
               return 'failed';
             case 'stale':
               note(`review-stale — PR HEAD moved from ${target?.headSha.slice(0, 8)} to ${res.remoteHead.slice(0, 8) || '?'} during the review; nothing published`, 'danger');

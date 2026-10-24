@@ -31,6 +31,8 @@ import {
   isScheduleAutomation,
   type AutomationDefinition,
 } from '../automations/types.ts';
+import { reviewPublicationState, reviewPublishNode } from '../automations/pr-review.ts';
+import { readNodeText } from '../workflows/node-text.ts';
 import { trackerTriggerSchema, trackerAutomationOptionsSchema, trackerAutomationOptionsQuerySchema, automationScheduleSchema, localTimeZone, nextOccurrence } from '@open-mercato/cezar-contract';
 import type { IncomingMessage } from 'node:http';
 import { access, constants as fsConstants, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
@@ -4702,6 +4704,23 @@ export function createApp(deps: ServerDeps) {
       const finished = manager.finish(id);
       if (!finished) return c.json({ error: 'no open session' }, 409);
       return c.json({ finished: true });
+    })
+
+    // PR review runs: analysis and publication as two facts, and re-posting the SAVED result of
+    // a finished analysis without rerunning the agent.
+    .get('/runs/:id/review-publication', (c) => {
+      const { store, manager, dataDir } = c.get('project');
+      const id = c.req.param('id');
+      const run = store.getRun(id);
+      const node = run ? reviewPublishNode(run) : undefined;
+      const state = run && node ? reviewPublicationState(run, readNodeText(dataDir, id, node.from) !== undefined, manager.isActive(id)) : undefined;
+      return state ? c.json(state) : c.json({ error: 'not a PR review run' }, 404);
+    })
+    .post('/runs/:id/review-publication/republish', async (c) => {
+      const { manager } = c.get('project');
+      const res = await manager.republishReview(c.req.param('id'));
+      if (!res.ok) return c.json({ error: res.error }, res.error === 'not a PR review run' ? 404 : 409);
+      return c.json(res.state);
     })
 
     // "Continue" (spec 003): reopen a finished run's session in-process.
