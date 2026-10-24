@@ -72,7 +72,12 @@ describe('preflightReviewText: /bin/sh in descriptive prose', () => {
     ['a finding location', '- [P1] Location: /bin/sh:3 launcher is wrong'],
     ['a command snippet', 'Run `/bin/sh -c "echo hi"` to see it.'],
     ['an unquoted command', 'Run /bin/sh -c "echo hi" to see it.'],
-    ['a longer path', 'The file /bin/sh/extra is odd.'],
+    ['a command with a script argument', 'Run /bin/sh scripts/check.sh to reproduce.'],
+    ['a code-span command with arguments outside the span', 'Run `/bin/sh` -c "echo ok" to reproduce.'],
+    ['a code-span command with a script argument', 'Run `/bin/sh` scripts/check.sh to reproduce.'],
+    ['another verb and argument', 'Then execute /bin/sh build.sh and compare.'],
+    ['a bare mention outside the proven phrase', 'The /bin/sh launcher is slow on this runner.'],
+    ['a longer path','The file /bin/sh/extra is odd.'],
     ['a private path', 'It reads C:\\Users\\someone\\secret.txt first.'],
     ['another absolute path', 'It reads /home/someone/secret.txt first.'],
     ['a link', 'See [launcher](/bin/sh) for details.'],
@@ -81,6 +86,22 @@ describe('preflightReviewText: /bin/sh in descriptive prose', () => {
     expect(out.repaired).toBe(false);
     expect(out.text).toContain(line);
     expect(checkReviewText(out.text).ok).toBe(false);
+  });
+
+  it.each([
+    'Assessment: inspect the shell launcher behaviour.\nRun /bin/sh scripts/check.sh to reproduce.\nRecommendation: APPROVE',
+    'Assessment: inspect the shell launcher behaviour.\nRun `/bin/sh` -c "echo ok" to reproduce.\nRecommendation: APPROVE',
+  ])('does not mutate a command or change the verdict (%#)', (text) => {
+    const out = preflightReviewText(text);
+    expect(out.repaired).toBe(false);
+    expect(out.text).toBe(text);
+    expect(checkReviewText(out.text).ok).toBe(false);
+  });
+
+  it('only rewrites the phrase and keeps findings and verdict byte-identical', () => {
+    const text = 'Assessment of the tests, with enough detail.\n- [P2] tests/a.ts:3 — weak assertion\nIt cannot cover inline /bin/sh launcher execution here.\nRecommendation: CHANGES REQUESTED';
+    const out = preflightReviewText(text);
+    expect(out.text).toBe(text.replace('/bin/sh', 'POSIX shell'));
   });
 
   it('never edits a fenced code block', () => {

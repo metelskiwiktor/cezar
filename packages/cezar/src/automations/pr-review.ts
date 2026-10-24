@@ -216,22 +216,18 @@ export function stripCezMarkers(text: string): string {
   return text.replace(CEZ_MARKER_LINE_RE, '').trim();
 }
 
-/** The one known inline executable literal that prose reviews mention: the POSIX launcher. */
-const SH_LITERAL_RE = /(?<![\w/.\-])\/bin\/sh(?![\w/.\-])(?!\s+-)/g;
-const SH_REPLACEMENT = 'POSIX shell';
+/** The one proven descriptive phrase (#19): "inline /bin/sh launcher execution", bare or in backticks. */
+const SH_PHRASE_RE = /\b(inline\s+)(\x60?)\/bin\/sh\2(\s+launcher\s+execution\b)/g;
 
-/** Descriptive prose only: code spans other than exactly `/bin/sh` and links stay untouched. */
+/** Rewrites only that phrase; commands, arguments, other mentions and links are never touched. */
 function rewriteShLiteral(line: string): string {
   if (/\]\(|:\/\/|<https?:/i.test(line)) return line;
-  return line.split(/(`[^`]*`)/).map((part) => {
-    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) return part.slice(1, -1).trim() === '/bin/sh' ? SH_REPLACEMENT : part;
-    return part.replace(SH_LITERAL_RE, SH_REPLACEMENT);
-  }).join('');
+  return line.replace(SH_PHRASE_RE, '$1POSIX shell$3');
 }
 
 /** One deterministic formatting pass, not an agent retry or a path-prefix rewrite.
  * Only standalone inline executable literals in prose (a Windows executable path on an
- * "executable ... hardcoded" line, or exactly `/bin/sh`) are reworded. Finding locations,
+ * "executable ... hardcoded" line, or the phrase "inline /bin/sh launcher execution") are reworded. Finding locations,
  * source paths, links, code blocks, command snippets and ambiguous output fail closed.
  * Always revalidate the ENTIRE resulting body with the publisher's own validator.
  */

@@ -11,7 +11,7 @@ The task header shows both in one line; it never says published until GitHub con
 
 Before validation, `preflightReviewText` makes one deterministic pass over descriptive prose only:
 a Windows executable path on an "executable … hardcoded" line becomes `[local executable path omitted]`,
-and an exact `/bin/sh` (plain or as a lone code span, not followed by arguments) becomes `POSIX shell`.
+and only the proven phrase "inline `/bin/sh` launcher execution" (bare or in backticks) becomes "inline POSIX shell launcher execution". Any other `/bin/sh` mention, including commands and arguments, is left as is and still rejected.
 Finding locations, fenced code, command snippets, links and every other path are untouched, and the whole
 body is revalidated by the unchanged global path validator. The run gets a note that a formatting repair happened.
 
