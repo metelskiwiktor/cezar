@@ -219,10 +219,47 @@ export function stripCezMarkers(text: string): string {
 /** The one proven descriptive phrase (#19): "inline /bin/sh launcher execution", bare or in backticks. */
 const SH_PHRASE_RE = /\b(inline\s+)(\x60?)\/bin\/sh\2(\s+launcher\s+execution\b)/g;
 
-/** Rewrites only that phrase; commands, arguments, other mentions and links are never touched. */
+/** CommonMark inline code spans of a line as [start, end) ranges; null when a backtick run has no closer. */
+function inlineCodeSpans(line: string): Array<[number, number]> | null {
+  const spans: Array<[number, number]> = [];
+  for (let i = 0; i < line.length;) {
+    if (line[i] !== '\x60') { i++; continue; }
+    let n = 1;
+    while (line[i + n] === '\x60') n++;
+    let j = i + n;
+    let close = -1;
+    while (j < line.length) {
+      if (line[j] !== '\x60') { j++; continue; }
+      let m = 1;
+      while (line[j + m] === '\x60') m++;
+      if (m === n) { close = j + m; break; }
+      j += m;
+    }
+    if (close < 0) return null;
+    spans.push([i, close]);
+    i = close;
+  }
+  return spans;
+}
+
+/** Rewrites only that phrase, and only in prose: not in indented code, inline code (the lone
+ *  /bin/sh span of the phrase excepted), links or lines with unbalanced backticks. */
 function rewriteShLiteral(line: string): string {
-  if (/\]\(|:\/\/|<https?:/i.test(line)) return line;
-  return line.replace(SH_PHRASE_RE, '$1POSIX shell$3');
+  if (/^(?: {4}|\t)/.test(line) || /\]\(|:\/\/|<https?:/i.test(line)) return line;
+  const spans = inlineCodeSpans(line);
+  if (!spans) return line;
+  let out = line;
+  const matches = [...line.matchAll(SH_PHRASE_RE)].reverse();
+  for (const m of matches) {
+    const start = m.index as number;
+    const end = start + m[0].length;
+    const literalStart = start + (m[1] as string).length;
+    const literal: [number, number] | undefined = m[2] ? [literalStart, literalStart + '\x60/bin/sh\x60'.length] : undefined;
+    const clear = spans.every(([x, y]) => y <= start || x >= end || (literal !== undefined && x === literal[0] && y === literal[1]));
+    if (!clear || (literal && !spans.some(([x, y]) => x === literal[0] && y === literal[1]))) continue;
+    out = out.slice(0, start) + (m[1] as string) + 'POSIX shell' + (m[3] as string) + out.slice(end);
+  }
+  return out;
 }
 
 /** One deterministic formatting pass, not an agent retry or a path-prefix rewrite.

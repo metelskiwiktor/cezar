@@ -98,6 +98,29 @@ describe('preflightReviewText: /bin/sh in descriptive prose', () => {
     expect(checkReviewText(out.text).ok).toBe(false);
   });
 
+  it.each([
+    ['an inline code span command', 'Run `echo inline /bin/sh launcher execution` to reproduce.'],
+    ['a double-backtick span', 'Run ``echo inline /bin/sh launcher execution`` to reproduce.'],
+    ['a double-backtick span around the backticked literal', 'Run ``echo inline `/bin/sh` launcher execution`` to reproduce.'],
+    ['a span opening before the phrase', 'See `cmd inline /bin/sh launcher execution` here.'],
+    ['an unbalanced backtick', 'Run `echo inline /bin/sh launcher execution to reproduce.'],
+    ['an indented code block (4 spaces)', '    inline /bin/sh launcher execution'],
+    ['a tab-indented code block', '\tinline /bin/sh launcher execution'],
+  ])('does not touch the phrase inside %s', (_name, line) => {
+    const text = `Assessment: inspect the shell launcher behaviour.\n${line}\nRecommendation: APPROVE`;
+    const out = preflightReviewText(text);
+    expect(out.repaired).toBe(false);
+    expect(out.text).toBe(text);
+    expect(checkReviewText(out.text).ok).toBe(false);
+  });
+
+  it('rewrites the phrase in prose next to unrelated code spans, leaving them intact', () => {
+    const text = 'Assessment of the tests, with enough detail.\nUse `npm test` and note inline `/bin/sh` launcher execution plus `x`.\nRecommendation: APPROVE';
+    const out = preflightReviewText(text);
+    expect(out.text).toBe(text.replace('`/bin/sh`', 'POSIX shell'));
+    expect(checkReviewText(out.text).ok).toBe(true);
+  });
+
   it('only rewrites the phrase and keeps findings and verdict byte-identical', () => {
     const text = 'Assessment of the tests, with enough detail.\n- [P2] tests/a.ts:3 — weak assertion\nIt cannot cover inline /bin/sh launcher execution here.\nRecommendation: CHANGES REQUESTED';
     const out = preflightReviewText(text);
