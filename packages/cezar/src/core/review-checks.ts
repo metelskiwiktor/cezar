@@ -114,6 +114,13 @@ export function prepareReviewDiff(cwd: string, base: string, head: string) {
       writeFileSync(path, result, { encoding: 'utf8', flag: 'wx' });
       return { path, lines: lines(result) };
     },
+    /** Text Cezar read from the checkout for a path the backend refuses (relative form). */
+    servedReadFile: (n: number, text: string) => {
+      if (realpathSync(dir) !== dirActual) throw new Error('Review artifact directory changed');
+      const path = join(dir, `read-${n}.txt`);
+      writeFileSync(path, text, { encoding: 'utf8', flag: 'wx' });
+      return { path, lines: lines(text) };
+    },
     cleanup: () => {
       try {
         if (existsSync(runtimeDir) && realpathSync(runtimeDir) === runtimeDirActual) {

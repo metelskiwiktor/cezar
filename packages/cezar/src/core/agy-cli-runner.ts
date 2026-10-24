@@ -8,8 +8,8 @@
  * `UiEvent`s alongside.
  */
 
-import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { closeSync, existsSync, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type {
   AgentEvent,
@@ -131,6 +131,51 @@ export function reviewVerdictRefusal(text: string): string | undefined {
   if (!/Recommendation:\W*(APPROVE|CHANGES REQUESTED|COMMENT)\b/i.test(lines[0]!)) return 'the Recommendation line is not APPROVE, CHANGES REQUESTED or COMMENT';
   return undefined;
 }
+
+/** agy rejects a relative read path in its own permission step, before the tool runs, so the
+ * runner cannot rewrite the argument. It serves the read itself instead (the lines agy would
+ * have returned, at most 800) from the already-contained path. */
+const SERVED_READ_MAX_LINES = 800;
+const SERVED_READ_MAX_BYTES = 2_000_000;
+const SERVED_READ_MAX_REQUESTS = 10;
+
+export function serveCheckoutRead(cwd: string, path: string, start?: number, end?: number): { text: string; first: number; last: number } | { error: string } {
+  try {
+    const shown = relative(cwd, path).replace(/\\/g, '/');
+    // One open file descriptor for check and read (no stat→read race), then the opened file must
+    // still be the realpath-contained checkout file (no swap to a link leaving the checkout).
+    const fd = openSync(path, 'r');
+    let raw: string;
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) return { error: `${shown} is not a regular file` };
+      if (stat.size > SERVED_READ_MAX_BYTES) return { error: `${shown} is larger than ${SERVED_READ_MAX_BYTES} bytes` };
+      const buf = Buffer.alloc(Math.min(stat.size, SERVED_READ_MAX_BYTES) + 1);
+      let got = 0;
+      for (let n = 1; n > 0 && got < buf.length; got += n) n = readSync(fd, buf, got, buf.length - got, null);
+      if (got > SERVED_READ_MAX_BYTES) return { error: `${shown} is larger than ${SERVED_READ_MAX_BYTES} bytes` };
+      const actual = realpathSync(path);
+      const local = relative(realpathSync(cwd), actual);
+      const same = statSync(actual);
+      if (local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local) || same.ino !== stat.ino || same.dev !== stat.dev) return { error: `${shown} changed while it was read` };
+      raw = buf.subarray(0, got).toString('utf8');
+    } finally { closeSync(fd); }
+    if (raw.includes('\0')) return { error: `${shown} is a binary file` };
+    const rows = raw.split('\n');
+    if (rows.at(-1) === '') rows.pop();
+    const first = start ?? 1;
+    const last = Math.min(end ?? first + SERVED_READ_MAX_LINES - 1, first + SERVED_READ_MAX_LINES - 1, rows.length);
+    if (first > rows.length) return { error: `${shown} has only ${rows.length} line(s); requested from line ${first}` };
+    const body = rows.slice(first - 1, last).map((row, i) => `${first + i}: ${row.replace(/\r$/, '')}`).join('\n');
+    return { text: `Cezar served read of ${shown}, lines ${first}-${last} of ${rows.length}\n${body}\n`, first, last };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return { error: code === 'ENOENT' ? 'ENOENT: no such file or directory' : 'the file could not be read' };
+  }
+}
+
+type ReviewReadRequest = NonNullable<ReturnType<AgyReviewEvidence['relativeRead']>>;
+const isReadRequest = (v: ReviewCheck | ReviewReadRequest): v is ReviewReadRequest => 'given' in v;
 
 export interface AgyCliRunnerOptions {
   bin?: string;
@@ -274,6 +319,8 @@ export class AgyCliRunner implements AgentRunner {
     let toolErrors = 0;
     const startedAt = Date.now();
     let checkRequests = 0;
+    let turnNo = 0;
+    const servedReads = new Set<string>();
     let turnText = '';
     let reviewTranscript = '';
     let reviewDiff: ReturnType<typeof prepareReviewDiff> | undefined;
@@ -317,7 +364,7 @@ export class AgyCliRunner implements AgentRunner {
     };
 
     /** Resolves to the trusted check the reviewer requested in this turn, if any. */
-    const runTurn = async (userPrompt: string, systemPrompt?: string, resumeSessionId?: string): Promise<ReviewCheck | undefined> => {
+    const runTurn = async (userPrompt: string, systemPrompt?: string, resumeSessionId?: string): Promise<ReviewCheck | ReviewReadRequest | undefined> => {
       const tokensBeforeTurn = tokensUsed;
       turnText = '';
       const diffInfo = reviewDiff
@@ -401,6 +448,7 @@ export class AgyCliRunner implements AgentRunner {
         // review that has not seen the result yet (live run 2bb661b9 approved "Executed
         // checks: None" four minutes after asking for one).
         let requestedCheck: ReviewCheck | undefined;
+        let requestedRead: ReviewReadRequest | undefined;
         let checkStop = false;
         // Agy's late "malformed function call" is held back, not forwarded as a fatal error,
         // until the turn can be judged: see the recovery gate after the exit.
@@ -456,6 +504,19 @@ export class AgyCliRunner implements AgentRunner {
               terminatedByCezar = true;
               resultError = `PR review native terminal tool rejected (or unsupported tool: ${event.tool}). Request a Cezar CEZ_REVIEW_CHECK instead; do not retry a denied command. Native Agy commands require interactive permission or unsupported Windows exebox.`;
               killAgyTree(child);
+            }
+            const relativeRead = spec.prReview && !evidence.allowsFileInspection({ id: event.id, name: event.tool, input: event.input })
+              ? evidence.relativeRead({ id: event.id, name: event.tool, input: event.input }) : undefined;
+            if (relativeRead) {
+              // Stop before the backend's rejection matters; the read is served by Cezar after exit.
+              requestedRead = relativeRead;
+              evidence.result(event.id, true, 'served by Cezar');
+              checkStop = true;
+              killAgyTree(child);
+              const hard = setTimeout(() => killAgyTree(child, 'SIGKILL'), AGY_KILL_GRACE_MS);
+              hard.unref?.();
+              child.once('exit', () => clearTimeout(hard));
+              return;
             }
             if (spec.prReview && !evidence.allowsFileInspection({ id: event.id, name: event.tool, input: event.input })) {
               terminatedByCezar = true;
@@ -522,7 +583,7 @@ export class AgyCliRunner implements AgentRunner {
             for (const event of mapAgyStreamEvent(parsed)) {
               // Fresh CLI turns reuse step indexes. Pending calls must not be
               // satisfied by an unrelated successful call in the next turn.
-              const prefix = spec.prReview ? `review-${checkRequests}-` : '';
+              const prefix = spec.prReview ? `review-${turnNo}-` : '';
               emit(event.type === 'tool-call' ? { ...event, id: prefix + event.id } :
                 event.type === 'tool-result' ? { ...event, toolCallId: prefix + event.toolCallId } : event);
             }
@@ -622,7 +683,7 @@ export class AgyCliRunner implements AgentRunner {
         if (resultError) throw new Error(resultError);
         heldTurnEnd = false; // exactly one boundary, even if agy streamed its own turn-end
         onEvent?.({ type: 'turn-end' });
-        return requestedCheck;
+        return requestedRead ?? requestedCheck;
       }
 
       if (exitCode !== 0 && exitCode !== null) {
@@ -667,9 +728,29 @@ export class AgyCliRunner implements AgentRunner {
           const textStart = textChunks.length;
           // Never inherit implementation history. Resume only the conversation
           // the CLI opened for THIS review, so findings survive check rounds.
-          const check = await runTurn(spec.userPrompt, spec.systemPrompt, spec.prReview ? reviewSessionId : spec.sessionId);
-          if (!check) break;
+          const next = await runTurn(spec.userPrompt, spec.systemPrompt, spec.prReview ? reviewSessionId : spec.sessionId);
+          turnNo++;
+          if (!next) break;
           if (terminatedByCezar) throw new Error('PR review cancelled; no check may start');
+          if (isReadRequest(next)) {
+            if (!reviewDiff || !spec.cwd) throw new Error('Missing prepared review checkout');
+            const key = `${next.path}:${next.start ?? ''}:${next.end ?? ''}`;
+            if (servedReads.has(key) || servedReads.size >= SERVED_READ_MAX_REQUESTS) throw new Error('Review read request repeated or over budget; no truncated evidence accepted');
+            servedReads.add(key);
+            const served = serveCheckoutRead(spec.cwd, next.path, next.start, next.end);
+            const shown = relative(spec.cwd, next.path).replace(/\\/g, '/');
+            onEvent?.({ type: 'note', message: `Served relative read of ${shown} from the pinned checkout (agy requires absolute paths)` });
+            if ('error' in served) {
+              reviewTranscript += `\nPrevious read request: ${shown} (relative path, not run by agy). Cezar could not serve it: ${served.error}. Use absolute paths under the checkout for further reads.\n`;
+            } else {
+              const file = reviewDiff.servedReadFile(servedReads.size, served.text);
+              evidence.registerServedRead(file.path, next.path);
+              reviewTranscript += `\nPrevious read request: ${shown} (relative path, not run by agy). Cezar served it from the pinned checkout: inspect the served file before concluding; use absolute paths under the checkout for further reads.\nCezar served read file: ${file.path}\nServed lines: ${file.lines}\n`;
+            }
+            textChunks.splice(textStart);
+            continue;
+          }
+          const check = next;
           const reviewCwd = spec.cwd;
           if (!reviewCwd || !reviewDiff) throw new Error('Missing prepared review checkout');
           if (++checkRequests > 6) throw new Error('Review command request budget exceeded');
