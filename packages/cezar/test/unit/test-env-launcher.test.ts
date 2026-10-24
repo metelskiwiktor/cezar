@@ -27,7 +27,9 @@ function commandPath(command: string): string {
   return execFileSync('/bin/sh', ['-c', `command -v ${command}`], { encoding: 'utf8' }).trim();
 }
 
-const hasSetsid = spawnSync('/bin/sh', ['-c', 'command -v setsid'], { stdio: 'ignore' }).status === 0;
+// The launcher is a POSIX shell script; without /bin/sh (native Windows) it cannot run at all.
+const hasPosixShell = spawnSync('/bin/sh', ['-c', 'exit 0'], { stdio: 'ignore' }).status === 0;
+const hasSetsid = hasPosixShell && spawnSync('/bin/sh', ['-c', 'command -v setsid'], { stdio: 'ignore' }).status === 0;
 
 function makeFixture(withSetsid: boolean): { root: string; path: string } {
   const root = mkdtempSync(join(tmpdir(), 'cez-test-env-launcher-'));
@@ -97,7 +99,13 @@ function descriptor(root: string): { baseUrl: string; app: { pid: number } } {
 for (const withSetsid of [true, false]) {
   test(
     `generated launcher survives its caller and stops by descriptor PID (${withSetsid ? 'setsid' : 'nohup fallback'})`,
-    { skip: withSetsid && !hasSetsid ? 'setsid is not available on this platform' : false },
+    {
+      skip: !hasPosixShell
+        ? '/bin/sh is not available (native Windows); run under WSL, Linux or macOS'
+        : withSetsid && !hasSetsid
+          ? 'setsid is not available on this platform'
+          : false,
+    },
     async () => {
       const fixture = makeFixture(withSetsid);
       const env = { ...process.env, PATH: fixture.path, TEST_ENV_CACHE_TTL_SECONDS: '600' };
