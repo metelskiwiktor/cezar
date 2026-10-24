@@ -63,6 +63,11 @@ switch (mode) {
   case 'recovery': {
     let id = 0;
     const tool = (tool_name, parameters, error) => {
+      if (tool_name === 'view_file' && process.env.FAKE_AGY_READ_FILE) {
+        tool_name = 'read_file';
+        const { AbsolutePath, ...range } = parameters;
+        parameters = { ...range, Path: AbsolutePath };
+      }
       const step_index = ++id;
       line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
       line({ event: 'step_update', step_update: { step_index, state: error ? 'ERROR' : 'DONE', step_type: 'tool', tool_name, tool_info: error ? { error } : { result: '' } } });

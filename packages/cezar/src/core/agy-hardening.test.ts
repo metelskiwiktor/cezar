@@ -202,6 +202,24 @@ describe('AgyCliRunner security hardening & isolation', () => {
       return { ...result, publish, notes, head };
     }
 
+    it('accepts read_file Path reads as pinned diff and changed-file evidence', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_READ_FILE: '1', FAKE_AGY_SKIP_ERROR: '1' }, posts)).resolves.toMatchObject({ publish: { status: 'published' } });
+      expect(posts).toHaveLength(1);
+    });
+
+    it('read_file Path cannot escape the assigned checkout', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_READ_FILE: '1', FAKE_AGY_MISSING_PATH: '../outside/README.md', FAKE_AGY_ERROR: '' }, posts)).rejects.toThrow(/scope violation/);
+      expect(posts).toEqual([]);
+    });
+
+    it('read_file permission denial remains fatal', async () => {
+      const posts: string[] = [];
+      await expect(recoveryRun({ FAKE_AGY_READ_FILE: '1', FAKE_AGY_ERROR: 'permission denied' }, posts)).rejects.toThrow(/permission/i);
+      expect(posts).toEqual([]);
+    });
+
     it('recovers a guessed index path only with corrected read and complete review evidence', async () => {
       const posts: string[] = [];
       await expect(recoveryRun({}, posts)).resolves.toMatchObject({ text: expect.stringContaining('Recommendation: APPROVE'), publish: { status: 'published' } });

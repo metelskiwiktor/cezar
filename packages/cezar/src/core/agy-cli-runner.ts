@@ -61,6 +61,7 @@ export const MUTATING_TOOL_NAMES = new Set([
 
 export const READ_INSPECTION_TOOL_NAMES = new Set([
   'read',
+  'read_file',
   'view_file',
   'grep',
   'grep_search',
@@ -451,7 +452,7 @@ export class AgyCliRunner implements AgentRunner {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
             evidence.call({ id: event.id, name: event.tool, input: event.input });
-            if (spec.prReview && !['view_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name'].includes(event.tool.toLowerCase()) && !MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
+            if (spec.prReview && !['view_file', 'read_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name'].includes(event.tool.toLowerCase()) && !MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
               terminatedByCezar = true;
               resultError = `PR review native terminal tool rejected (or unsupported tool: ${event.tool}). Request a Cezar CEZ_REVIEW_CHECK instead; do not retry a denied command. Native Agy commands require interactive permission or unsupported Windows exebox.`;
               killAgyTree(child);
