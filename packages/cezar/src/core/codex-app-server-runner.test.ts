@@ -65,6 +65,28 @@ describe('a teardown cezar initiated (codex app-server)', () => {
     ).toBe(true);
   }, 15_000);
 
+  it('reports the model the thread resolved to in session.started, though thread/started lands first', async () => {
+    // Run the mock through node so the test also works where a bare .mjs is not executable (Windows).
+    const { spawn: realSpawn } = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+    spawnHook.override = () => realSpawn(process.execPath, [mockBin, 'app-server'], { stdio: 'pipe' });
+    const ui: Array<{ type: string; model?: string }> = [];
+    try {
+      const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
+      const session = runner.startSession(
+        { userPrompt: 'mock:turn-failed', cwd: process.cwd() },
+        () => {},
+        { autoEndAfterFirstTurn: true, onUiEvent: (e) => ui.push(e) },
+      );
+      await session.result;
+    } finally {
+      spawnHook.override = null;
+    }
+
+    expect(ui.filter((e) => e.type === 'session.started')).toEqual([
+      expect.objectContaining({ type: 'session.started', backend: 'codex', model: 'gpt-mock-1' }),
+    ]);
+  }, 15_000);
+
   it('surfaces a failed turn as an AgentEvent error', async () => {
     const runner = new CodexAppServerRunner({ bin: mockBin, timeoutMs: 0 });
     const events: AgentEvent[] = [];

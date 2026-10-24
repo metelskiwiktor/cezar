@@ -109,6 +109,8 @@ class CodexSession implements AgentSession {
    * for existing session consumers (#1105). */
   private followUpDeliveryOpen = true;
   private threadId: string | undefined;
+  /** True while thread/start|resume is in flight (see the `thread/started` skip in the read loop). */
+  private awaitingThreadResult = false;
   private activeTurnId: string | undefined;
   private pendingUserInput: PendingUserInput | undefined;
   private readonly toolCalls: AgentToolCallRecord[] = [];
@@ -228,6 +230,13 @@ class CodexSession implements AgentSession {
               // plan/reasoning state and resetting the current turn id. Child ITEM events still
               // flow, so nested sub-agent activity keeps rendering.
               if (this.isForeignTurnLifecycle(msg)) continue;
+              // The model the thread resolved to is only in the thread/start|resume RESULT, which
+              // lands after the `thread/started` notification; let the result path emit
+              // `session.started` so it carries that model instead of losing the dedup race.
+              if (this.awaitingThreadResult && msg.method === 'thread/started') {
+                this.dispatch(msg);
+                continue;
+              }
               this.emitUi((state) => mapCodexNotification(msg, state));
               this.dispatch(msg);
             }
@@ -446,19 +455,27 @@ class CodexSession implements AgentSession {
       // config overrides, so the user's own [mcp_servers] table is extended, never replaced.
       config: this.privateMcpConfig(),
     };
-    if (this.spec.resume && this.spec.sessionId) {
-      await this.rpc.request('thread/resume', { threadId: this.spec.sessionId, ...clean(overrides) });
-      this.threadId = this.spec.sessionId;
-    } else {
-      const res = await this.rpc.request('thread/start', clean(overrides));
-      this.threadId = threadIdOf(res) ?? this.spec.sessionId;
+    let resolvedModel: string | undefined;
+    this.awaitingThreadResult = true;
+    try {
+      if (this.spec.resume && this.spec.sessionId) {
+        const res = await this.rpc.request('thread/resume', { threadId: this.spec.sessionId, ...clean(overrides) });
+        this.threadId = this.spec.sessionId;
+        resolvedModel = stringField(res, 'model');
+      } else {
+        const res = await this.rpc.request('thread/start', clean(overrides));
+        this.threadId = threadIdOf(res) ?? this.spec.sessionId;
+        resolvedModel = stringField(res, 'model');
+      }
+    } finally {
+      this.awaitingThreadResult = false;
     }
     if (this.threadId) {
       this.emit({ type: 'session', sessionId: this.threadId });
       // The result path (thread/start response, or thread/resume which sends
       // no thread/started notification) — deduplicated inside the mapper.
       const threadId = this.threadId;
-      this.emitUi((state) => codexSessionStarted(threadId, state));
+      this.emitUi((state) => codexSessionStarted(threadId, state, resolvedModel));
     }
 
     // Seed the first turn. The system prompt (skill body + handoff contract)

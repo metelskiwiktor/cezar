@@ -140,10 +140,10 @@ export function createCodexUiState(): CodexUiMapperState {
  * once the thread id is known. Deduplicated against the `thread/started`
  * notification — whichever arrives first emits `session.started`.
  */
-export function codexSessionStarted(threadId: string, state: CodexUiMapperState): CodexUiMapping {
+export function codexSessionStarted(threadId: string, state: CodexUiMapperState, model?: string): CodexUiMapping {
   if (state.sessionStarted || threadId === '') return { events: [], state };
   return {
-    events: [{ type: 'session.started', sessionId: threadId, backend: 'codex' }],
+    events: [{ type: 'session.started', sessionId: threadId, backend: 'codex', ...(model ? { model } : {}) }],
     state: { ...state, sessionStarted: true },
   };
 }
