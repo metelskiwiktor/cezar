@@ -6699,7 +6699,10 @@ export class RunManager {
   private handleRunnerUiEvent(runId: string, state: ActiveRun, sink: UiEventSink, event: UiEvent): void {
     if (state.cancelled || (this.active.has(runId) && this.active.get(runId) !== state)) return;
     this.recordUsageUiEvent(runId, state, event);
-    if (event.type === 'session.started') state.sessionBackend = event.backend;
+    if (event.type === 'session.started') {
+      state.sessionBackend = event.backend;
+      if (event.model) this.store.updateRun(runId, { resolvedModel: event.model });
+    }
     if (!state.skillMissingReported && isUnknownSkillFailure(event)) {
       state.skillMissingReported = true;
       track('skill_missing_in_session', { label: state.sessionBackend ?? 'unknown' });

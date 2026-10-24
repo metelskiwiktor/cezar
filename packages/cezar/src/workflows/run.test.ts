@@ -138,6 +138,17 @@ describe('RunManager directional usage accounting', () => {
     return { run, state, sink };
   }
 
+  it('records the model the session reported on the run, and keeps it when a later session reports none', () => {
+    const { run, state, sink } = fixture();
+    expect(store.getRun(run.id)?.resolvedModel).toBeUndefined();
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'session.started', sessionId: 's1', backend: 'claude', model: 'claude-sonnet-5-5' });
+    expect(store.getRun(run.id)?.resolvedModel).toBe('claude-sonnet-5-5');
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'session.started', sessionId: 's2', backend: 'codex' });
+    expect(store.getRun(run.id)?.resolvedModel).toBe('claude-sonnet-5-5');
+    internal.handleRunnerUiEvent(run.id, state, sink, { type: 'session.started', sessionId: 's3', backend: 'codex', model: 'gpt-6.1-sol' });
+    expect(store.getRun(run.id)?.resolvedModel).toBe('gpt-6.1-sol');
+  });
+
   it('deduplicates starts and completions while summing multiple turns in one invocation', () => {
     const { run, state, sink } = fixture();
     internal.beginUsageInvocation(run.id, state, 'work');

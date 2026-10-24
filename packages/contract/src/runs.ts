@@ -175,6 +175,10 @@ export const runRecordSchema = z.object({
   model: z.string().optional(),
   /** Normalized provider/model identity used for attribution and reproducible replay. */
   modelIdentity: z.string().optional(),
+  /** The model the live session reported in `session.started` — what actually served the run, as opposed to
+   *  `model`, the alias that was asked for (`sonnet`). The latest session wins; absent until one has started,
+   *  on backends that do not report a model, and on records written before this field existed. */
+  resolvedModel: z.string().optional(),
   runner: runnerSchema.optional(),
   /** The composer's per-task agent account (spec 2026-07-29-agent-profiles), applying to steps
    *  on `runner`. Absent = the run follows the project's own selection. */

@@ -181,6 +181,10 @@ export const runRecordSchema = z.object({
    *  whenever it says something `model` does not — so this is no longer a
    *  write-only field whose next reader has to guess whether it is load-bearing. */
   modelIdentity: z.string().optional(),
+  /** The model the live session reported in `session.started` — what actually served the run, as opposed to
+   *  `model`, the alias that was asked for (`sonnet`). The latest session wins; absent until one has started,
+   *  on backends that do not report a model, and on records written before this field existed. */
+  resolvedModel: z.string().optional(),
   /** Agent backend this run used — drives "open in CLI" resume command. `storedRunnerSchema`
    *  so a legacy `claude-cli` record folds to `claude` instead of failing the whole index (#547). */
   runner: storedRunnerSchema.optional(),
