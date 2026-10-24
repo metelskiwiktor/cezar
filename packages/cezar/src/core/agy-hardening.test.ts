@@ -1,12 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { buildChildEnv } from './agent-env.ts';
-import { AgyCliRunner, killAgyTree, MUTATING_TOOL_NAMES } from './agy-cli-runner.ts';
+import { AgyCliRunner, killAgyTree, MUTATING_TOOL_NAMES, serveCheckoutRead } from './agy-cli-runner.ts';
 import { getWorkspaceGitSnapshot, prepareReadOnlyIsolation, verifyWorkspaceIntegrity } from './read-only-sandbox.ts';
 import { prReviewMarker, publishReviewFromRun } from '../automations/pr-review.ts';
 
@@ -168,6 +168,7 @@ describe('AgyCliRunner security hardening & isolation', () => {
         writeFileSync(join(repo, 'AGENTS.md'), 'Review instructions\n');
       }
       mkdirSync(join(repo, 'src'));
+      if (overrides.TEST_LINK_TARGET) symlinkSync(overrides.TEST_LINK_TARGET, join(repo, 'link'), 'junction');
       writeFileSync(join(repo, 'src/models.ts'), 'export type Model = string;\n');
       const git = (...args: string[]) => execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
       git('add', '.');
@@ -184,6 +185,7 @@ describe('AgyCliRunner security hardening & isolation', () => {
       const notes: string[] = [];
       const result = await fakeRunner().run({ userPrompt: prompt, cwd: repo, readOnly: true,
         systemPrompt: 'MAIN_IMPLEMENTATION_SKILL read main checkout handoff', additionalDirectories: [join(repo, '..')],
+        ...(overrides.TEST_CONTINUE ? { sessionId: 'prior-conversation' } : {}),
         prReview: overrides.FAKE_AGY_NO_METADATA ? undefined : { mergeBase: base, headSha: head },
         env: { FAKE_AGY_MODE: 'recovery', FAKE_AGY_DIFF: overrides.FAKE_AGY_FORGED_CONTEXT ? forged : diff, ...overrides } },
         (event) => { if (event.type === 'note') notes.push(event.message); });
@@ -218,6 +220,67 @@ describe('AgyCliRunner security hardening & isolation', () => {
       const posts: string[] = [];
       await expect(recoveryRun({ FAKE_AGY_READ_FILE: '1', FAKE_AGY_ERROR: 'permission denied' }, posts)).rejects.toThrow(/permission/i);
       expect(posts).toEqual([]);
+    });
+
+    // Live run 5a3f5ec0: agy's own permission step rejects a relative read_file path before the
+    // tool runs, so the runner serves the read from the pinned checkout instead (same turn flow
+    // as a trusted check), and publication proceeds through the usual evidence gates.
+    describe('relative read paths (agy requires absolute ones)', () => {
+      const rel = (overrides: Record<string, string> = {}, posts: string[] = []) =>
+        recoveryRun({ FAKE_AGY_MODE: 'relative-read', ...overrides }, posts);
+
+      it.each([
+        ['read_file Path', { FAKE_AGY_REL_PATH: 'tracked.txt' }],
+        ['view_file AbsolutePath, ./ prefix', { FAKE_AGY_REL_TOOL: 'view_file', FAKE_AGY_REL_PATH: './tracked.txt' }],
+        ['a Windows-style separator inside the checkout', { FAKE_AGY_REL_PATH: 'src\\..\\tracked.txt' }],
+        ['Continue (prior session id)', { TEST_CONTINUE: '1' }],
+      ])('serves the read and publishes: %s', async (_name, overrides) => {
+        const posts: string[] = [];
+        const run = await rel(overrides, posts);
+        expect(run.publish).toMatchObject({ status: 'published' });
+        expect(posts).toHaveLength(1);
+        expect(run.notes).toEqual(expect.arrayContaining([expect.stringContaining('Served relative read of tracked.txt')]));
+        expect(run.text).toContain('Recommendation: APPROVE');
+      });
+
+      it('the changed file only counts as opened once the model reads the served copy', async () => {
+        const posts: string[] = [];
+        await expect(rel({ FAKE_AGY_OMIT_SERVED_READ: '1' }, posts)).rejects.toThrow(/no changed file was opened/);
+        expect(posts).toEqual([]);
+      });
+
+      it.each([
+        ['parent traversal', '../outside/README.md'],
+        ['traversal that re-enters by name', 'src/../../cez-other-checkout/tracked.txt'],
+        ['drive-relative', 'C:tracked.txt'],
+        ['root-relative backslash', '\\tracked.txt'],
+        ['root-relative slash', '/tracked.txt'],
+        ['UNC', '\\\\host\\share\\tracked.txt'],
+      ])('does not serve %s', async (_name, path) => {
+        const posts: string[] = [];
+        await expect(rel({ FAKE_AGY_REL_PATH: path }, posts)).rejects.toThrow(/scope violation/);
+        expect(posts).toEqual([]);
+      });
+
+      it('does not serve a path through a symlink/junction that leaves the checkout', async () => {
+        const outside = mkdtempSync(join(tmpdir(), 'cez-agy-outside-'));
+        writeFileSync(join(outside, 'secret.txt'), 'secret\n');
+        repos.push(outside);
+        const posts: string[] = [];
+        await expect(rel({ FAKE_AGY_REL_PATH: 'link/secret.txt', TEST_LINK_TARGET: outside }, posts)).rejects.toThrow(/scope violation/);
+        expect(posts).toEqual([]);
+      });
+
+      it('serves exactly the requested line range, capped, and refuses binary/oversized files', () => {
+        const repo = makeRepo();
+        writeFileSync(join(repo, 'ten.txt'), Array.from({ length: 10 }, (_, i) => `row${i + 1}`).join('\n') + '\n');
+        writeFileSync(join(repo, 'bin.dat'), Buffer.from([1, 0, 2]));
+        expect(serveCheckoutRead(repo, join(repo, 'ten.txt'), 2, 3)).toEqual({ first: 2, last: 3, text: 'Cezar served read of ten.txt, lines 2-3 of 10\n2: row2\n3: row3\n' });
+        expect(serveCheckoutRead(repo, join(repo, 'ten.txt'), 9, 50)).toMatchObject({ first: 9, last: 10 });
+        expect(serveCheckoutRead(repo, join(repo, 'ten.txt'), 11, 12)).toHaveProperty('error');
+        expect(serveCheckoutRead(repo, join(repo, 'bin.dat'))).toEqual({ error: 'bin.dat is a binary file' });
+        expect(serveCheckoutRead(repo, join(repo, 'nope.txt'))).toHaveProperty('error');
+      });
     });
 
     it('recovers a guessed index path only with corrected read and complete review evidence', async () => {

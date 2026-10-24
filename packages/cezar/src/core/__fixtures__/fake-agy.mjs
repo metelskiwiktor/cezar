@@ -87,6 +87,39 @@ switch (mode) {
     resultError();
     break;
   }
+  // Live run 5a3f5ec0: absolute diff reads, then a RELATIVE read_file that agy's own permission
+  // step rejects before the tool runs ("path is not absolute"); agy then goes on talking.
+  case 'relative-read': {
+    const prompt = process.argv.at(-1);
+    const args = process.argv.slice(2);
+    const served = prompt.match(/Cezar served read file: (.+)\n/)?.[1];
+    if (served && args[args.indexOf('--conversation') + 1] !== 'review-fixture-local') process.exit(5);
+    if (process.env.FAKE_AGY_REL_TRACE && served === undefined) writeFileSync(process.env.FAKE_AGY_REL_TRACE, 'turn1');
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 10;
+    const tool = (tool_name, parameters, error) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: error ? 'ERROR' : 'DONE', step_type: 'tool', tool_name, tool_info: error ? { error } : { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'AGENTS.md') });
+    if (served) {
+      if (!process.env.FAKE_AGY_OMIT_SERVED_READ) tool(process.env.FAKE_AGY_REL_TOOL ?? 'read_file', process.env.FAKE_AGY_REL_TOOL === 'view_file' ? { AbsolutePath: served } : { Path: served });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none. Read the changed file via the served copy.\nRecommendation: APPROVE' } });
+      break;
+    }
+    const rel = process.env.FAKE_AGY_REL_PATH ?? 'tracked.txt';
+    const useView = process.env.FAKE_AGY_REL_TOOL === 'view_file';
+    const params = { ...(useView ? { AbsolutePath: rel } : { Path: rel }), StartLine: 1, EndLine: 5 };
+    const name = useView ? 'view_file' : 'read_file';
+    line({ event: 'step_update', step_update: { step_index: 50, state: 'ACTIVE', step_type: 'tool', tool_name: name, tool_info: { parameters: params } } });
+    line({ event: 'step_update', step_update: { step_index: 50, state: 'ERROR', step_type: 'tool', tool_name: name, tool_info: { error: `declaring permissions: failed to parse path: ${rel} must be an absolute path: path is not absolute` } } });
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // A runner that did not stop the turn would let this unverified verdict through.
+    line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none.\nRecommendation: APPROVE' } });
+    break;
+  }
   case 'denial':
     line({ event: 'step_update', step_update: { step_index: 1, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), '..', 'denied.md') } } } });
     line({ event: 'step_update', step_update: { step_index: 1, state: 'ERROR', step_type: 'tool', tool_name: 'view_file', tool_info: { error: 'permission check failed for read_file: user denied permission' } } });

@@ -38,6 +38,8 @@ export class AgyReviewEvidence {
   private readonly affected = new Set<string>();
   /** Checkout files whose last read attempt failed (absolute; reported repo-relative). */
   private readonly failedReads = new Set<string>();
+  /** Cezar-served read artifacts (inside the checkout) → the checkout file they stand for. */
+  private readonly served = new Map<string, string>();
 
   constructor(private readonly spec: AgentRunSpec) {
     const base = spec.prReview?.mergeBase;
@@ -91,7 +93,35 @@ export class AgyReviewEvidence {
     // Agy's read_file uses Path; never let an unrelated AbsolutePath hide it.
     const path = toolName.toLowerCase() === 'read_file' ? params.Path : params.AbsolutePath ?? params.DirectoryPath ?? params.SearchPath ?? params.SearchDirectory ?? params.File;
     if (typeof path !== 'string' || !isAbsolute(path)) return;
-    const absolute = resolve(path);
+    return this.contained(resolve(path));
+  }
+
+  /** A relative read_file/view_file path the agy backend rejects before running the tool
+   * ("path is not absolute"), resolved against the pinned checkout only. Drive-relative
+   * (`C:x`), root-relative (`\x`, `/x`) and traversal forms never qualify. */
+  relativeRead(record: AgentToolCallRecord): { path: string; given: string; start?: number; end?: number } | undefined {
+    const name = record.name.toLowerCase();
+    if (!['view_file', 'read_file'].includes(name) || !record.input || typeof record.input !== 'object' || !this.spec.cwd) return;
+    const params = record.input as Record<string, unknown>;
+    const given = name === 'read_file' ? params.Path : params.AbsolutePath;
+    if (typeof given !== 'string' || !given || given.includes('\0') || isAbsolute(given) || /^[a-z]:/i.test(given) || /^[\\/]/.test(given)) return;
+    const path = this.contained(resolve(this.spec.cwd, given));
+    if (!path) return;
+    const num = (v: unknown) => (v === undefined ? undefined : Number(v));
+    const start = num(params.StartLine);
+    const end = num(params.EndLine);
+    const ok = (v: number | undefined) => v === undefined || (Number.isSafeInteger(v) && v >= 1);
+    if (!ok(start) || !ok(end) || (start !== undefined && end !== undefined && end < start)) return;
+    return { path, given, ...(start !== undefined ? { start } : {}), ...(end !== undefined ? { end } : {}) };
+  }
+
+  /** Cezar served `original` into `served`; the model opening `served` counts as reading it. */
+  registerServedRead(served: string, original: string): void {
+    this.served.set(resolve(served), original);
+  }
+
+  private contained(absolute: string): string | undefined {
+    if (!this.spec.cwd) return;
     const local = relative(this.spec.cwd, absolute);
     if (local === '..' || local.startsWith(`..${sep}`) || isAbsolute(local)) return;
     // A lexically local path can still traverse a checkout symlink/junction.
@@ -120,6 +150,8 @@ export class AgyReviewEvidence {
     if (!error) {
       if (!existsSync(path)) return false;
       this.reads.add(path);
+      const standsFor = this.served.get(path);
+      if (standsFor) { this.reads.add(standsFor); this.failedReads.delete(standsFor); }
       if (this.trustedDiff) {
         const input = (call.input ?? {}) as Record<string, unknown>;
         const start = input.StartLine !== undefined ? Number(input.StartLine) : undefined;
