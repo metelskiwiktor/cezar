@@ -95,6 +95,7 @@ import type {
   RunCommitsResponse,
   RunHistoryContext,
   RunHistoryPage,
+  ReviewPublication,
   RepoResponse,
   RepoTree,
   Runner,
@@ -1537,6 +1538,26 @@ export async function markAllRunsSeen(): Promise<MarkAllReadResponse> {
       param: { projectId: queryScope() },
     }),
     '/runs/read-all',
+  )
+}
+
+/** A PR review run's analysis and publication state (404 for any other run). */
+export async function getReviewPublication(id: string): Promise<ReviewPublication> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id']['review-publication'].$get({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+    }),
+    runPath(id, '/review-publication'),
+  )
+}
+
+/** Post the saved review of a finished analysis again — no agent is rerun. 409 with the reason when refused. */
+export async function republishReview(id: string): Promise<ReviewPublication> {
+  return unwrap(
+    await cez.api.v1.p[':projectId'].runs[':id']['review-publication'].republish.$post({
+      param: { projectId: queryScope(), id: encodeURIComponent(id) },
+    }),
+    runPath(id, '/review-publication/republish'),
   )
 }
 

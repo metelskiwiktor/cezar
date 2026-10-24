@@ -13,6 +13,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import type { ReviewPublication } from '@open-mercato/cezar-contract';
+import type { RunRecord } from '../runs/store.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -214,9 +216,56 @@ export function stripCezMarkers(text: string): string {
   return text.replace(CEZ_MARKER_LINE_RE, '').trim();
 }
 
+/** The one proven descriptive phrase (#19): "inline /bin/sh launcher execution", bare or in backticks. */
+const SH_PHRASE_RE = /\b(inline\s+)(\x60?)\/bin\/sh\2(\s+launcher\s+execution\b)/g;
+
+/** CommonMark inline code spans of a line as [start, end) ranges; null when a backtick run has no closer. */
+function inlineCodeSpans(line: string): Array<[number, number]> | null {
+  const spans: Array<[number, number]> = [];
+  for (let i = 0; i < line.length;) {
+    if (line[i] !== '\x60') { i++; continue; }
+    let n = 1;
+    while (line[i + n] === '\x60') n++;
+    let j = i + n;
+    let close = -1;
+    while (j < line.length) {
+      if (line[j] !== '\x60') { j++; continue; }
+      let m = 1;
+      while (line[j + m] === '\x60') m++;
+      if (m === n) { close = j + m; break; }
+      j += m;
+    }
+    if (close < 0) return null;
+    spans.push([i, close]);
+    i = close;
+  }
+  return spans;
+}
+
+/** Rewrites only that phrase, and only in prose: not in indented code, inline code (the lone
+ *  /bin/sh span of the phrase excepted), links or lines with unbalanced backticks. */
+function rewriteShLiteral(line: string): string {
+  if (/^(?: {4}|\t)/.test(line) || /\]\(|:\/\/|<https?:/i.test(line)) return line;
+  const spans = inlineCodeSpans(line);
+  if (!spans) return line;
+  let out = line;
+  const matches = [...line.matchAll(SH_PHRASE_RE)].reverse();
+  for (const m of matches) {
+    const start = m.index as number;
+    const end = start + m[0].length;
+    const literalStart = start + (m[1] as string).length;
+    const literal: [number, number] | undefined = m[2] ? [literalStart, literalStart + '\x60/bin/sh\x60'.length] : undefined;
+    const clear = spans.every(([x, y]) => y <= start || x >= end || (literal !== undefined && x === literal[0] && y === literal[1]));
+    if (!clear || (literal && !spans.some(([x, y]) => x === literal[0] && y === literal[1]))) continue;
+    out = out.slice(0, start) + (m[1] as string) + 'POSIX shell' + (m[3] as string) + out.slice(end);
+  }
+  return out;
+}
+
 /** One deterministic formatting pass, not an agent retry or a path-prefix rewrite.
- * Only standalone inline executable literals in prose can be omitted. Finding
- * locations, source paths, links, command snippets and ambiguous output fail closed.
+ * Only standalone inline executable literals in prose (a Windows executable path on an
+ * "executable ... hardcoded" line, or the phrase "inline /bin/sh launcher execution") are reworded. Finding locations,
+ * source paths, links, code blocks, command snippets and ambiguous output fail closed.
  * Always revalidate the ENTIRE resulting body with the publisher's own validator.
  */
 export function preflightReviewText(text: string): { text: string; repaired: boolean } {
@@ -227,8 +276,9 @@ export function preflightReviewText(text: string): { text: string; repaired: boo
     if (/^\s*(?:```|~~~)/.test(line)) { fenced = !fenced; return line; }
     if (fenced) return line;
     if (/location\s*:|^\s*(?:[-*]\s*)?(?:\[P[0-3]\]|P[0-3])\b/i.test(line)) return line;
-    if (!/\b(?:executable|binary)\b.*\b(?:hardcoded|configured|set)\b/i.test(line)) return line;
-    return line.replace(/`(['"]?)([A-Za-z]:[\\/][^`\r\n]+?\.(?:exe|cmd|bat))\1`/g,
+    const sh = rewriteShLiteral(line);
+    if (!/\b(?:executable|binary)\b.*\b(?:hardcoded|configured|set)\b/i.test(sh)) return sh;
+    return sh.replace(/`(['"]?)([A-Za-z]:[\\/][^`\r\n]+?\.(?:exe|cmd|bat))\1`/g,
       '`[local executable path omitted]`');
   }).join('\n');
   return checkReviewText(repaired).ok ? { text: repaired, repaired: repaired !== original } : { text: original, repaired: false };
@@ -387,4 +437,39 @@ export async function publishReviewFromRun(input: PublishReviewRunInput): Promis
     run,
     ...(input.dryRun ? { dryRun: true } : {}),
   });
+}
+
+export type ReviewPublicationInfo = ReviewPublication;
+
+/** The `github.review-comment` node of a review run and the agent node it publishes. */
+export function reviewPublishNode(run: Pick<RunRecord, 'workflowDef'>): { id: string; from: string } | undefined {
+  const node = run.workflowDef?.graph?.nodes.find((n) => n.type === 'github.review-comment');
+  return node && node.type === 'github.review-comment' ? { id: node.id, from: node.from } : undefined;
+}
+
+/**
+ * Analysis and publication of a review run, reported separately. `savedText` is whether the
+ * agent's full text was recorded; `active` whether the run is still working.
+ */
+export function reviewPublicationState(
+  run: Pick<RunRecord, 'workflowDef' | 'steps' | 'graphState' | 'prReview'>,
+  savedText: boolean,
+  active: boolean,
+): ReviewPublicationInfo | undefined {
+  const node = run.prReview ? reviewPublishNode(run) : undefined;
+  if (!node) return undefined;
+  const complete = run.steps.find((s) => s.id === node.from)?.status === 'done' && savedText;
+  const out = run.graphState?.outputs?.[node.id];
+  const status = typeof out?.status === 'string' ? out.status : '';
+  const reason = typeof out?.reason === 'string' ? out.reason : undefined;
+  const sameHead = !out?.headSha || out.headSha === run.prReview?.headSha;
+  let publication: ReviewPublicationInfo['publication'] = 'pending';
+  if (sameHead && (status === 'published' || status === 'duplicate' || status === 'stale')) publication = status;
+  else if (status === 'invalid' || status === 'failed') publication = 'blocked';
+  return {
+    analysis: complete ? 'complete' : 'incomplete',
+    publication,
+    ...(reason ? { reason } : {}),
+    canRepublish: complete && publication === 'blocked' && !active,
+  };
 }

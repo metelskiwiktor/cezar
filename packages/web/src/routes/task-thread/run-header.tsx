@@ -57,6 +57,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { OpenInMenu, type OpenInChoice } from '@/components/open-in-menu'
 import { toast } from '@/components/ui/toaster'
+import { ReviewPublicationLine } from './review-publication-line'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { DirectionalUsage } from '@/components/directional-usage'
 import { ATTENTION_RANK, budgetStop, deriveAttention, type AttentionTone } from '@/lib/attention'
@@ -263,6 +264,7 @@ function RunHeaderView({
               are what the run IS doing right now, not metadata about how it started. */}
           <DispatchParentLine run={run} />
           <DispatchChildrenLine run={run} />
+          <ReviewPublicationLine run={run} />
 
           <div
             data-slot="run-tabs"
