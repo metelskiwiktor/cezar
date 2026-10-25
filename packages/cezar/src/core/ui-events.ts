@@ -99,7 +99,7 @@ export interface PlanEntry {
  * concern, not a wire concern).
  *
  * Per backend: claude `result.usage` (+ `total_cost_usd` as `costUsd` on the
- * carrying event); codex `thread/tokenUsage/updated` (no USD); opencode
+ * carrying event, + `modelUsage[model].contextWindow` as `contextWindow`); codex `thread/tokenUsage/updated` (no USD); opencode
  * `message.updated` info.tokens/cost and `step-finish` parts.
  */
 export interface TokenUsage {

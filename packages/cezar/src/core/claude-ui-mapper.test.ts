@@ -191,6 +191,70 @@ describe('mapClaudeMessage edge cases', () => {
     expect(mapped.events.map((e) => e.type)).toEqual(['turn.completed']);
   });
 
+  describe('result.modelUsage → usage.contextWindow', () => {
+    const usage = { input_tokens: 2, output_tokens: 4, cache_read_input_tokens: 47625 };
+    const entry = (contextWindow: unknown) => ({ inputTokens: 2, outputTokens: 4, contextWindow });
+    const usageOf = (events: UiEvent[]) => {
+      const updated = events.find((e) => e.type === 'usage.updated');
+      const completed = events.find((e) => e.type === 'turn.completed');
+      return { updated: updated && 'usage' in updated ? updated.usage : undefined, completed: completed && 'usage' in completed ? completed.usage : undefined };
+    };
+    const started = (model?: string) =>
+      mapClaudeMessage({ type: 'system', subtype: 'init', session_id: 's1', ...(model ? { model } : {}) }, state).state;
+
+    it('reports the window of the only model on both turn.completed and usage.updated', () => {
+      const { events } = mapClaudeMessage(
+        { type: 'result', subtype: 'success', usage, modelUsage: { 'claude-opus-5-5': entry(1_000_000) } },
+        started('claude-opus-5-5'),
+      );
+      const { updated, completed } = usageOf(events);
+      expect(updated?.contextWindow).toBe(1_000_000);
+      expect(completed?.contextWindow).toBe(1_000_000);
+      expect(updated?.total).toBe(2 + 4 + 47625); // counts stay raw
+    });
+
+    it('prefers the session model over another model in modelUsage (subagent on a smaller window)', () => {
+      const { events } = mapClaudeMessage(
+        { type: 'result', usage, modelUsage: { 'claude-haiku-5-5': entry(200_000), 'claude-opus-5-5': entry(1_000_000) } },
+        started('claude-opus-5-5'),
+      );
+      expect(usageOf(events).updated?.contextWindow).toBe(1_000_000);
+    });
+
+    it('matches an init model that carries a context-variant suffix', () => {
+      const { events } = mapClaudeMessage(
+        { type: 'result', usage, modelUsage: { 'claude-haiku-5-5': entry(200_000), 'claude-opus-5-5': entry(1_000_000) } },
+        started('claude-opus-5-5[1m]'),
+      );
+      expect(usageOf(events).updated?.contextWindow).toBe(1_000_000);
+    });
+
+    it('uses a lone entry even when init did not name the model', () => {
+      const { events } = mapClaudeMessage({ type: 'result', usage, modelUsage: { x: entry(200_000) } }, state);
+      expect(usageOf(events).updated?.contextWindow).toBe(200_000);
+    });
+
+    it('stays unknown rather than guessing when several models and none is the session model', () => {
+      const { events } = mapClaudeMessage(
+        { type: 'result', usage, modelUsage: { a: entry(200_000), b: entry(1_000_000) } },
+        started('claude-opus-5-5'),
+      );
+      expect(usageOf(events).updated).not.toHaveProperty('contextWindow');
+    });
+
+    it('ignores absent, non-numeric and non-positive windows', () => {
+      for (const modelUsage of [undefined, null, [], { m: {} }, { m: entry('1000000') }, { m: entry(0) }, { m: entry(-5) }, { m: entry(NaN) }]) {
+        const { events } = mapClaudeMessage({ type: 'result', usage, modelUsage }, state);
+        expect(usageOf(events).updated).not.toHaveProperty('contextWindow');
+      }
+    });
+
+    it('emits no usage.updated at all when result has modelUsage but no usage', () => {
+      const { events } = mapClaudeMessage({ type: 'result', modelUsage: { m: entry(1_000_000) } }, state);
+      expect(events.map((e) => e.type)).toEqual(['turn.completed']);
+    });
+  });
+
   // The runner emits a v1 `text` from `msg.result` when a session streamed no assistant text
   // block (claude-cli-runner.ts, `textChunks.length === 0`). Without the v2 twin, that prose
   // reached the cockpit only in v1 — where the thread reducer's per-turn "v2 wins" rule deleted

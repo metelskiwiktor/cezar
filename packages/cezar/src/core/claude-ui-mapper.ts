@@ -46,6 +46,9 @@ export interface ClaudeUiMapperState {
   readonly fallbackSessionId?: string;
   /** True once `system/init` produced `session.started`. */
   readonly sessionStarted: boolean;
+  /** Model the session resolved to (`system/init.model`). Picks the matching
+   *  `modelUsage` entry when `result` reports more than one model. */
+  readonly sessionModel?: string;
   /** Turns begun before init arrived — their `turn.started` is queued so
    *  `session.started` stays the first event on the wire. */
   readonly pendingTurnIds: readonly string[];
@@ -160,7 +163,10 @@ function mapInit(msg: Record<string, unknown>, state: ClaudeUiMapperState): Clau
   const events: UiEvent[] = [event];
   // Flush turns that began before init (the seeded first user message).
   for (const turnId of state.pendingTurnIds) events.push({ type: 'turn.started', turnId });
-  return { events, state: { ...state, sessionStarted: true, pendingTurnIds: [] } };
+  return {
+    events,
+    state: { ...state, sessionStarted: true, pendingTurnIds: [], ...(model !== undefined ? { sessionModel: model } : {}) },
+  };
 }
 
 // ---- stream_event deltas → item.started + item.delta -----------------------
@@ -641,6 +647,8 @@ function mapResult(msg: Record<string, unknown>, state: ClaudeUiMapperState): Cl
 
   const turnId = state.currentTurnId ?? `turn_${++turnSeq}`;
   const usage = rawTokenUsage(msg.usage);
+  const contextWindow = resultContextWindow(msg.modelUsage, state.sessionModel);
+  if (usage && contextWindow !== undefined) usage.contextWindow = contextWindow;
   const costUsd =
     typeof msg.total_cost_usd === 'number' && Number.isFinite(msg.total_cost_usd)
       ? msg.total_cost_usd
@@ -682,6 +690,29 @@ function resultStopReason(msg: Record<string, unknown>): StopReason {
     default:
       return msg.is_error === true ? 'error' : 'end_turn';
   }
+}
+
+/** The context-window size of the session's own model, from `result.modelUsage`
+ *  (`{ [model]: { contextWindow, … } }`). That is the only place Claude Code
+ *  reports it — the session transcript carries token counts but no window, and
+ *  the window differs per launch (200k vs 1M). `modelUsage` can list several
+ *  models (a subagent on another model), so the session model wins; with no
+ *  match, a lone entry is unambiguous and anything else is left unknown rather
+ *  than guessed. */
+function resultContextWindow(modelUsage: unknown, sessionModel: string | undefined): number | undefined {
+  if (!isRecord(modelUsage)) return undefined;
+  const windowOf = (entry: unknown): number | undefined => {
+    const value = isRecord(entry) ? num(entry.contextWindow) : undefined;
+    return value !== undefined && value > 0 ? value : undefined;
+  };
+  if (sessionModel !== undefined) {
+    // `init.model` may carry a context-variant suffix (`claude-opus-5-5[1m]`).
+    const bare = sessionModel.replace(/\[[^\]]*\]$/, '');
+    const matched = windowOf(modelUsage[sessionModel]) ?? windowOf(modelUsage[bare]);
+    if (matched !== undefined) return matched;
+  }
+  const entries = Object.values(modelUsage);
+  return entries.length === 1 ? windowOf(entries[0]) : undefined;
 }
 
 /** Raw counts straight off the wire — never cost-weighted (that stays a
