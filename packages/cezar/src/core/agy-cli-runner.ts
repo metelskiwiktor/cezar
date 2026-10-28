@@ -174,7 +174,6 @@ export function serveCheckoutRead(cwd: string, path: string, start?: number, end
   }
 }
 
-type NativeTerminalStop = { nativeTerminalStop: true };
 type ReviewReadRequest = NonNullable<ReturnType<AgyReviewEvidence['relativeRead']>>;
 const isReadRequest = (v: ReviewCheck | ReviewReadRequest): v is ReviewReadRequest => 'given' in v;
 
@@ -327,7 +326,6 @@ export class AgyCliRunner implements AgentRunner {
     let toolErrors = 0;
     const startedAt = Date.now();
     let checkRequests = 0;
-    let nativeTerminalStops = 0;
     let turnNo = 0;
     const servedReads = new Set<string>();
     let turnText = '';
@@ -373,7 +371,7 @@ export class AgyCliRunner implements AgentRunner {
     };
 
     /** Resolves to the trusted check the reviewer requested in this turn, if any. */
-    const runTurn = async (userPrompt: string, systemPrompt?: string, resumeSessionId?: string): Promise<ReviewCheck | ReviewReadRequest | NativeTerminalStop | undefined> => {
+    const runTurn = async (userPrompt: string, systemPrompt?: string, resumeSessionId?: string): Promise<ReviewCheck | ReviewReadRequest | undefined> => {
       const tokensBeforeTurn = tokensUsed;
       turnText = '';
       const diffInfo = reviewDiff
@@ -428,9 +426,8 @@ export class AgyCliRunner implements AgentRunner {
 
       // Baseline of HEAD + every tracked/untracked change. Outside a git checkout
       // there is nothing to compare against, so the check is skipped (noted).
-      // Check PR turns stopped on a native terminal attempt as well: the streamed call
-      // can arrive after execution. Brokered checks run between turns and have their own policy.
-      const initialSnapshot = readOnly && spec.cwd ? getWorkspaceGitSnapshot(spec.cwd) : undefined;
+      // PR checkouts are scratch workspaces; brokered checks may modify them.
+      const initialSnapshot = readOnly && !spec.prReview && spec.cwd ? getWorkspaceGitSnapshot(spec.cwd) : undefined;
       if (readOnly && !spec.prReview && initialSnapshot === undefined) {
         onEvent?.({ type: 'note', message: 'read-only run outside a git checkout — change detection skipped' });
       }
@@ -470,7 +467,6 @@ export class AgyCliRunner implements AgentRunner {
         // agy streams text as deltas, but a `text` event is one whole message to the engine
         // (it joins them with newlines): buffer consecutive deltas and forward them as one
         // message, before the next non-text event and at the end of the stream.
-        let nativeTerminalStop: NativeTerminalStop | undefined;
         let pendingText = '';
         const flushText = () => {
           if (!pendingText) return;
@@ -514,11 +510,9 @@ export class AgyCliRunner implements AgentRunner {
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
             evidence.call({ id: event.id, name: event.tool, input: event.input });
             if (spec.prReview && event.tool.toLowerCase() === 'run_command') {
-              // Stream events are a tripwire, not proof that the tool did not execute.
-              // Stop this turn; never execute or translate its command. Inspect integrity
-              // and any streamed denial before offering one fresh continuation.
-              nativeTerminalStop = { nativeTerminalStop: true };
-              evidence.result(event.id, true, 'stopped by Cezar; execution unverified');
+              // The event may arrive after execution, including effects outside the checkout.
+              // A git status snapshot cannot prove otherwise: never resume or publish.
+              resultError = 'PR review stopped after a native terminal attempt: execution and side effects cannot be verified. Nothing is published. Start a new review using inspection tools and CEZ_REVIEW_CHECK; never retry a denied command.';
               checkStop = true;
               killAgyTree(child);
               const hard = setTimeout(() => killAgyTree(child, 'SIGKILL'), AGY_KILL_GRACE_MS);
@@ -630,8 +624,7 @@ export class AgyCliRunner implements AgentRunner {
 
         // Checked on every exit path (incl. timeout and cancel): a read-only run
         // that changed the checkout must never settle as a clean review.
-        if (nativeTerminalStop && initialSnapshot === undefined) throw new Error('PR review stopped after a native terminal attempt: checkout integrity could not be verified');
-        if (readOnly && (!spec.prReview || nativeTerminalStop) && initialSnapshot !== undefined && spec.cwd) {
+        if (readOnly && initialSnapshot !== undefined && spec.cwd) {
           const integrity = verifyWorkspaceIntegrity(spec.cwd, initialSnapshot);
           if (!integrity.clean) {
             const msg = `Read-only review violation: the checkout changed during the run: ${integrity.details}`;
@@ -660,6 +653,10 @@ export class AgyCliRunner implements AgentRunner {
           message: `Antigravity agent terminated by cezar (code ${exitCode})`,
         });
         return;
+      }
+
+      if (checkStop && resultError) {
+        throw new Error(`${resultError}${permissionDeniedError ? ` Tool permission error: ${permissionDeniedError}` : ''}`);
       }
 
       if (readOnly && permissionDeniedError) {
@@ -714,7 +711,7 @@ export class AgyCliRunner implements AgentRunner {
         if (resultError) throw new Error(resultError);
         heldTurnEnd = false; // exactly one boundary, even if agy streamed its own turn-end
         onEvent?.({ type: 'turn-end' });
-        return nativeTerminalStop ?? requestedRead ?? requestedCheck;
+        return requestedRead ?? requestedCheck;
       }
 
       if (exitCode !== 0 && exitCode !== null) {
@@ -769,14 +766,6 @@ export class AgyCliRunner implements AgentRunner {
           turnNo++;
           if (!next) break;
           if (terminatedByCezar) throw new Error('PR review cancelled; no check may start');
-          if ('nativeTerminalStop' in next) {
-            if (!reviewSessionId) throw new Error('PR review stopped after a native terminal attempt: no review conversation is available to continue safely');
-            if (++nativeTerminalStops > 1) throw new Error('PR review stopped: native terminal was requested again; no command was retried and no review was published');
-            onEvent?.({ type: 'note', message: 'Native terminal attempt stopped; command was not brokered. Continuing once with inspection tools and trusted checks only.' });
-            reviewTranscript += '\nThe previous native terminal attempt was stopped. Do not retry that command or use any terminal tool. Its execution is unverified; do not claim it ran. Open changed files using read_file or view_file with absolute checkout paths. For permitted checks request CEZ_REVIEW_CHECK; report anything unavailable as not verified.\n';
-            textChunks.splice(textStart);
-            continue;
-          }
           if (isReadRequest(next)) {
             if (!reviewDiff || !spec.cwd) throw new Error('Missing prepared review checkout');
             const key = `${next.path}:${next.start ?? ''}:${next.end ?? ''}`;

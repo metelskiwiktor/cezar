@@ -146,7 +146,7 @@ switch (mode) {
     };
     trustedDiffReads(tool);
     if (!prompt.includes('The previous native terminal attempt was stopped') || process.env.FAKE_AGY_REPEAT_NATIVE) {
-      if (process.env.FAKE_AGY_NATIVE_MUTATE) writeFileSync(join(process.cwd(), 'tracked.txt'), 'changed before event');
+      if (process.env.FAKE_AGY_NATIVE_MUTATE_PATH) writeFileSync(process.env.FAKE_AGY_NATIVE_MUTATE_PATH, 'changed before event');
       line({ event: 'step_update', step_update: { step_index: ++step, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: process.env.FAKE_AGY_NATIVE_COMMAND ?? 'Select-String -Path vite.config.ts -Pattern test' } } } });
       if (process.env.FAKE_AGY_NATIVE_DENIAL) line({ event: 'step_update', step_update: { step_index: step, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { error: 'user denied permission' } } });
       await new Promise((resolve) => setTimeout(resolve, 1500));

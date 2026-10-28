@@ -87,34 +87,29 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     if (kind === 'test') expect(notes.join('\n')).toContain('targeted contract passed');
   });
 
-  it('recovers once from a Windows native terminal attempt, reads changed code and runs a brokered check', async () => {
+  it.each(['none', 'ignored', 'dirty', 'external'])('fails closed after native terminal attempt with %s side effects', async (kind) => {
     const r = repo();
-    const notes: string[] = [];
-    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery' } }, (e) => { if (e.type === 'note') notes.push(e.message); });
-    expect(result.text).toContain('Recommendation: APPROVE');
-    expect(result.text).toContain('Check `git grep v2 tracked.txt`: exit 0');
-    expect(notes.join(' ')).toContain('Native terminal attempt stopped');
+    const outside = mkdtempSync(join(tmpdir(), 'cez-review-outside-'));
+    repos.push(outside);
+    const target = kind === 'ignored' ? join(r.cwd, '.cache', 'ignored.txt')
+      : kind === 'dirty' ? join(r.cwd, 'tracked.txt') : join(outside, 'external.txt');
+    if (kind === 'ignored') mkdirSync(join(r.cwd, '.cache'));
+    if (kind !== 'none') writeFileSync(target, 'before');
+    const status = () => execFileSync('git', ['status', '--porcelain', '--untracked-files=all', '--', '.', ':(exclude).cezar-review-tmp', ':(exclude).cezar-review-tmp/**'], { cwd: r.cwd, encoding: 'utf8' });
+    const before = status();
+    const events: string[] = [];
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+      FAKE_AGY_MODE: 'native-recovery', ...(kind === 'none' ? {} : { FAKE_AGY_NATIVE_MUTATE_PATH: target }),
+    } }, (e) => { events.push(e.type); })).rejects.toThrow(/native terminal attempt.*side effects cannot be verified.*Nothing is published/);
+    if (kind !== 'none') expect(readFileSync(target, 'utf8')).toBe('changed before event');
+    expect(status()).toBe(before); // porcelain cannot establish that no side effect occurred
+    expect(events).not.toContain('done');
+    expect(events).not.toContain('turn-end'); // no continuation or publishable review
   });
 
-  it('never accepts a continuation without changed-file evidence', async () => {
+  it('fails closed even when the native tool reports a permission denial', async () => {
     const r = repo();
-    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_OMIT_CHANGED: '1' } })).rejects.toThrow(/no changed file was opened/);
-  });
-
-  it('stops repeated native commands without executing them', async () => {
-    const r = repo();
-    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_REPEAT_NATIVE: '1', FAKE_AGY_NATIVE_COMMAND: 'rm tracked.txt' } })).rejects.toThrow(/native terminal was requested again/);
-    expect(readFileSync(join(r.cwd, 'tracked.txt'), 'utf8')).toBe('v2\n');
-  });
-
-  it('refuses continuation if the native tool changed the checkout before its event', async () => {
-    const r = repo();
-    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_NATIVE_MUTATE: '1' } })).rejects.toThrow(/checkout changed/);
-  });
-
-  it('keeps a streamed native permission denial fatal', async () => {
-    const r = repo();
-    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_NATIVE_DENIAL: '1' } })).rejects.toThrow(/permission/i);
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_NATIVE_DENIAL: '1' } })).rejects.toThrow(/native terminal attempt.*Nothing is published/);
   });
 
   it('bounds repeat check requests instead of looping indefinitely', async () => {
