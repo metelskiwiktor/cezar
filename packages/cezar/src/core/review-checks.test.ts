@@ -18,6 +18,15 @@ import { AgyReviewEvidence } from './agy-review-evidence.ts';
 // the offline Node fixture stands in only when just is unavailable.
 // The rg stand-in covers exactly the argv shapes `reviewCommand` emits — `--files [-- PATH]`,
 // `-l|-n -- PATTERN PATH` — and skips dot-entries, as rg does by default.
+// Let the fake flush delayed stdout after a stop request, as an already-running native
+// tool can do while process termination is in flight. No real command is run by it.
+const delayedStop = vi.hoisted(() => ({ enabled: false }));
+vi.mock('./kill-process-tree.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./kill-process-tree.ts')>();
+  return { ...actual, killAgyTree: (...args: Parameters<typeof actual.killAgyTree>) => {
+    if (!delayedStop.enabled) return actual.killAgyTree(...args);
+  } };
+});
 const FAKE_RG = vi.hoisted(() => [
   'const fs = require("fs"), p = require("path"); const a = process.argv.slice(1);',
   'const walk = (d) => fs.statSync(d).isDirectory() ? fs.readdirSync(d).filter((n) => !n.startsWith(".")).flatMap((n) => walk(p.join(d, n))) : [d];',
@@ -42,7 +51,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 const repos: string[] = [];
-function repo(script = '', opts: { justfile?: boolean; agents?: boolean; scripts?: Record<string, string> } = {}) {
+function repo(script = '', opts: { justfile?: boolean; agents?: boolean; scripts?: Record<string, string>; vite?: boolean } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'cez-review-v3-'));
   repos.push(cwd);
   const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -50,6 +59,7 @@ function repo(script = '', opts: { justfile?: boolean; agents?: boolean; scripts
   git('config', 'core.autocrlf', 'false');
   if (opts.agents !== false) writeFileSync(join(cwd, 'AGENTS.md'), 'Review contracts; targeted tests only\n');
   writeFileSync(join(cwd, 'tracked.txt'), 'v1\n');
+  if (opts.vite) writeFileSync(join(cwd, 'vite.config.ts'), 'export const include = []\n');
   writeFileSync(join(cwd, '.gitignore'), 'coverage/\n.cache/\n');
   // The real Windows just executable invokes this local, offline fixture. No API.
   writeFileSync(join(cwd, 'check.cjs'), script);
@@ -58,7 +68,8 @@ function repo(script = '', opts: { justfile?: boolean; agents?: boolean; scripts
   git('add', '.');
   git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'base');
   const base = git('rev-parse', 'HEAD');
-  writeFileSync(join(cwd, 'tracked.txt'), 'v2\n');
+  if (opts.vite) writeFileSync(join(cwd, 'vite.config.ts'), 'export const include = ["test"]\n');
+  else writeFileSync(join(cwd, 'tracked.txt'), 'v2\n');
   git('add', '.');
   git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'head');
   return { cwd, base, head: git('rev-parse', 'HEAD') };
@@ -87,9 +98,141 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     if (kind === 'test') expect(notes.join('\n')).toContain('targeted contract passed');
   });
 
-  it('fails legacy #35 exebox/unsandboxed denial with actionable native-terminal error and no retry', async () => {
+  it('searches the changed Vite config through the broker and reads both result and changed file', async () => {
+    const r = repo('', { vite: true });
+    const notes: string[] = [];
+    const calls: string[] = [];
+    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'vite-search' } }, (e) => {
+      if (e.type === 'note') notes.push(e.message);
+      if (e.type === 'tool-call') calls.push(e.tool);
+    });
+    expect(notes.join('\n')).toMatch(/vite\.config\.ts:1:.*include.*test/);
+    expect(result.text).toContain('Recommendation: APPROVE');
+    expect(result.text).toContain('Check `git (arguments omitted)`: exit 0');
+    expect(result.text).not.toContain('check result(s) were not fully read');
+    expect(calls).toContain('read_file');
+    expect(calls).not.toContain('run_command');
+  });
+
+  it('does not treat a Vite search result as a changed-file read', async () => {
+    const r = repo('', { vite: true });
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'vite-search', FAKE_AGY_OMIT_CHANGED: '1' } })).rejects.toThrow(/no changed file was opened/);
+  });
+
+  it('discloses an unread Vite search result instead of treating it as read', async () => {
+    const r = repo('', { vite: true });
+    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'vite-search', FAKE_AGY_OMIT: 'check-result' } });
+    expect(result.text).toContain('1 check result(s) were not fully read');
+  });
+
+  it.each([
+    ['check', 'immediate'], ['check', 'delayed'],
+    ['relative', 'immediate'], ['relative', 'delayed'],
+  ])('fails closed on a %s stop followed by a %s native call', async (stop, timing) => {
     const r = repo();
-    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'windows-exebox' } })).rejects.toThrow(/native terminal tool rejected.*interactive permission.*Windows exebox/);
+    const events: string[] = [];
+    const notes: string[] = [];
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'late-native', FAKE_AGY_STOP_KIND: stop, FAKE_AGY_STOP_TIMING: timing,
+      } }, (e) => { events.push(e.type); if (e.type === 'note') notes.push(e.message); })).rejects.toThrow(/native terminal attempt.*Nothing is published/);
+      expect(events).not.toContain('done');
+      expect(events).not.toContain('turn-end');
+      expect(notes.join('\n')).not.toMatch(/Exit:|Served relative read/);
+    } finally { delayedStop.enabled = false; }
+  });
+
+  it.each([
+    ['check', 'immediate', 'user denied permission'],
+    ['check', 'delayed', 'EACCES: access denied'],
+    ['relative', 'immediate', 'permission check failed'],
+    ['relative', 'delayed', 'EPERM: operation not permitted'],
+  ])('fails closed on %s stop and %s denial: %s', async (stop, timing, denial) => {
+    const r = repo();
+    const events: string[] = [];
+    const notes: string[] = [];
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'late-denial', FAKE_AGY_STOP_KIND: stop, FAKE_AGY_STOP_TIMING: timing, FAKE_AGY_DENIAL: denial,
+      } }, (e) => { events.push(e.type); if (e.type === 'note') notes.push(e.message); })).rejects.toThrow(/permission error/i);
+      expect(events).not.toContain('done');
+      expect(events).not.toContain('turn-end');
+      expect(notes.join('\n')).not.toMatch(/Exit:|Served relative read/);
+    } finally { delayedStop.enabled = false; }
+  });
+
+  it.each([
+    ['none', 'immediate', 'write_to_file'],
+    ['check', 'immediate', 'replace_file_content'],
+    ['check', 'delayed', 'multi_replace_file_content'],
+    ['relative', 'immediate', 'edit'],
+    ['relative', 'delayed', 'notebook_edit'],
+  ])('rejects mutating %s tool after %s stop (%s)', async (stop, timing, name) => {
+    const r = repo();
+    const ignored = join(r.cwd, '.cache', 'modified.txt');
+    mkdirSync(join(r.cwd, '.cache'));
+    const events: string[] = [];
+    const notes: string[] = [];
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'late-native', FAKE_AGY_STOP_KIND: stop, FAKE_AGY_STOP_TIMING: timing, FAKE_AGY_TOOL_NAME: name, FAKE_AGY_WRITE_PATH: ignored,
+      } }, (e) => { events.push(e.type); if (e.type === 'note') notes.push(e.message); })).rejects.toThrow(/mutating tool.*side effects cannot be verified.*Nothing is published/i);
+      expect(readFileSync(ignored, 'utf8')).toBe('changed before event');
+      expect(events).not.toContain('done');
+      expect(events).not.toContain('turn-end');
+      expect(notes.join('\n')).not.toMatch(/Exit:|Served relative read/);
+    } finally { delayedStop.enabled = false; }
+  });
+
+  it('rejects an unsupported tool received after a broker stop', async () => {
+    const r = repo();
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'late-native', FAKE_AGY_STOP_KIND: 'check', FAKE_AGY_STOP_TIMING: 'delayed', FAKE_AGY_TOOL_NAME: 'unknown_tool',
+      } })).rejects.toThrow(/unsupported tool.*Nothing is published/);
+    } finally { delayedStop.enabled = false; }
+  });
+
+  it.each(['write_to_file', 'run_command', 'denial'])('does not emit turn-end after a result followed by late %s', async (kind) => {
+    const r = repo();
+    const events: string[] = [];
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'result-then-error', FAKE_AGY_LATE_KIND: kind,
+      } }, (e) => events.push(e.type))).rejects.toThrow(/mutating tool|native terminal attempt|permission error/i);
+      expect(events).not.toContain('turn-end');
+      expect(events).not.toContain('done');
+    } finally { delayedStop.enabled = false; }
+  });
+
+  it.each(['none', 'ignored', 'dirty', 'external'])('fails closed after native terminal attempt with %s side effects', async (kind) => {
+    const r = repo();
+    const outside = mkdtempSync(join(tmpdir(), 'cez-review-outside-'));
+    repos.push(outside);
+    const target = kind === 'ignored' ? join(r.cwd, '.cache', 'ignored.txt')
+      : kind === 'dirty' ? join(r.cwd, 'tracked.txt') : join(outside, 'external.txt');
+    if (kind === 'ignored') mkdirSync(join(r.cwd, '.cache'));
+    if (kind !== 'none') writeFileSync(target, 'before');
+    const status = () => execFileSync('git', ['status', '--porcelain', '--untracked-files=all', '--', '.', ':(exclude).cezar-review-tmp', ':(exclude).cezar-review-tmp/**'], { cwd: r.cwd, encoding: 'utf8' });
+    const before = status();
+    const events: string[] = [];
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+      FAKE_AGY_MODE: 'native-recovery', ...(kind === 'none' ? {} : { FAKE_AGY_NATIVE_MUTATE_PATH: target }),
+    } }, (e) => { events.push(e.type); })).rejects.toThrow(/native terminal attempt.*side effects cannot be verified.*Nothing is published/);
+    if (kind !== 'none') expect(readFileSync(target, 'utf8')).toBe('changed before event');
+    expect(status()).toBe(before); // porcelain cannot establish that no side effect occurred
+    expect(events).not.toContain('done');
+    expect(events).not.toContain('turn-end'); // no continuation or publishable review
+  });
+
+  it('fails closed even when the native tool reports a permission denial', async () => {
+    const r = repo();
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_NATIVE_DENIAL: '1' } })).rejects.toThrow(/native terminal attempt.*Nothing is published/);
   });
 
   it('bounds repeat check requests instead of looping indefinitely', async () => {

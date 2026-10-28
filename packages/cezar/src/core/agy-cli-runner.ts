@@ -71,16 +71,20 @@ export const READ_INSPECTION_TOOL_NAMES = new Set([
   'read_browser_page',
 ]);
 
+const PR_REVIEW_INSPECTION_TOOLS = new Set([
+  'view_file', 'read_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name',
+]);
+
 export const READ_ONLY_REVIEW_PROMPT =
-  'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools. Discover repository paths before opening them; do not guess module/index paths. For a prepared PR checkout, successfully read the full PR diff and AGENTS.md when it exists, and inspect the changed code the review depends on. Report denied access as incomplete review, never as approval.';
+  'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools. Discover repository paths before opening them; do not guess module/index paths. For a prepared PR checkout, successfully read the full PR diff and AGENTS.md when it exists, and open at least one changed checkout file with a successful file read (reading the diff alone does not count); inspect the changed code the review depends on. Report denied access as incomplete review, never as approval.';
 
 /** Agy's PR review system prompt: tools, transport and the check protocol only. The review
  * rubric and verdict format come from the task (`renderPrReviewContext`); the accepted check
  * forms are generated from the check policy for the prepared checkout (`reviewCheckInstructions`). */
 export function prReviewScopePrompt(checkInstructions: string): string {
   return [
-    'You are an experienced second programmer reviewing a prepared PR checkout. The checkout is a scratch workspace: you may edit files locally to experiment, but never commit, push, merge, publish (OTA/EAS) or call gh. Your working directory is the only repository root. Do not load implementation skills or any other skill; do not read or write run handoffs, task journals or cockpit state. Repository instructions about implementation, committing and publication do not apply here.',
-    'Cezar supplies the complete pinned PR diff as a checkout-local file (or part files): read it all with view_file. Then open the changed code the verdict depends on, and its callers and tests, with view_file, grep_search, list_dir or find_by_name — proportionate to the size and risk of the diff, not every file. Discover paths before opening them. No run_command or other terminal tool.',
+    'You are an experienced second programmer reviewing a prepared PR checkout. The checkout is read-only: never edit files, commit, push, merge, publish (OTA/EAS) or call gh. Your working directory is the only repository root. Do not load implementation skills or any other skill; do not read or write run handoffs, task journals or cockpit state. Repository instructions about implementation, committing and publication do not apply here.',
+    'Cezar supplies the complete pinned PR diff as a checkout-local file (or part files): read it all with view_file. When the diff has an existing non-binary changed checkout file, successfully open at least one such file using read_file or view_file with an absolute path; a diff, search, or check-result file alone does not count; only a successful read of an existing changed file (or a Cezar-served copy) counts. Inspect the changed code the verdict depends on, and its callers and tests, with read_file, view_file, grep_search, list_dir or find_by_name — proportionate to the size and risk of the diff, not every file. Discover paths before opening them. No run_command or other terminal tool.',
     checkInstructions,
     'Report requested checks with their outcome, and skipped ones with the reason; never present a check that did not run, or a failing one, as passing. Tests run repository code as the owner and may regenerate files (README, dist, fixtures); that never fails the review. Findings must describe the ORIGINAL pinned PR diff, never your local edits; a check result obtained after local modifications is not confirmation of the original PR unless you state that it ran on unmodified code. A permission denial is fatal: stop, never retry another way. Shared node_modules are readable only through a Cezar rg check.',
     'Conclude after your analysis and every requested check result, in the review format the task specifies, without absolute local paths.',
@@ -426,7 +430,7 @@ export class AgyCliRunner implements AgentRunner {
 
       // Baseline of HEAD + every tracked/untracked change. Outside a git checkout
       // there is nothing to compare against, so the check is skipped (noted).
-      // A PR-review worktree is a scratch workspace: no change detection there.
+      // PR checkouts are scratch workspaces; brokered checks may modify them.
       const initialSnapshot = readOnly && !spec.prReview && spec.cwd ? getWorkspaceGitSnapshot(spec.cwd) : undefined;
       if (readOnly && !spec.prReview && initialSnapshot === undefined) {
         onEvent?.({ type: 'note', message: 'read-only run outside a git checkout — change detection skipped' });
@@ -487,13 +491,31 @@ export class AgyCliRunner implements AgentRunner {
             child.once('exit', () => clearTimeout(hard));
           } else onEvent?.({ type: 'text', text });
         };
+        // Inspect the event that caused a stop as well as every event drained afterwards.
+        // Dropping a permission denial here could restart a review after access was refused.
+        const handleStoppedEvent = (event: AgentEvent) => {
+          if (event.type === 'tool-result' && event.isError && isPermissionError(event.result)) permissionDeniedError ??= event.result;
+          if (event.type === 'error' && !isProviderFormatError(event.message)) resultError ??= event.message;
+        };
         const emit = (event: AgentEvent) => {
+          if (spec.prReview && event.type === 'tool-call' && !PR_REVIEW_INSPECTION_TOOLS.has(event.tool.toLowerCase())) {
+            // The event may arrive after execution, including effects outside the checkout.
+            // A git status snapshot cannot prove otherwise: never resume or publish.
+            resultError ??= event.tool.toLowerCase() === 'run_command'
+              ? 'PR review stopped after a native terminal attempt: execution and side effects cannot be verified. Nothing is published. Start a new review using inspection tools and CEZ_REVIEW_CHECK; never retry a denied command.'
+              : MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())
+                ? `PR review stopped after mutating tool ${event.tool}: execution and side effects cannot be verified. Nothing is published.`
+                : `PR review stopped after unsupported tool ${event.tool}: execution and side effects cannot be verified. Nothing is published.`;
+            pendingText = '';
+            checkStop = true;
+            killAgyTree(child);
+            const hard = setTimeout(() => killAgyTree(child, 'SIGKILL'), AGY_KILL_GRACE_MS);
+            hard.unref?.();
+            child.once('exit', () => clearTimeout(hard));
+            return;
+          }
           if (checkStop) {
-            // The rest of the turn is discarded, but a denial or a real provider error in
-            // it still fails the review. A format error there judges no review text: the
-            // turn after the check result does.
-            if (event.type === 'tool-result' && event.isError && isPermissionError(event.result)) permissionDeniedError ??= event.result;
-            if (event.type === 'error' && !isProviderFormatError(event.message)) resultError ??= event.message;
+            handleStoppedEvent(event);
             return;
           }
           if (formatError && event.type !== 'token-usage' && event.type !== 'turn-end' && event.type !== 'session') afterFormatError = true;
@@ -504,16 +526,14 @@ export class AgyCliRunner implements AgentRunner {
             return;
           }
           flushText();
-          if (checkStop) return;
+          if (checkStop) {
+            handleStoppedEvent(event);
+            return;
+          }
           if (event.type === 'tool-call') {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
             evidence.call({ id: event.id, name: event.tool, input: event.input });
-            if (spec.prReview && !['view_file', 'read_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name'].includes(event.tool.toLowerCase()) && !MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
-              terminatedByCezar = true;
-              resultError = `PR review native terminal tool rejected (or unsupported tool: ${event.tool}). Request a Cezar CEZ_REVIEW_CHECK instead; do not retry a denied command. Native Agy commands require interactive permission or unsupported Windows exebox.`;
-              killAgyTree(child);
-            }
             const relativeRead = spec.prReview && !evidence.allowsFileInspection({ id: event.id, name: event.tool, input: event.input })
               ? evidence.relativeRead({ id: event.id, name: event.tool, input: event.input }) : undefined;
             if (relativeRead) {
@@ -644,6 +664,10 @@ export class AgyCliRunner implements AgentRunner {
         return;
       }
 
+      if (checkStop && resultError) {
+        throw new Error(`${resultError}${permissionDeniedError ? ` Tool permission error: ${permissionDeniedError}` : ''}`);
+      }
+
       if (readOnly && permissionDeniedError) {
         const msg = `Tool permission error: ${permissionDeniedError}`;
         onEvent?.({ type: 'error', message: msg });
@@ -714,6 +738,9 @@ export class AgyCliRunner implements AgentRunner {
       const fallback = parseReviewCheck(turnText);
       if (!fallback) appendReviewCoverage();
       return fallback;
+    } catch (err) {
+      heldTurnEnd = false; // A failed turn must not look complete to the engine.
+      throw err;
     } finally {
       if (heldTurnEnd) onEvent?.({ type: 'turn-end' });
       clearTimers();

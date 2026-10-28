@@ -4,6 +4,8 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const mode = process.env.FAKE_AGY_MODE ?? 'ok';
+let stdinPrompt = '';
+for await (const chunk of process.stdin) stdinPrompt += chunk;
 const line = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 // Live run 2bb661b9: the final review text, then agy's own result error.
 const MALFORMED = 'Your previous response contained an improperly formatted function call: Malformed function call: Failed to parse function call: Function call is empty - no input to parse.\nPlease retry with a properly formatted function call\nRetries remaining: 3';
@@ -14,7 +16,7 @@ const resultError = () => {
   if (process.env.FAKE_AGY_AFTER_ERROR) line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Retrying.' } });
 };
 const trustedDiffReads = (tool) => {
-  const prompt = process.argv.at(-1);
+  const prompt = stdinPrompt;
   const file = prompt.match(/Cezar pinned diff file: (.+)\n/)?.[1];
   const count = Number(prompt.match(/Diff lines: (\d+)/)?.[1]);
   const parts = [...prompt.matchAll(/Part \d+: (.+) \((\d+) lines\)/g)];
@@ -52,7 +54,7 @@ if (process.env.FAKE_AGY_ASSERT_PR_SCOPE) {
   const args = process.argv.slice(2);
   if (!args.includes('--disable-slash-commands') || args.includes('--sandbox') || args.includes('--dangerously-skip-permissions') ||
       args[args.indexOf('--mode') + 1] !== 'accept-edits' || args.filter((v) => v === '--add-dir').length !== 1 ||
-      args.at(-1).includes('MAIN_IMPLEMENTATION_SKILL') || args.join(' ').length > 28000 ||
+      stdinPrompt.includes('MAIN_IMPLEMENTATION_SKILL') || args.join(' ').length > 28000 ||
       ['CEZ_HANDOFF_FILE', 'CEZ_TODOS_FILE', 'CEZ_TREE_DIR', 'CEZ_BIN', 'GH_TOKEN', 'EXPO_TOKEN', 'EAS_TOKEN', 'EAS_ACCESS_TOKEN'].some((key) => process.env[key])) {
     process.stderr.write('PR review leaked implementation context or external roots');
     process.exit(1);
@@ -90,7 +92,7 @@ switch (mode) {
   // Live run 5a3f5ec0: absolute diff reads, then a RELATIVE read_file that agy's own permission
   // step rejects before the tool runs ("path is not absolute"); agy then goes on talking.
   case 'relative-read': {
-    const prompt = process.argv.at(-1);
+    const prompt = stdinPrompt;
     const args = process.argv.slice(2);
     const served = prompt.match(/Cezar served read file: (.+)\n/)?.[1];
     if (served && args[args.indexOf('--conversation') + 1] !== 'review-fixture-local') process.exit(5);
@@ -133,8 +135,138 @@ switch (mode) {
     line({ event: 'step_update', step_update: { step_index: 2, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { error: `permission check failed for unsandboxed ${diff}: user denied permission` } } });
     break;
   }
+  case 'native-recovery': {
+    const prompt = stdinPrompt;
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 0;
+    const tool = (tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    if (!prompt.includes('The previous native terminal attempt was stopped') || process.env.FAKE_AGY_REPEAT_NATIVE) {
+      if (process.env.FAKE_AGY_NATIVE_MUTATE_PATH) writeFileSync(process.env.FAKE_AGY_NATIVE_MUTATE_PATH, 'changed before event');
+      line({ event: 'step_update', step_update: { step_index: ++step, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: process.env.FAKE_AGY_NATIVE_COMMAND ?? 'Select-String -Path vite.config.ts -Pattern test' } } } });
+      if (process.env.FAKE_AGY_NATIVE_DENIAL) line({ event: 'step_update', step_update: { step_index: step, state: 'ERROR', step_type: 'tool', tool_name: 'run_command', tool_info: { error: 'user denied permission' } } });
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      break;
+    }
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'AGENTS.md') });
+    if (!process.env.FAKE_AGY_OMIT_CHANGED) tool('read_file', { Path: join(process.cwd(), 'tracked.txt') });
+    const response = prompt.includes('Cezar check result file:') ? 'Findings: none.\nRecommendation: APPROVE' : 'CEZ_REVIEW_CHECK {"args":["git","grep","v2","tracked.txt"],"reason":"inspect change"}';
+    line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: response } });
+    break;
+  }
+  case 'late-denial': {
+    const prompt = stdinPrompt;
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 0;
+    const tool = (tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'AGENTS.md') });
+    if (prompt.includes('Cezar check result file:') || prompt.includes('Cezar served read file:')) {
+      tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none.\nRecommendation: APPROVE' } });
+      break;
+    }
+    if (process.env.FAKE_AGY_STOP_KIND === 'check') {
+      tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+      line({ event: 'step_update', step_update: { step_index: 90, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), 'tracked.txt') } } } });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'CEZ_REVIEW_CHECK {"args":["git","grep","v2","tracked.txt"],"reason":"inspect"}' } });
+    } else {
+      line({ event: 'step_update', step_update: { step_index: 90, state: 'ACTIVE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'tracked.txt' } } } });
+    }
+    if (process.env.FAKE_AGY_STOP_TIMING === 'delayed') {
+      tool('list_dir', { DirectoryPath: process.cwd() });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    line({ event: 'step_update', step_update: { step_index: 90, state: 'ERROR', step_type: 'tool', tool_name: process.env.FAKE_AGY_STOP_KIND === 'check' ? 'view_file' : 'read_file', tool_info: { error: process.env.FAKE_AGY_DENIAL } } });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    break;
+  }
+  case 'late-native': {
+    const prompt = stdinPrompt;
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 0;
+    const tool = (tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'AGENTS.md') });
+    if (prompt.includes('Cezar check result file:') || prompt.includes('Cezar served read file:')) {
+      tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none.\nRecommendation: APPROVE' } });
+      break;
+    }
+    if (process.env.FAKE_AGY_STOP_KIND === 'check') {
+      tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'CEZ_REVIEW_CHECK {"args":["git","grep","v2","tracked.txt"],"reason":"inspect"}' } });
+    } else if (process.env.FAKE_AGY_STOP_KIND === 'relative') {
+      line({ event: 'step_update', step_update: { step_index: ++step, state: 'ACTIVE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'tracked.txt' } } } });
+    }
+    if (process.env.FAKE_AGY_STOP_TIMING === 'delayed') {
+      // Force a non-native event to flush a buffered check before the late native call.
+      tool('list_dir', { DirectoryPath: process.cwd() });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    if (process.env.FAKE_AGY_WRITE_PATH) writeFileSync(process.env.FAKE_AGY_WRITE_PATH, 'changed before event');
+    line({ event: 'step_update', step_update: { step_index: ++step, state: 'ACTIVE', step_type: 'tool', tool_name: process.env.FAKE_AGY_TOOL_NAME ?? 'run_command', tool_info: { parameters: { CommandLine: 'untrusted command' } } } });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    break;
+  }
+  case 'result-then-error': {
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 0;
+    const tool = (tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'AGENTS.md') });
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+    if (process.env.FAKE_AGY_LATE_KIND === 'denial') line({ event: 'step_update', step_update: { step_index: 90, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), 'tracked.txt') } } } });
+    line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none.\nRecommendation: APPROVE' } });
+    line({ event: 'result', result: { status: 'OK' } });
+    if (process.env.FAKE_AGY_LATE_KIND === 'denial') line({ event: 'step_update', step_update: { step_index: 90, state: 'ERROR', step_type: 'tool', tool_name: 'view_file', tool_info: { error: 'user denied permission' } } });
+    else line({ event: 'step_update', step_update: { step_index: 91, state: 'ACTIVE', step_type: 'tool', tool_name: process.env.FAKE_AGY_LATE_KIND, tool_info: { parameters: {} } } });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    break;
+  }
+  case 'vite-search': {
+    const prompt = stdinPrompt;
+    if (!prompt.includes('case-insensitive search such as include or test') || !prompt.includes('search result does not count as opening a changed file')) process.exit(10);
+    const args = process.argv.slice(2);
+    const resultFile = prompt.match(/Cezar check result file: (.+)\n/)?.[1];
+    if (resultFile && args[args.indexOf('--conversation') + 1] !== 'review-fixture-local') process.exit(5);
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 0;
+    const tool = (tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    tool('read_file', { Path: join(process.cwd(), 'AGENTS.md') });
+    if (!resultFile) {
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'CEZ_REVIEW_CHECK {"args":["git","grep","-i","-E","include|test","vite.config.ts"],"reason":"inspect configuration"}' } });
+    } else {
+      const { readFileSync } = await import('node:fs');
+      if (!readFileSync(resultFile, 'utf8').includes('vite.config.ts:1:')) process.exit(9);
+      if (!process.env.FAKE_AGY_OMIT_CHANGED) tool('read_file', { Path: join(process.cwd(), 'vite.config.ts') });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none.\nRecommendation: APPROVE' } });
+    }
+    break;
+  }
   case 'broker': {
-    const prompt = process.argv.at(-1);
+    const prompt = stdinPrompt;
     const args = process.argv.slice(2);
     if (args.includes('--conversation') && args[args.indexOf('--conversation') + 1] !== 'review-fixture-local') process.exit(5);
     if (prompt.includes('Cezar trusted check result:') && !args.includes('--conversation')) process.exit(6);

@@ -534,9 +534,10 @@ describe('AgyCliRunner security hardening & isolation', () => {
       expect(posts).toEqual([]);
     });
 
-    it('allows a local edit tool in a PR review: the worktree is scratch space', async () => {
+    it('refuses a local edit tool in a PR review', async () => {
       const posts: string[] = [];
-      await recoveryRun({ FAKE_AGY_MUTATE: '1' }, posts).catch((e: unknown) => { expect(String(e)).not.toMatch(/mutating tool/); });
+      await expect(recoveryRun({ FAKE_AGY_MUTATE: '1' }, posts)).rejects.toThrow(/mutating tool/);
+      expect(posts).toEqual([]);
     });
 
     it('read-only run that writes into the checkout fails', async () => {
