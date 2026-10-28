@@ -101,6 +101,7 @@ import { currentUsage, currentTimedUsage, onUsage } from '../core/process-usage.
 import { DashboardReader } from '../workspace/dashboard.ts';
 import { dashboardRoutes } from './dashboard.ts';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.ts';
+import { applyStepOverrides, stepOverridesSchema } from '../workflows/step-overrides.ts';
 import {
   NODE_CATALOG,
   graphIssues,
@@ -698,6 +699,8 @@ const startRunSchema = z
     model: z.string().optional(),
     // Agent backend for this task (falls back to config `defaultRunner`).
     runner: z.enum(RUNNER_IDS).optional(),
+    // Runner/model per agent step id, winning over the workflow's own pins (spec 2026-10-28-step-overrides).
+    stepOverrides: stepOverridesSchema.optional(),
     // Agent account for this task (spec 2026-07-29-agent-profiles). Falls back to the project's
     // own selection, then the discovered default. Bounded like a profile id in the workspace
     // schema, so a value this route accepts can never be degraded away by the next load.
@@ -4412,7 +4415,8 @@ export function createApp(deps: ServerDeps) {
     .post('/runs', jsonZodValidator(startRunSchema), async (c) => {
       const { root: repoRoot, dataDir, manager } = c.get('project');
       const parsed = { data: c.req.valid('json') };
-      if (agentModelsLocked(repoRoot) && parsed.data.model?.trim()) {
+      const overridesModel = Object.values(parsed.data.stepOverrides ?? {}).some((o) => o.model);
+      if (agentModelsLocked(repoRoot) && (parsed.data.model?.trim() || overridesModel)) {
         return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       }
       let workflow: WorkflowDef | undefined;
@@ -4429,6 +4433,12 @@ export function createApp(deps: ServerDeps) {
         const { workflows } = await loadWorkflows(repoRoot);
         workflow = workflows.find((w) => w.name === parsed.data.workflow);
         if (!workflow) return c.json({ error: `unknown workflow: ${parsed.data.workflow}` }, 404);
+      }
+      if (parsed.data.stepOverrides) {
+        // Before the provider check below, so a step moved onto another runner is checked for it.
+        const overridden = applyStepOverrides(workflow, parsed.data.stepOverrides);
+        if ('error' in overridden) return c.json({ error: overridden.error }, 400);
+        workflow = overridden;
       }
       const fallback = resolveTaskRunner(await loadConfig(repoRoot), workflow.name, parsed.data.runner);
       const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), {
