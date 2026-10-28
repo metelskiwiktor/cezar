@@ -143,6 +143,26 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     } finally { delayedStop.enabled = false; }
   });
 
+  it.each([
+    ['check', 'immediate', 'user denied permission'],
+    ['check', 'delayed', 'EACCES: access denied'],
+    ['relative', 'immediate', 'permission check failed'],
+    ['relative', 'delayed', 'EPERM: operation not permitted'],
+  ])('fails closed on %s stop and %s denial: %s', async (stop, timing, denial) => {
+    const r = repo();
+    const events: string[] = [];
+    const notes: string[] = [];
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'late-denial', FAKE_AGY_STOP_KIND: stop, FAKE_AGY_STOP_TIMING: timing, FAKE_AGY_DENIAL: denial,
+      } }, (e) => { events.push(e.type); if (e.type === 'note') notes.push(e.message); })).rejects.toThrow(/permission error/i);
+      expect(events).not.toContain('done');
+      expect(events).not.toContain('turn-end');
+      expect(notes.join('\n')).not.toMatch(/Exit:|Served relative read/);
+    } finally { delayedStop.enabled = false; }
+  });
+
   it.each(['none', 'ignored', 'dirty', 'external'])('fails closed after native terminal attempt with %s side effects', async (kind) => {
     const r = repo();
     const outside = mkdtempSync(join(tmpdir(), 'cez-review-outside-'));

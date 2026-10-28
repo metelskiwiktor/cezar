@@ -158,6 +158,37 @@ switch (mode) {
     line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: response } });
     break;
   }
+  case 'late-denial': {
+    const prompt = stdinPrompt;
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 0;
+    const tool = (tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'AGENTS.md') });
+    if (prompt.includes('Cezar check result file:') || prompt.includes('Cezar served read file:')) {
+      tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none.\nRecommendation: APPROVE' } });
+      break;
+    }
+    if (process.env.FAKE_AGY_STOP_KIND === 'check') {
+      tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+      line({ event: 'step_update', step_update: { step_index: 90, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), 'tracked.txt') } } } });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'CEZ_REVIEW_CHECK {"args":["git","grep","v2","tracked.txt"],"reason":"inspect"}' } });
+    } else {
+      line({ event: 'step_update', step_update: { step_index: 90, state: 'ACTIVE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'tracked.txt' } } } });
+    }
+    if (process.env.FAKE_AGY_STOP_TIMING === 'delayed') {
+      tool('list_dir', { DirectoryPath: process.cwd() });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    line({ event: 'step_update', step_update: { step_index: 90, state: 'ERROR', step_type: 'tool', tool_name: process.env.FAKE_AGY_STOP_KIND === 'check' ? 'view_file' : 'read_file', tool_info: { error: process.env.FAKE_AGY_DENIAL } } });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    break;
+  }
   case 'late-native': {
     const prompt = stdinPrompt;
     line({ event: 'init', conversation_id: 'review-fixture-local' });

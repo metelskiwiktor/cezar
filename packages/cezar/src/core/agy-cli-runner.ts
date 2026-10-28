@@ -487,6 +487,12 @@ export class AgyCliRunner implements AgentRunner {
             child.once('exit', () => clearTimeout(hard));
           } else onEvent?.({ type: 'text', text });
         };
+        // Inspect the event that caused a stop as well as every event drained afterwards.
+        // Dropping a permission denial here could restart a review after access was refused.
+        const handleStoppedEvent = (event: AgentEvent) => {
+          if (event.type === 'tool-result' && event.isError && isPermissionError(event.result)) permissionDeniedError ??= event.result;
+          if (event.type === 'error' && !isProviderFormatError(event.message)) resultError ??= event.message;
+        };
         const emit = (event: AgentEvent) => {
           if (spec.prReview && event.type === 'tool-call' && event.tool.toLowerCase() === 'run_command') {
             // The event may arrive after execution, including effects outside the checkout.
@@ -501,11 +507,7 @@ export class AgyCliRunner implements AgentRunner {
             return;
           }
           if (checkStop) {
-            // Native terminal calls were checked above. Other trailing events are discarded,
-            // but a denial or a real provider error still fails the review. A format error there judges no review text: the
-            // turn after the check result does.
-            if (event.type === 'tool-result' && event.isError && isPermissionError(event.result)) permissionDeniedError ??= event.result;
-            if (event.type === 'error' && !isProviderFormatError(event.message)) resultError ??= event.message;
+            handleStoppedEvent(event);
             return;
           }
           if (formatError && event.type !== 'token-usage' && event.type !== 'turn-end' && event.type !== 'session') afterFormatError = true;
@@ -516,7 +518,10 @@ export class AgyCliRunner implements AgentRunner {
             return;
           }
           flushText();
-          if (checkStop) return;
+          if (checkStop) {
+            handleStoppedEvent(event);
+            return;
+          }
           if (event.type === 'tool-call') {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
