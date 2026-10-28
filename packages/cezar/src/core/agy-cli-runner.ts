@@ -71,6 +71,10 @@ export const READ_INSPECTION_TOOL_NAMES = new Set([
   'read_browser_page',
 ]);
 
+const PR_REVIEW_INSPECTION_TOOLS = new Set([
+  'view_file', 'read_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name',
+]);
+
 export const READ_ONLY_REVIEW_PROMPT =
   'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools. Discover repository paths before opening them; do not guess module/index paths. For a prepared PR checkout, successfully read the full PR diff and AGENTS.md when it exists, and open at least one changed checkout file with a successful file read (reading the diff alone does not count); inspect the changed code the review depends on. Report denied access as incomplete review, never as approval.';
 
@@ -494,10 +498,14 @@ export class AgyCliRunner implements AgentRunner {
           if (event.type === 'error' && !isProviderFormatError(event.message)) resultError ??= event.message;
         };
         const emit = (event: AgentEvent) => {
-          if (spec.prReview && event.type === 'tool-call' && event.tool.toLowerCase() === 'run_command') {
+          if (spec.prReview && event.type === 'tool-call' && !PR_REVIEW_INSPECTION_TOOLS.has(event.tool.toLowerCase())) {
             // The event may arrive after execution, including effects outside the checkout.
             // A git status snapshot cannot prove otherwise: never resume or publish.
-            resultError ??= 'PR review stopped after a native terminal attempt: execution and side effects cannot be verified. Nothing is published. Start a new review using inspection tools and CEZ_REVIEW_CHECK; never retry a denied command.';
+            resultError ??= event.tool.toLowerCase() === 'run_command'
+              ? 'PR review stopped after a native terminal attempt: execution and side effects cannot be verified. Nothing is published. Start a new review using inspection tools and CEZ_REVIEW_CHECK; never retry a denied command.'
+              : MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())
+                ? `PR review stopped after mutating tool ${event.tool}: execution and side effects cannot be verified. Nothing is published.`
+                : `PR review stopped after unsupported tool ${event.tool}: execution and side effects cannot be verified. Nothing is published.`;
             pendingText = '';
             checkStop = true;
             killAgyTree(child);
@@ -526,11 +534,6 @@ export class AgyCliRunner implements AgentRunner {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
             evidence.call({ id: event.id, name: event.tool, input: event.input });
-            if (spec.prReview && !['view_file', 'read_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name'].includes(event.tool.toLowerCase()) && !MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
-              terminatedByCezar = true;
-              resultError = `PR review stopped: unsupported native tool ${event.tool}; no review was published. Use inspection tools and CEZ_REVIEW_CHECK in a new review; never retry a denied command.`;
-              killAgyTree(child);
-            }
             const relativeRead = spec.prReview && !evidence.allowsFileInspection({ id: event.id, name: event.tool, input: event.input })
               ? evidence.relativeRead({ id: event.id, name: event.tool, input: event.input }) : undefined;
             if (relativeRead) {
@@ -735,6 +738,9 @@ export class AgyCliRunner implements AgentRunner {
       const fallback = parseReviewCheck(turnText);
       if (!fallback) appendReviewCoverage();
       return fallback;
+    } catch (err) {
+      heldTurnEnd = false; // A failed turn must not look complete to the engine.
+      throw err;
     } finally {
       if (heldTurnEnd) onEvent?.({ type: 'turn-end' });
       clearTimers();

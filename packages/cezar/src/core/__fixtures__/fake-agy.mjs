@@ -208,7 +208,7 @@ switch (mode) {
     if (process.env.FAKE_AGY_STOP_KIND === 'check') {
       tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
       line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'CEZ_REVIEW_CHECK {"args":["git","grep","v2","tracked.txt"],"reason":"inspect"}' } });
-    } else {
+    } else if (process.env.FAKE_AGY_STOP_KIND === 'relative') {
       line({ event: 'step_update', step_update: { step_index: ++step, state: 'ACTIVE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'tracked.txt' } } } });
     }
     if (process.env.FAKE_AGY_STOP_TIMING === 'delayed') {
@@ -216,7 +216,27 @@ switch (mode) {
       tool('list_dir', { DirectoryPath: process.cwd() });
       await new Promise((resolve) => setTimeout(resolve, 60));
     }
-    line({ event: 'step_update', step_update: { step_index: ++step, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'untrusted command' } } } });
+    if (process.env.FAKE_AGY_WRITE_PATH) writeFileSync(process.env.FAKE_AGY_WRITE_PATH, 'changed before event');
+    line({ event: 'step_update', step_update: { step_index: ++step, state: 'ACTIVE', step_type: 'tool', tool_name: process.env.FAKE_AGY_TOOL_NAME ?? 'run_command', tool_info: { parameters: { CommandLine: 'untrusted command' } } } });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    break;
+  }
+  case 'result-then-error': {
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 0;
+    const tool = (tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'AGENTS.md') });
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+    if (process.env.FAKE_AGY_LATE_KIND === 'denial') line({ event: 'step_update', step_update: { step_index: 90, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: join(process.cwd(), 'tracked.txt') } } } });
+    line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none.\nRecommendation: APPROVE' } });
+    line({ event: 'result', result: { status: 'OK' } });
+    if (process.env.FAKE_AGY_LATE_KIND === 'denial') line({ event: 'step_update', step_update: { step_index: 90, state: 'ERROR', step_type: 'tool', tool_name: 'view_file', tool_info: { error: 'user denied permission' } } });
+    else line({ event: 'step_update', step_update: { step_index: 91, state: 'ACTIVE', step_type: 'tool', tool_name: process.env.FAKE_AGY_LATE_KIND, tool_info: { parameters: {} } } });
     await new Promise((resolve) => setTimeout(resolve, 60));
     break;
   }

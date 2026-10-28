@@ -163,6 +163,53 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     } finally { delayedStop.enabled = false; }
   });
 
+  it.each([
+    ['none', 'immediate', 'write_to_file'],
+    ['check', 'immediate', 'replace_file_content'],
+    ['check', 'delayed', 'multi_replace_file_content'],
+    ['relative', 'immediate', 'edit'],
+    ['relative', 'delayed', 'notebook_edit'],
+  ])('rejects mutating %s tool after %s stop (%s)', async (stop, timing, name) => {
+    const r = repo();
+    const ignored = join(r.cwd, '.cache', 'modified.txt');
+    mkdirSync(join(r.cwd, '.cache'));
+    const events: string[] = [];
+    const notes: string[] = [];
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'late-native', FAKE_AGY_STOP_KIND: stop, FAKE_AGY_STOP_TIMING: timing, FAKE_AGY_TOOL_NAME: name, FAKE_AGY_WRITE_PATH: ignored,
+      } }, (e) => { events.push(e.type); if (e.type === 'note') notes.push(e.message); })).rejects.toThrow(/mutating tool.*side effects cannot be verified.*Nothing is published/i);
+      expect(readFileSync(ignored, 'utf8')).toBe('changed before event');
+      expect(events).not.toContain('done');
+      expect(events).not.toContain('turn-end');
+      expect(notes.join('\n')).not.toMatch(/Exit:|Served relative read/);
+    } finally { delayedStop.enabled = false; }
+  });
+
+  it('rejects an unsupported tool received after a broker stop', async () => {
+    const r = repo();
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'late-native', FAKE_AGY_STOP_KIND: 'check', FAKE_AGY_STOP_TIMING: 'delayed', FAKE_AGY_TOOL_NAME: 'unknown_tool',
+      } })).rejects.toThrow(/unsupported tool.*Nothing is published/);
+    } finally { delayedStop.enabled = false; }
+  });
+
+  it.each(['write_to_file', 'run_command', 'denial'])('does not emit turn-end after a result followed by late %s', async (kind) => {
+    const r = repo();
+    const events: string[] = [];
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'result-then-error', FAKE_AGY_LATE_KIND: kind,
+      } }, (e) => events.push(e.type))).rejects.toThrow(/mutating tool|native terminal attempt|permission error/i);
+      expect(events).not.toContain('turn-end');
+      expect(events).not.toContain('done');
+    } finally { delayedStop.enabled = false; }
+  });
+
   it.each(['none', 'ignored', 'dirty', 'external'])('fails closed after native terminal attempt with %s side effects', async (kind) => {
     const r = repo();
     const outside = mkdtempSync(join(tmpdir(), 'cez-review-outside-'));
