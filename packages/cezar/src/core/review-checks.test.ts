@@ -18,6 +18,15 @@ import { AgyReviewEvidence } from './agy-review-evidence.ts';
 // the offline Node fixture stands in only when just is unavailable.
 // The rg stand-in covers exactly the argv shapes `reviewCommand` emits — `--files [-- PATH]`,
 // `-l|-n -- PATTERN PATH` — and skips dot-entries, as rg does by default.
+// Let the fake flush delayed stdout after a stop request, as an already-running native
+// tool can do while process termination is in flight. No real command is run by it.
+const delayedStop = vi.hoisted(() => ({ enabled: false }));
+vi.mock('./kill-process-tree.ts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./kill-process-tree.ts')>();
+  return { ...actual, killAgyTree: (...args: Parameters<typeof actual.killAgyTree>) => {
+    if (!delayedStop.enabled) return actual.killAgyTree(...args);
+  } };
+});
 const FAKE_RG = vi.hoisted(() => [
   'const fs = require("fs"), p = require("path"); const a = process.argv.slice(1);',
   'const walk = (d) => fs.statSync(d).isDirectory() ? fs.readdirSync(d).filter((n) => !n.startsWith(".")).flatMap((n) => walk(p.join(d, n))) : [d];',
@@ -114,6 +123,24 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     const r = repo('', { vite: true });
     const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'vite-search', FAKE_AGY_OMIT: 'check-result' } });
     expect(result.text).toContain('1 check result(s) were not fully read');
+  });
+
+  it.each([
+    ['check', 'immediate'], ['check', 'delayed'],
+    ['relative', 'immediate'], ['relative', 'delayed'],
+  ])('fails closed on a %s stop followed by a %s native call', async (stop, timing) => {
+    const r = repo();
+    const events: string[] = [];
+    const notes: string[] = [];
+    delayedStop.enabled = true;
+    try {
+      await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: {
+        FAKE_AGY_MODE: 'late-native', FAKE_AGY_STOP_KIND: stop, FAKE_AGY_STOP_TIMING: timing,
+      } }, (e) => { events.push(e.type); if (e.type === 'note') notes.push(e.message); })).rejects.toThrow(/native terminal attempt.*Nothing is published/);
+      expect(events).not.toContain('done');
+      expect(events).not.toContain('turn-end');
+      expect(notes.join('\n')).not.toMatch(/Exit:|Served relative read/);
+    } finally { delayedStop.enabled = false; }
   });
 
   it.each(['none', 'ignored', 'dirty', 'external'])('fails closed after native terminal attempt with %s side effects', async (kind) => {

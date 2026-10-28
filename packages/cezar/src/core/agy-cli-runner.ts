@@ -488,9 +488,21 @@ export class AgyCliRunner implements AgentRunner {
           } else onEvent?.({ type: 'text', text });
         };
         const emit = (event: AgentEvent) => {
+          if (spec.prReview && event.type === 'tool-call' && event.tool.toLowerCase() === 'run_command') {
+            // The event may arrive after execution, including effects outside the checkout.
+            // A git status snapshot cannot prove otherwise: never resume or publish.
+            resultError ??= 'PR review stopped after a native terminal attempt: execution and side effects cannot be verified. Nothing is published. Start a new review using inspection tools and CEZ_REVIEW_CHECK; never retry a denied command.';
+            pendingText = '';
+            checkStop = true;
+            killAgyTree(child);
+            const hard = setTimeout(() => killAgyTree(child, 'SIGKILL'), AGY_KILL_GRACE_MS);
+            hard.unref?.();
+            child.once('exit', () => clearTimeout(hard));
+            return;
+          }
           if (checkStop) {
-            // The rest of the turn is discarded, but a denial or a real provider error in
-            // it still fails the review. A format error there judges no review text: the
+            // Native terminal calls were checked above. Other trailing events are discarded,
+            // but a denial or a real provider error still fails the review. A format error there judges no review text: the
             // turn after the check result does.
             if (event.type === 'tool-result' && event.isError && isPermissionError(event.result)) permissionDeniedError ??= event.result;
             if (event.type === 'error' && !isProviderFormatError(event.message)) resultError ??= event.message;
@@ -509,17 +521,6 @@ export class AgyCliRunner implements AgentRunner {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
             evidence.call({ id: event.id, name: event.tool, input: event.input });
-            if (spec.prReview && event.tool.toLowerCase() === 'run_command') {
-              // The event may arrive after execution, including effects outside the checkout.
-              // A git status snapshot cannot prove otherwise: never resume or publish.
-              resultError = 'PR review stopped after a native terminal attempt: execution and side effects cannot be verified. Nothing is published. Start a new review using inspection tools and CEZ_REVIEW_CHECK; never retry a denied command.';
-              checkStop = true;
-              killAgyTree(child);
-              const hard = setTimeout(() => killAgyTree(child, 'SIGKILL'), AGY_KILL_GRACE_MS);
-              hard.unref?.();
-              child.once('exit', () => clearTimeout(hard));
-              return;
-            }
             if (spec.prReview && !['view_file', 'read_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name'].includes(event.tool.toLowerCase()) && !MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
               terminatedByCezar = true;
               resultError = `PR review stopped: unsupported native tool ${event.tool}; no review was published. Use inspection tools and CEZ_REVIEW_CHECK in a new review; never retry a denied command.`;

@@ -158,6 +158,37 @@ switch (mode) {
     line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: response } });
     break;
   }
+  case 'late-native': {
+    const prompt = stdinPrompt;
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 0;
+    const tool = (tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    tool('view_file', { AbsolutePath: join(process.cwd(), 'AGENTS.md') });
+    if (prompt.includes('Cezar check result file:') || prompt.includes('Cezar served read file:')) {
+      tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none.\nRecommendation: APPROVE' } });
+      break;
+    }
+    if (process.env.FAKE_AGY_STOP_KIND === 'check') {
+      tool('view_file', { AbsolutePath: join(process.cwd(), 'tracked.txt') });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'CEZ_REVIEW_CHECK {"args":["git","grep","v2","tracked.txt"],"reason":"inspect"}' } });
+    } else {
+      line({ event: 'step_update', step_update: { step_index: ++step, state: 'ACTIVE', step_type: 'tool', tool_name: 'read_file', tool_info: { parameters: { Path: 'tracked.txt' } } } });
+    }
+    if (process.env.FAKE_AGY_STOP_TIMING === 'delayed') {
+      // Force a non-native event to flush a buffered check before the late native call.
+      tool('list_dir', { DirectoryPath: process.cwd() });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    }
+    line({ event: 'step_update', step_update: { step_index: ++step, state: 'ACTIVE', step_type: 'tool', tool_name: 'run_command', tool_info: { parameters: { CommandLine: 'untrusted command' } } } });
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    break;
+  }
   case 'vite-search': {
     const prompt = stdinPrompt;
     if (!prompt.includes('case-insensitive search such as include or test') || !prompt.includes('search result does not count as opening a changed file')) process.exit(10);
