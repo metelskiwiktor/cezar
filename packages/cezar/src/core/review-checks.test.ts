@@ -87,9 +87,34 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     if (kind === 'test') expect(notes.join('\n')).toContain('targeted contract passed');
   });
 
-  it('fails legacy #35 exebox/unsandboxed denial with actionable native-terminal error and no retry', async () => {
+  it('recovers once from a Windows native terminal attempt, reads changed code and runs a brokered check', async () => {
     const r = repo();
-    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'windows-exebox' } })).rejects.toThrow(/native terminal tool rejected.*interactive permission.*Windows exebox/);
+    const notes: string[] = [];
+    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery' } }, (e) => { if (e.type === 'note') notes.push(e.message); });
+    expect(result.text).toContain('Recommendation: APPROVE');
+    expect(result.text).toContain('Check `git grep v2 tracked.txt`: exit 0');
+    expect(notes.join(' ')).toContain('Native terminal attempt stopped');
+  });
+
+  it('never accepts a continuation without changed-file evidence', async () => {
+    const r = repo();
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_OMIT_CHANGED: '1' } })).rejects.toThrow(/no changed file was opened/);
+  });
+
+  it('stops repeated native commands without executing them', async () => {
+    const r = repo();
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_REPEAT_NATIVE: '1', FAKE_AGY_NATIVE_COMMAND: 'rm tracked.txt' } })).rejects.toThrow(/native terminal was requested again/);
+    expect(readFileSync(join(r.cwd, 'tracked.txt'), 'utf8')).toBe('v2\n');
+  });
+
+  it('refuses continuation if the native tool changed the checkout before its event', async () => {
+    const r = repo();
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_NATIVE_MUTATE: '1' } })).rejects.toThrow(/checkout changed/);
+  });
+
+  it('keeps a streamed native permission denial fatal', async () => {
+    const r = repo();
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'native-recovery', FAKE_AGY_NATIVE_DENIAL: '1' } })).rejects.toThrow(/permission/i);
   });
 
   it('bounds repeat check requests instead of looping indefinitely', async () => {

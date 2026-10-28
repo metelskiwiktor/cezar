@@ -72,15 +72,15 @@ export const READ_INSPECTION_TOOL_NAMES = new Set([
 ]);
 
 export const READ_ONLY_REVIEW_PROMPT =
-  'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools. Discover repository paths before opening them; do not guess module/index paths. For a prepared PR checkout, successfully read the full PR diff and AGENTS.md when it exists, and inspect the changed code the review depends on. Report denied access as incomplete review, never as approval.';
+  'IMPORTANT: You are running in strict READ-ONLY review mode. You MUST NOT create, edit, or modify any files, and you must not run mutating commands. You may only inspect files using view_file, grep_search, list_dir, and related inspection tools. Discover repository paths before opening them; do not guess module/index paths. For a prepared PR checkout, successfully read the full PR diff and AGENTS.md when it exists, and open at least one changed checkout file with a successful file read (reading the diff alone does not count); inspect the changed code the review depends on. Report denied access as incomplete review, never as approval.';
 
 /** Agy's PR review system prompt: tools, transport and the check protocol only. The review
  * rubric and verdict format come from the task (`renderPrReviewContext`); the accepted check
  * forms are generated from the check policy for the prepared checkout (`reviewCheckInstructions`). */
 export function prReviewScopePrompt(checkInstructions: string): string {
   return [
-    'You are an experienced second programmer reviewing a prepared PR checkout. The checkout is a scratch workspace: you may edit files locally to experiment, but never commit, push, merge, publish (OTA/EAS) or call gh. Your working directory is the only repository root. Do not load implementation skills or any other skill; do not read or write run handoffs, task journals or cockpit state. Repository instructions about implementation, committing and publication do not apply here.',
-    'Cezar supplies the complete pinned PR diff as a checkout-local file (or part files): read it all with view_file. Then open the changed code the verdict depends on, and its callers and tests, with view_file, grep_search, list_dir or find_by_name — proportionate to the size and risk of the diff, not every file. Discover paths before opening them. No run_command or other terminal tool.',
+    'You are an experienced second programmer reviewing a prepared PR checkout. The checkout is read-only: never edit files, commit, push, merge, publish (OTA/EAS) or call gh. Your working directory is the only repository root. Do not load implementation skills or any other skill; do not read or write run handoffs, task journals or cockpit state. Repository instructions about implementation, committing and publication do not apply here.',
+    'Cezar supplies the complete pinned PR diff as a checkout-local file (or part files): read it all with view_file. Then successfully open at least one changed checkout file using read_file or view_file with an absolute path; a diff or search alone does not count. Inspect the changed code the verdict depends on, and its callers and tests, with read_file, view_file, grep_search, list_dir or find_by_name — proportionate to the size and risk of the diff, not every file. Discover paths before opening them. No run_command or other terminal tool.',
     checkInstructions,
     'Report requested checks with their outcome, and skipped ones with the reason; never present a check that did not run, or a failing one, as passing. Tests run repository code as the owner and may regenerate files (README, dist, fixtures); that never fails the review. Findings must describe the ORIGINAL pinned PR diff, never your local edits; a check result obtained after local modifications is not confirmation of the original PR unless you state that it ran on unmodified code. A permission denial is fatal: stop, never retry another way. Shared node_modules are readable only through a Cezar rg check.',
     'Conclude after your analysis and every requested check result, in the review format the task specifies, without absolute local paths.',
@@ -174,6 +174,7 @@ export function serveCheckoutRead(cwd: string, path: string, start?: number, end
   }
 }
 
+type NativeTerminalStop = { nativeTerminalStop: true };
 type ReviewReadRequest = NonNullable<ReturnType<AgyReviewEvidence['relativeRead']>>;
 const isReadRequest = (v: ReviewCheck | ReviewReadRequest): v is ReviewReadRequest => 'given' in v;
 
@@ -326,6 +327,7 @@ export class AgyCliRunner implements AgentRunner {
     let toolErrors = 0;
     const startedAt = Date.now();
     let checkRequests = 0;
+    let nativeTerminalStops = 0;
     let turnNo = 0;
     const servedReads = new Set<string>();
     let turnText = '';
@@ -371,7 +373,7 @@ export class AgyCliRunner implements AgentRunner {
     };
 
     /** Resolves to the trusted check the reviewer requested in this turn, if any. */
-    const runTurn = async (userPrompt: string, systemPrompt?: string, resumeSessionId?: string): Promise<ReviewCheck | ReviewReadRequest | undefined> => {
+    const runTurn = async (userPrompt: string, systemPrompt?: string, resumeSessionId?: string): Promise<ReviewCheck | ReviewReadRequest | NativeTerminalStop | undefined> => {
       const tokensBeforeTurn = tokensUsed;
       turnText = '';
       const diffInfo = reviewDiff
@@ -426,8 +428,9 @@ export class AgyCliRunner implements AgentRunner {
 
       // Baseline of HEAD + every tracked/untracked change. Outside a git checkout
       // there is nothing to compare against, so the check is skipped (noted).
-      // A PR-review worktree is a scratch workspace: no change detection there.
-      const initialSnapshot = readOnly && !spec.prReview && spec.cwd ? getWorkspaceGitSnapshot(spec.cwd) : undefined;
+      // Check PR turns stopped on a native terminal attempt as well: the streamed call
+      // can arrive after execution. Brokered checks run between turns and have their own policy.
+      const initialSnapshot = readOnly && spec.cwd ? getWorkspaceGitSnapshot(spec.cwd) : undefined;
       if (readOnly && !spec.prReview && initialSnapshot === undefined) {
         onEvent?.({ type: 'note', message: 'read-only run outside a git checkout — change detection skipped' });
       }
@@ -467,6 +470,7 @@ export class AgyCliRunner implements AgentRunner {
         // agy streams text as deltas, but a `text` event is one whole message to the engine
         // (it joins them with newlines): buffer consecutive deltas and forward them as one
         // message, before the next non-text event and at the end of the stream.
+        let nativeTerminalStop: NativeTerminalStop | undefined;
         let pendingText = '';
         const flushText = () => {
           if (!pendingText) return;
@@ -509,9 +513,22 @@ export class AgyCliRunner implements AgentRunner {
             callToolNames.set(event.id, event.tool);
             toolCalls.push({ id: event.id, name: event.tool, input: event.input });
             evidence.call({ id: event.id, name: event.tool, input: event.input });
+            if (spec.prReview && event.tool.toLowerCase() === 'run_command') {
+              // Stream events are a tripwire, not proof that the tool did not execute.
+              // Stop this turn; never execute or translate its command. Inspect integrity
+              // and any streamed denial before offering one fresh continuation.
+              nativeTerminalStop = { nativeTerminalStop: true };
+              evidence.result(event.id, true, 'stopped by Cezar; execution unverified');
+              checkStop = true;
+              killAgyTree(child);
+              const hard = setTimeout(() => killAgyTree(child, 'SIGKILL'), AGY_KILL_GRACE_MS);
+              hard.unref?.();
+              child.once('exit', () => clearTimeout(hard));
+              return;
+            }
             if (spec.prReview && !['view_file', 'read_file', 'view_file_outline', 'view_code_item', 'grep_search', 'list_dir', 'find_by_name'].includes(event.tool.toLowerCase()) && !MUTATING_TOOL_NAMES.has(event.tool.toLowerCase())) {
               terminatedByCezar = true;
-              resultError = `PR review native terminal tool rejected (or unsupported tool: ${event.tool}). Request a Cezar CEZ_REVIEW_CHECK instead; do not retry a denied command. Native Agy commands require interactive permission or unsupported Windows exebox.`;
+              resultError = `PR review stopped: unsupported native tool ${event.tool}; no review was published. Use inspection tools and CEZ_REVIEW_CHECK in a new review; never retry a denied command.`;
               killAgyTree(child);
             }
             const relativeRead = spec.prReview && !evidence.allowsFileInspection({ id: event.id, name: event.tool, input: event.input })
@@ -613,7 +630,8 @@ export class AgyCliRunner implements AgentRunner {
 
         // Checked on every exit path (incl. timeout and cancel): a read-only run
         // that changed the checkout must never settle as a clean review.
-        if (readOnly && initialSnapshot !== undefined && spec.cwd) {
+        if (nativeTerminalStop && initialSnapshot === undefined) throw new Error('PR review stopped after a native terminal attempt: checkout integrity could not be verified');
+        if (readOnly && (!spec.prReview || nativeTerminalStop) && initialSnapshot !== undefined && spec.cwd) {
           const integrity = verifyWorkspaceIntegrity(spec.cwd, initialSnapshot);
           if (!integrity.clean) {
             const msg = `Read-only review violation: the checkout changed during the run: ${integrity.details}`;
@@ -696,7 +714,7 @@ export class AgyCliRunner implements AgentRunner {
         if (resultError) throw new Error(resultError);
         heldTurnEnd = false; // exactly one boundary, even if agy streamed its own turn-end
         onEvent?.({ type: 'turn-end' });
-        return requestedRead ?? requestedCheck;
+        return nativeTerminalStop ?? requestedRead ?? requestedCheck;
       }
 
       if (exitCode !== 0 && exitCode !== null) {
@@ -751,6 +769,14 @@ export class AgyCliRunner implements AgentRunner {
           turnNo++;
           if (!next) break;
           if (terminatedByCezar) throw new Error('PR review cancelled; no check may start');
+          if ('nativeTerminalStop' in next) {
+            if (!reviewSessionId) throw new Error('PR review stopped after a native terminal attempt: no review conversation is available to continue safely');
+            if (++nativeTerminalStops > 1) throw new Error('PR review stopped: native terminal was requested again; no command was retried and no review was published');
+            onEvent?.({ type: 'note', message: 'Native terminal attempt stopped; command was not brokered. Continuing once with inspection tools and trusted checks only.' });
+            reviewTranscript += '\nThe previous native terminal attempt was stopped. Do not retry that command or use any terminal tool. Its execution is unverified; do not claim it ran. Open changed files using read_file or view_file with absolute checkout paths. For permitted checks request CEZ_REVIEW_CHECK; report anything unavailable as not verified.\n';
+            textChunks.splice(textStart);
+            continue;
+          }
           if (isReadRequest(next)) {
             if (!reviewDiff || !spec.cwd) throw new Error('Missing prepared review checkout');
             const key = `${next.path}:${next.start ?? ''}:${next.end ?? ''}`;
