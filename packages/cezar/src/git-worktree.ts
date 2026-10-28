@@ -384,12 +384,33 @@ export function worktreeSizeBytes(path: string): Promise<number | null> {
   });
 }
 
+/**
+ * Unlink every symlink and junction under `dir` without entering it. Git for Windows'
+ * `worktree remove --force` (2.39) walks INTO a junction and empties its target: a task
+ * worktree whose `node_modules` was a junction to the main checkout's emptied the user's
+ * own `node_modules` when retention reclaimed it. Best effort — never throws.
+ */
+async function unlinkLinksUnder(dir: string): Promise<void> {
+  let entries: Dirent[];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const path = join(dir, entry.name);
+    if (entry.isSymbolicLink()) await rm(path, { force: true }).catch(() => undefined);
+    else if (entry.isDirectory() && entry.name !== '.git') await unlinkLinksUnder(path);
+  }
+}
+
 /** Remove a task worktree and its branch. Best effort — never throws. */
 export async function removeWorktree(
   repoRoot: string,
   worktreePath: string,
   branch?: string,
 ): Promise<void> {
+  await unlinkLinksUnder(worktreePath);
   await git(repoRoot, ['worktree', 'remove', '--force', worktreePath]);
   await rm(worktreePath, { recursive: true, force: true }).catch(() => undefined);
   await git(repoRoot, ['worktree', 'prune']);
