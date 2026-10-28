@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createRunner } from './runner-factory.ts';
 import {
-  buildAgyArgs,
+  buildAgyCommand,
   AgyCliRunner,
   DEFAULT_AGY_MODEL,
   MUTATING_TOOL_NAMES,
@@ -13,46 +13,48 @@ import {
   mapAgyStreamEvent,
 } from './agy-ui-mapper.ts';
 
-describe('buildAgyArgs', () => {
+describe('buildAgyCommand', () => {
   it('does not require Windows exebox or unrestricted permissions for brokered PR review', () => {
-    const args = buildAgyArgs({ userPrompt: 'Review', prReview: true });
+    const { args, prompt } = buildAgyCommand({ userPrompt: 'Review', prReview: true });
     expect(args).not.toContain('--sandbox');
     expect(args).not.toContain('--dangerously-skip-permissions');
-    expect(args.at(-1)).toContain('CEZ_REVIEW_CHECK');
+    expect(prompt).toContain('CEZ_REVIEW_CHECK');
   });
   it('isolates prepared PR review from implementation skills and external run context', () => {
-    const args = buildAgyArgs({ userPrompt: 'Review PR', cwd: process.cwd(), prReview: true,
+    const { args, prompt } = buildAgyCommand({ userPrompt: 'Review PR', cwd: process.cwd(), prReview: true,
       systemPrompt: 'Read C:\\main\\.agents\\skills\\retro-apply\\SKILL.md and write handoff',
       additionalDirectories: ['C:/main/.ai/cezar/runs'], readOnly: true });
     expect(args).toContain('--disable-slash-commands');
     expect(args.filter((arg) => arg === '--add-dir')).toHaveLength(1);
-    expect(args.at(-1)).not.toContain('C:\\main');
-    expect(args.at(-1)).toContain('Do not load implementation skills');
-    expect(args.at(-1)).toContain('do not read or write run handoffs');
+    expect(prompt).not.toContain('C:\\main');
+    expect(prompt).toContain('Do not load implementation skills');
+    expect(prompt).toContain('do not read or write run handoffs');
     expect(args).not.toContain('--dangerously-skip-permissions');
   });
-  it('builds stream-json print mode args with default gemini-3.8-flash-medium model', () => {
-    const args = buildAgyArgs({ userPrompt: 'Hello Gemini' });
+  it('builds stream-json print mode args with default gemini-3.8-flash-medium model, the prompt kept off the command line', () => {
+    const { args, prompt } = buildAgyCommand({ userPrompt: 'Hello Gemini' });
     expect(args).toEqual(
       expect.arrayContaining(['--output-format', 'stream-json', '--mode', 'accept-edits', '--dangerously-skip-permissions', '--model', DEFAULT_AGY_MODEL]),
     );
-    expect(args.slice(-2)).toEqual(['-p', 'Hello Gemini']);
+    expect(args).not.toContain('-p');
+    expect(args.join(' ')).not.toContain('Hello Gemini');
+    expect(prompt).toBe('Hello Gemini');
   });
 
   it('honors custom model override', () => {
-    const args = buildAgyArgs({ userPrompt: 'Test', model: 'gemini-3.8-pro' });
+    const { args } = buildAgyCommand({ userPrompt: 'Test', model: 'gemini-3.8-pro' });
     expect(args).toContain('--model');
     const modelIdx = args.indexOf('--model');
     expect(args[modelIdx + 1]).toBe('gemini-3.8-pro');
   });
 
   it('prepends system prompt when provided', () => {
-    const args = buildAgyArgs({ userPrompt: 'Do task', systemPrompt: 'You are helpful' });
-    expect(args.slice(-2)).toEqual(['-p', 'You are helpful\n\n---\n\nDo task']);
+    const { prompt } = buildAgyCommand({ userPrompt: 'Do task', systemPrompt: 'You are helpful' });
+    expect(prompt).toBe('You are helpful\n\n---\n\nDo task');
   });
 
   it('adds --conversation when resume / sessionId is provided', () => {
-    const args = buildAgyArgs({
+    const { args } = buildAgyCommand({
       userPrompt: 'Next turn',
       sessionId: 'conv-uuid-1234',
       resume: true,
@@ -63,7 +65,7 @@ describe('buildAgyArgs', () => {
   });
 
   it('adds --add-dir for additional directories and cwd', () => {
-    const args = buildAgyArgs({
+    const { args } = buildAgyCommand({
       userPrompt: 'Check dirs',
       cwd: '/my/workspace',
       additionalDirectories: ['/path/one', '/path/two'],
@@ -72,18 +74,16 @@ describe('buildAgyArgs', () => {
   });
 
   it('injects read-only review directive when readOnly is true or allowedTools has only read tools', () => {
-    const args = buildAgyArgs({
+    const { prompt } = buildAgyCommand({
       userPrompt: 'Review the diff',
       readOnly: true,
     });
-    const prompt = args[args.length - 1];
     expect(prompt).toContain('READ-ONLY review mode');
 
-    const toolsArgs = buildAgyArgs({
+    const { prompt: toolsPrompt } = buildAgyCommand({
       userPrompt: 'Review diff',
       allowedTools: ['Read', 'view_file', 'grep_search'],
     });
-    const toolsPrompt = toolsArgs[toolsArgs.length - 1];
     expect(toolsPrompt).toContain('READ-ONLY review mode');
   });
 });
@@ -373,6 +373,24 @@ describe('AgyCliRunner lifecycle', () => {
     expect(events).toContain('turn-end');
     expect(events).not.toContain('error');
   });
+
+  it('hands agy a prompt longer than a Windows command line on stdin (fix step with verify output, ENAMETOOLONG)', async () => {
+    const script = [
+      'if (process.argv.includes("-p")) { console.error("prompt on argv"); process.exit(2); }',
+      'let input = "";',
+      'process.stdin.on("data", (b) => { input += b; });',
+      'process.stdin.on("end", () => {',
+      '  const ok = input.length > 40000 && input.includes("TAIL-MARKER");',
+      '  console.log(JSON.stringify({ event: "init", conversation_id: "agy-long" }));',
+      '  console.log(JSON.stringify({ event: "step_update", step_update: { step_index: 1, state: "DONE", step_type: "agent_response", text_delta: ok ? "got " + input.length : "short" } }));',
+      '  console.log(JSON.stringify({ event: "result", result: { conversation_id: "agy-long", status: "SUCCESS" } }));',
+      '});',
+    ].join(' ');
+    const runner = new AgyCliRunner({ bin: process.execPath, binArgs: ['-e', script, '--'], timeoutMs: 10_000 });
+    const verifyOutput = 'FAIL src/zones.test.tsx\n'.repeat(2_000);
+    const res = await runner.run({ userPrompt: `Verification failed. Here is the output:\n${verifyOutput}TAIL-MARKER`, cwd: process.cwd() });
+    expect(res.text).toMatch(/^got \d+$/);
+  });
 });
 
 describe('AgyCliRunner security hardening', () => {
@@ -393,13 +411,12 @@ describe('AgyCliRunner security hardening', () => {
     }
   });
 
-  it('buildAgyArgs forces read-only prompt even with DEFAULT_ALLOWED_TOOLS when readOnly is true', () => {
-    const args = buildAgyArgs({
+  it('buildAgyCommand forces read-only prompt even with DEFAULT_ALLOWED_TOOLS when readOnly is true', () => {
+    const { prompt } = buildAgyCommand({
       userPrompt: 'Review PR changes',
       readOnly: true,
       allowedTools: ['Read', 'Edit', 'Write', 'Grep', 'Glob', 'Bash'],
     });
-    const prompt = args[args.length - 1];
     expect(prompt).toContain('READ-ONLY review mode');
     expect(prompt).toContain('You MUST NOT create, edit, or modify any files');
   });
