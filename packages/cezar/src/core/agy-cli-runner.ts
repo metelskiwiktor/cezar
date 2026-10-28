@@ -203,7 +203,7 @@ export interface BuildAgyArgsInput {
 /** CLI argv for headless print mode. */
 export function buildAgyArgs(input: BuildAgyArgsInput): string[] {
   const readOnly = input.prReview === true || input.readOnly === true || isReadOnlyTools(input.allowedTools);
-  const args = ['--output-format', 'stream-json', '--mode', 'accept-edits'];
+  const args = ['--output-format', 'stream-json', '--mode', 'accept-edits', ...(!readOnly ? ['--dangerously-skip-permissions'] : [])];
   if (input.prReview) args.push('--disable-slash-commands');
 
   const model = input.model?.trim() || DEFAULT_AGY_MODEL;
@@ -233,6 +233,11 @@ export function buildAgyArgs(input: BuildAgyArgsInput): string[] {
       : READ_ONLY_REVIEW_PROMPT;
   }
 
+  if (!readOnly && input.cwd?.trim()) {
+    const absCwd = resolve(input.cwd.trim()).replace(/\\/g, '/');
+    const cwdNote = `Your isolated git worktree root is: ${absCwd}\nIMPORTANT: Always pass full absolute paths inside this worktree root (${absCwd}/...) to read_file, view_file, edit_file, and write_file. Never pass relative paths or paths to the parent repository checkout.`;
+    systemPrompt = systemPrompt ? `${systemPrompt}\n\n${cwdNote}` : cwdNote;
+  }
   const prompt = prependSystemPrompt(systemPrompt, input.userPrompt);
   args.push('-p', prompt);
 
@@ -566,7 +571,10 @@ export class AgyCliRunner implements AgentRunner {
           }
           // The first fatal reason wins: a provider error streamed after Cezar stopped the
           // turn (e.g. on a permission denial) must not replace the reason it stopped.
-          if (event.type === 'turn-end' && spec.prReview) { heldTurnEnd = true; return; }
+          // Hold turn-end until after waitForExit(child) so RunManager's turn-end auto-close
+          // (250ms timer -> session.end() -> taskkill on Windows) never kills a child that is
+          // still flushing and exiting cleanly after streaming its result event.
+          if (event.type === 'turn-end') { heldTurnEnd = true; return; }
           if (event.type === 'error') resultError ??= event.message;
           onEvent?.(event);
         };
@@ -595,6 +603,7 @@ export class AgyCliRunner implements AgentRunner {
         }
 
         const exitCode = await waitForExit(child);
+        if (currentChild === child) currentChild = null;
         clearTimers();
         if (spawnFailed) throw spawnFailed;
 
@@ -623,7 +632,7 @@ export class AgyCliRunner implements AgentRunner {
         }
         if (spec.prReview && terminatedByCezar) throw new Error('PR review cancelled; no partial verdict accepted');
 
-      if (terminatedByCezar && isSignalTerminationExit(exitCode)) {
+      if (terminatedByCezar && (isSignalTerminationExit(exitCode) || (process.platform === 'win32' && exitCode === 1))) {
         onEvent?.({
           type: 'note',
           message: `Antigravity agent terminated by cezar (code ${exitCode})`,
@@ -631,7 +640,7 @@ export class AgyCliRunner implements AgentRunner {
         return;
       }
 
-      if (permissionDeniedError) {
+      if (readOnly && permissionDeniedError) {
         const msg = `Tool permission error: ${permissionDeniedError}`;
         onEvent?.({ type: 'error', message: msg });
         throw new Error(msg);
@@ -728,7 +737,13 @@ export class AgyCliRunner implements AgentRunner {
           const textStart = textChunks.length;
           // Never inherit implementation history. Resume only the conversation
           // the CLI opened for THIS review, so findings survive check rounds.
-          const next = await runTurn(spec.userPrompt, spec.systemPrompt, spec.prReview ? reviewSessionId : spec.sessionId);
+          // For non-review steps, RunManager always mints a fresh UUID on spec.sessionId
+          // with spec.resume === false; only pass --conversation when resuming.
+          const next = await runTurn(
+            spec.userPrompt,
+            spec.systemPrompt,
+            spec.prReview ? reviewSessionId : spec.resume === false ? undefined : spec.sessionId,
+          );
           turnNo++;
           if (!next) break;
           if (terminatedByCezar) throw new Error('PR review cancelled; no check may start');

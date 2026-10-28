@@ -34,7 +34,7 @@ describe('buildAgyArgs', () => {
   it('builds stream-json print mode args with default gemini-3.8-flash-medium model', () => {
     const args = buildAgyArgs({ userPrompt: 'Hello Gemini' });
     expect(args).toEqual(
-      expect.arrayContaining(['--output-format', 'stream-json', '--mode', 'accept-edits', '--model', DEFAULT_AGY_MODEL]),
+      expect.arrayContaining(['--output-format', 'stream-json', '--mode', 'accept-edits', '--dangerously-skip-permissions', '--model', DEFAULT_AGY_MODEL]),
     );
     expect(args.slice(-2)).toEqual(['-p', 'Hello Gemini']);
   });
@@ -344,6 +344,34 @@ describe('AgyCliRunner lifecycle', () => {
     await expect(
       runner.run({ userPrompt: 'hi', cwd: process.cwd() }),
     ).rejects.toThrow(/not found/);
+  });
+
+  it('does not pass --conversation when resume is false and holds turn-end until child exits so end() does not kill exiting child', async () => {
+    const script = [
+      'const args = process.argv.slice(1);',
+      'if (args.includes("--conversation")) { console.error("unexpected --conversation"); process.exit(2); }',
+      'console.log(JSON.stringify({ event: "init", conversation_id: "agy-conv-1" }));',
+      'console.log(JSON.stringify({ event: "step_update", step_update: { step_index: 1, state: "DONE", step_type: "agent_response", text_delta: "Done!" } }));',
+      'console.log(JSON.stringify({ event: "result", result: { conversation_id: "agy-conv-1", status: "SUCCESS", usage: { total_tokens: 42 } } }));',
+      'setTimeout(() => process.exit(0), 50);',
+    ].join(' ');
+    const runner = new AgyCliRunner({ bin: process.execPath, binArgs: ['-e', script, '--'], timeoutMs: 5_000 });
+    const events: string[] = [];
+    const session = runner.startSession(
+      { userPrompt: 'implement', cwd: process.cwd(), sessionId: 'minted-uuid', resume: false },
+      (event) => {
+        events.push(event.type);
+        if (event.type === 'turn-end') {
+          session.end();
+        }
+      },
+      { autoEndAfterFirstTurn: false },
+    );
+    const res = await session.result;
+    expect(res.text).toBe('Done!');
+    expect(res.sessionId).toBe('agy-conv-1');
+    expect(events).toContain('turn-end');
+    expect(events).not.toContain('error');
   });
 });
 

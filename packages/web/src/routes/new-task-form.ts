@@ -110,7 +110,9 @@ export const MODELS_BY_RUNNER: Record<Runner, readonly ModelPreset[]> = {
     { id: '', label: 'auto', desc: 'Let Copilot pick the model' },
   ],
   agy: [
-    { id: '', label: 'auto', desc: 'Gemini 3.8 Flash High (default)' },
+    { id: '', label: 'auto', desc: 'Gemini 3.8 Flash Medium (default)' },
+    { id: 'gemini-3.8-flash-medium', label: 'gemini-3.8-flash-medium', desc: 'Fast, balanced reasoning (default)' },
+    { id: 'gemini-3.8-flash-low', label: 'gemini-3.8-flash-low', desc: 'Fastest, low reasoning' },
     { id: 'gemini-3.8-flash-high', label: 'gemini-3.8-flash-high', desc: 'Fast, high-quality reasoning' },
     { id: 'gemini-3.8-flash', label: 'gemini-3.8-flash', desc: 'Fast and lightweight' },
   ],
