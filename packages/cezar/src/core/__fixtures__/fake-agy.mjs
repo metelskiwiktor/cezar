@@ -158,6 +158,31 @@ switch (mode) {
     line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: response } });
     break;
   }
+  case 'vite-search': {
+    const prompt = stdinPrompt;
+    if (!prompt.includes('case-insensitive search such as include or test') || !prompt.includes('search result does not count as opening a changed file')) process.exit(10);
+    const args = process.argv.slice(2);
+    const resultFile = prompt.match(/Cezar check result file: (.+)\n/)?.[1];
+    if (resultFile && args[args.indexOf('--conversation') + 1] !== 'review-fixture-local') process.exit(5);
+    line({ event: 'init', conversation_id: 'review-fixture-local' });
+    let step = 0;
+    const tool = (tool_name, parameters) => {
+      const step_index = ++step;
+      line({ event: 'step_update', step_update: { step_index, state: 'ACTIVE', step_type: 'tool', tool_name, tool_info: { parameters } } });
+      line({ event: 'step_update', step_update: { step_index, state: 'DONE', step_type: 'tool', tool_name, tool_info: { result: '' } } });
+    };
+    trustedDiffReads(tool);
+    tool('read_file', { Path: join(process.cwd(), 'AGENTS.md') });
+    if (!resultFile) {
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'CEZ_REVIEW_CHECK {"args":["git","grep","-i","-E","include|test","vite.config.ts"],"reason":"inspect configuration"}' } });
+    } else {
+      const { readFileSync } = await import('node:fs');
+      if (!readFileSync(resultFile, 'utf8').includes('vite.config.ts:1:')) process.exit(9);
+      if (!process.env.FAKE_AGY_OMIT_CHANGED) tool('read_file', { Path: join(process.cwd(), 'vite.config.ts') });
+      line({ event: 'step_update', step_update: { step_type: 'agent_response', text_delta: 'Findings: none.\nRecommendation: APPROVE' } });
+    }
+    break;
+  }
   case 'broker': {
     const prompt = stdinPrompt;
     const args = process.argv.slice(2);

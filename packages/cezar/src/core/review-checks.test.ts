@@ -42,7 +42,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 });
 
 const repos: string[] = [];
-function repo(script = '', opts: { justfile?: boolean; agents?: boolean; scripts?: Record<string, string> } = {}) {
+function repo(script = '', opts: { justfile?: boolean; agents?: boolean; scripts?: Record<string, string>; vite?: boolean } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'cez-review-v3-'));
   repos.push(cwd);
   const git = (...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -50,6 +50,7 @@ function repo(script = '', opts: { justfile?: boolean; agents?: boolean; scripts
   git('config', 'core.autocrlf', 'false');
   if (opts.agents !== false) writeFileSync(join(cwd, 'AGENTS.md'), 'Review contracts; targeted tests only\n');
   writeFileSync(join(cwd, 'tracked.txt'), 'v1\n');
+  if (opts.vite) writeFileSync(join(cwd, 'vite.config.ts'), 'export const include = []\n');
   writeFileSync(join(cwd, '.gitignore'), 'coverage/\n.cache/\n');
   // The real Windows just executable invokes this local, offline fixture. No API.
   writeFileSync(join(cwd, 'check.cjs'), script);
@@ -58,7 +59,8 @@ function repo(script = '', opts: { justfile?: boolean; agents?: boolean; scripts
   git('add', '.');
   git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'base');
   const base = git('rev-parse', 'HEAD');
-  writeFileSync(join(cwd, 'tracked.txt'), 'v2\n');
+  if (opts.vite) writeFileSync(join(cwd, 'vite.config.ts'), 'export const include = ["test"]\n');
+  else writeFileSync(join(cwd, 'tracked.txt'), 'v2\n');
   git('add', '.');
   git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'head');
   return { cwd, base, head: git('rev-parse', 'HEAD') };
@@ -85,6 +87,33 @@ describe('brokered Windows review', { timeout: 30_000 }, () => {
     expect(texts[1]).toContain(`### Review coverage (reported by Cezar)\n- Check \`${args.join(' ')}\`: exit 0`);
     expect(notes.some((n) => n.includes('Exit: 0; duration:'))).toBe(true);
     if (kind === 'test') expect(notes.join('\n')).toContain('targeted contract passed');
+  });
+
+  it('searches the changed Vite config through the broker and reads both result and changed file', async () => {
+    const r = repo('', { vite: true });
+    const notes: string[] = [];
+    const calls: string[] = [];
+    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'vite-search' } }, (e) => {
+      if (e.type === 'note') notes.push(e.message);
+      if (e.type === 'tool-call') calls.push(e.tool);
+    });
+    expect(notes.join('\n')).toMatch(/vite\.config\.ts:1:.*include.*test/);
+    expect(result.text).toContain('Recommendation: APPROVE');
+    expect(result.text).toContain('Check `git (arguments omitted)`: exit 0');
+    expect(result.text).not.toContain('check result(s) were not fully read');
+    expect(calls).toContain('read_file');
+    expect(calls).not.toContain('run_command');
+  });
+
+  it('does not treat a Vite search result as a changed-file read', async () => {
+    const r = repo('', { vite: true });
+    await expect(runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'vite-search', FAKE_AGY_OMIT_CHANGED: '1' } })).rejects.toThrow(/no changed file was opened/);
+  });
+
+  it('discloses an unread Vite search result instead of treating it as read', async () => {
+    const r = repo('', { vite: true });
+    const result = await runner().run({ cwd: r.cwd, userPrompt: 'Review', prReview: { mergeBase: r.base, headSha: r.head }, env: { FAKE_AGY_MODE: 'vite-search', FAKE_AGY_OMIT: 'check-result' } });
+    expect(result.text).toContain('1 check result(s) were not fully read');
   });
 
   it.each(['none', 'ignored', 'dirty', 'external'])('fails closed after native terminal attempt with %s side effects', async (kind) => {
