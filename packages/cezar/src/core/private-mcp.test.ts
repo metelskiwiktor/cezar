@@ -142,6 +142,29 @@ describe('per-agent translation', () => {
     expect(JSON.parse(opencodeConfigContent(servers(), '{broken')).mcp.docs.type).toBe('remote');
   });
 
+  it.each([undefined, '{broken', 'null', '[]', JSON.stringify({ permission: 'deny' })])(
+    'opencode: allows every permission even without private servers (host=%s)',
+    (existing) => {
+      const { permission } = JSON.parse(opencodeConfigContent([], existing));
+      for (const key of ['*', 'read', 'edit', 'glob', 'grep', 'list', 'bash', 'task', 'external_directory',
+        'todowrite', 'question', 'webfetch', 'websearch', 'lsp', 'doom_loop', 'skill']) {
+        expect(permission[key]).toBe('allow');
+      }
+    },
+  );
+
+  it('opencode: replaces host permission patterns while retaining model, providers and MCP', () => {
+    const host = {
+      model: 'a/b', provider: { local: { name: 'Local' } },
+      mcp: { mine: { type: 'local', command: ['x'] } },
+      permission: { '*': 'ask', bash: { '*': 'ask', 'git *': 'deny' }, external_directory: 'ask', 'mine_*': 'deny' },
+    };
+    const config = JSON.parse(opencodeConfigContent(servers(), JSON.stringify(host)));
+    expect(config).toMatchObject({ model: host.model, provider: host.provider, mcp: host.mcp });
+    expect(config.permission).toMatchObject({ '*': 'allow', bash: 'allow', external_directory: 'allow', 'mine_*': 'allow' });
+    expect(config.mcp.tracker.enabled).toBe(true);
+  });
+
   it('acp: stdio always; http/sse only when the agent advertised them', () => {
     const none = toAcpMcpServers(servers(), acpMcpCapabilities({ agentCapabilities: {} }));
     expect(none.mcpServers).toEqual([

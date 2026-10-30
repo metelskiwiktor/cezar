@@ -8,6 +8,7 @@ import type { AgentEvent } from './agent-runner.ts';
 import {
   KILL_GRACE_MS,
   OpencodeServerRunner,
+  PERMISSION_REPLY_TIMEOUT_MS,
   TURN_IDLE_GRACE_MS,
 } from './opencode-server-runner.ts';
 
@@ -17,8 +18,14 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    spawn: (...args: Parameters<typeof actual.spawn>) =>
-      spawnHook.override ? spawnHook.override(...args) : actual.spawn(...args),
+    spawn: (...args: Parameters<typeof actual.spawn>) => {
+      if (spawnHook.override) return spawnHook.override(...args);
+      // Windows cannot execute a .mjs shebang; keep the mock server portable.
+      if (String(args[0]).endsWith('mock-opencode-serve.mjs')) {
+        return actual.spawn(process.execPath, [String(args[0]), ...(args[1] as string[])], args[2]);
+      }
+      return actual.spawn(...args);
+    },
   };
 });
 
@@ -203,6 +210,30 @@ describe('opencode serve startup', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(events).toContainEqual({ type: 'error', message: 'opencode: opencode serve did not report a listening URL within 30s' });
   });
+
+  it.each([
+    { mcpServers: undefined }, { mcpServers: [] },
+    { mcpServers: [{ name: 'docs', transport: 'http' as const, url: 'https://example.com/mcp', args: [], env: {}, headers: {} }] },
+  ])(
+    'always injects autonomous permissions into the child config (MCP=$mcpServers)', ({ mcpServers }) => {
+      let env: NodeJS.ProcessEnv = {};
+      spawnHook.override = (_bin, _args, options) => {
+        env = (options as { env: NodeJS.ProcessEnv }).env;
+        return silentChild();
+      };
+      vi.useFakeTimers();
+      const session = new OpencodeServerRunner({ bin: 'opencode', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it', cwd: process.cwd(), mcpServers,
+        env: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ model: 'a/b', permission: { bash: 'ask' } }) },
+      });
+      void session.result.catch(() => undefined);
+      const config = JSON.parse(env.OPENCODE_CONFIG_CONTENT!);
+      expect(config.model).toBe('a/b');
+      expect(config.permission).toMatchObject({ '*': 'allow', bash: 'allow', external_directory: 'allow' });
+      if (mcpServers?.length) expect(config.mcp.docs.enabled).toBe(true);
+      session.end();
+    },
+  );
 });
 
 /**
@@ -241,6 +272,30 @@ describe('#897 a turn that outlives its prompt POST', () => {
     events.filter((e): e is Extract<AgentEvent, { type: 'error' }> => e.type === 'error').map((e) => e.message);
   const textIndex = (events: AgentEvent[], needle: string): number =>
     events.findIndex((e) => e.type === 'text' && e.text.includes(needle));
+
+  it.each(['permission.asked', 'permission.updated'])('answers and logs %s, unblocking the pending tool', async (eventType) => {
+    const { events, onEvent } = record();
+    const result = await new OpencodeServerRunner({ bin: mockBin, timeoutMs: 30_000 }).run({
+      userPrompt: '#permission', cwd: process.cwd(), env: { MOCK_PERMISSION_EVENT: eventType },
+    }, onEvent);
+    expect(result.text).toContain('Permission unblocked.');
+    expect(notes(events).join('\n')).toContain(`${eventType} per_mock_1 (external_directory) — approving automatically`);
+    expect(notes(events).filter((note) => note.includes('approving automatically'))).toHaveLength(1);
+    expect(notes(events)).toContain('opencode: permission per_mock_1 approved automatically');
+    expect(errors(events)).toEqual([]);
+  }, 30_000);
+
+  it.each(['failure', 'malformed', 'timeout'])('ends visibly when permission approval encounters %s', async (mode) => {
+    const { events, onEvent } = record();
+    const started = Date.now();
+    await new OpencodeServerRunner({ bin: mockBin, timeoutMs: 30_000 }).run({
+      userPrompt: '#permission', cwd: process.cwd(), env: { MOCK_PERMISSION_MODE: mode },
+    }, onEvent);
+    expect(notes(events).join('\n')).toContain('permission.asked');
+    expect(errors(events).join('\n')).toContain('opencode: permission approval failed:');
+    expect(errors(events).join('\n')).not.toContain('timed out after');
+    if (mode === 'timeout') expect(Date.now() - started).toBeGreaterThanOrEqual(PERMISSION_REPLY_TIMEOUT_MS);
+  }, 30_000);
 
   /** Resolves once `count` `turn-end` events have been seen. */
   function afterTurnEnds(events: AgentEvent[], count: number, timeoutMs = 10_000): Promise<void> {

@@ -8,7 +8,7 @@
 // v2 stream must take `turn.completed` from `session.idle`, not from the
 // HTTP response.
 //
-// Four scripts, selected by a marker in the prompt text, so the #897 shapes
+// Scripts selected by a marker in the prompt text, so the #897 shapes
 // are reproducible without waiting five real minutes:
 //   (default)     the ordering quirk above — respond, then stream, then idle.
 //   `#drop-post`  destroy the message POST's socket mid-turn WITHOUT a
@@ -20,6 +20,7 @@
 //                 a server whose turn boundary the runner has to synthesize.
 //   `#drop-then-die` destroy the message POST's socket AND then close the event
 //                 bus: the drop was real, and the runner has to say so.
+//   `#permission` hold the prompt open until the permission endpoint receives a reply.
 // `MOCK_NO_EVENT_BUS=1` in the environment makes `GET /event` 404 instead, for
 // the no-event-bus fallback.
 import { createServer } from 'node:http';
@@ -30,7 +31,8 @@ const arg = (flag, fallback) => {
   return i >= 0 && args[i + 1] !== undefined ? args[i + 1] : fallback;
 };
 const hostname = arg('--hostname', '127.0.0.1');
-const port = Number(arg('--port', '0'));
+// The OS allocates a free port when parallel suites share this fixture.
+const port = 0;
 
 const SESSION_ID = 'ses_mock_1';
 const MESSAGE_ID = 'msg_mock_1';
@@ -42,6 +44,7 @@ const suffix = () => (turn <= 1 ? '' : `_t${turn}`);
 const messageId = () => `${MESSAGE_ID}${suffix()}`;
 
 let sse = null;
+let pendingPermission = null;
 const send = (event) => {
   if (sse) sse.write(`data: ${JSON.stringify(event)}\n\n`);
 };
@@ -75,6 +78,25 @@ const server = createServer((req, res) => {
   let body = '';
   req.on('data', (chunk) => (body += chunk));
   req.on('end', () => {
+    if (pendingPermission && req.method === 'POST' && url === pendingPermission.path) {
+      if (process.env.MOCK_PERMISSION_MODE === 'timeout') return;
+      const expected = pendingPermission.type === 'permission.asked' ? { reply: 'once' } : { response: 'once' };
+      const ok = JSON.stringify(JSON.parse(body)) === JSON.stringify(expected);
+      res.writeHead(ok && process.env.MOCK_PERMISSION_MODE !== 'failure' ? 200 : 403, { 'content-type': 'application/json' });
+      res.end(ok ? 'true' : '{"error":"wrong reply"}');
+      if (!ok || process.env.MOCK_PERMISSION_MODE === 'failure') return;
+      const prompt = pendingPermission.response;
+      pendingPermission = null;
+      send({ type: 'message.updated', properties: { info: info({}) } });
+      send({ type: 'message.part.updated', properties: { part: {
+        id: 'prt_permission', messageID: messageId(), sessionID: SESSION_ID,
+        type: 'text', text: 'Permission unblocked.', time: { start: 1, end: 2 },
+      } } });
+      prompt.writeHead(200, { 'content-type': 'application/json' });
+      prompt.end('{}');
+      send({ type: 'session.idle', properties: { sessionID: SESSION_ID } });
+      return;
+    }
     if (req.method === 'POST' && url === '/session') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ id: SESSION_ID, title: 'cezar task' }));
@@ -98,6 +120,22 @@ const server = createServer((req, res) => {
             ? 'no-idle'
             : 'default';
 
+      if (promptText.includes('#permission')) {
+        const type = process.env.MOCK_PERMISSION_EVENT ?? 'permission.asked';
+        const properties = {
+          id: 'per_mock_1', sessionID: 'ses_mock_child', permission: 'external_directory',
+          type: 'external_directory', patterns: ['/outside/*'], metadata: {}, always: ['/outside/*'],
+        };
+        pendingPermission = {
+          type, response: res,
+          path: type === 'permission.asked' ? '/permission/per_mock_1/reply' : '/session/ses_mock_child/permissions/per_mock_1',
+        };
+        if (process.env.MOCK_PERMISSION_MODE === 'malformed') delete properties.id;
+        send({ type, properties });
+        send({ type, properties }); // duplicate SSE delivery must not reply twice
+        return; // the prompt stays pending until the runner replies
+      }
+
       // The other half of the #897 shape: the POST drops AND the session is
       // really gone. Swallowing the drop must not swallow this.
       if (script === 'drop-then-die') {
@@ -105,7 +143,7 @@ const server = createServer((req, res) => {
         setTimeout(() => {
           if (sse) sse.end();
           sse = null;
-        }, 40);
+        }, 250);
         return;
       }
 
