@@ -1,3 +1,4 @@
+import { applyStepOverrides, type StepOverrides } from './step-overrides.ts';
 import type { TrackerAssociation } from '@open-mercato/cezar-contract';
 import { TrackerAgentBindingError } from '../server/tracker/agent-credentials.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -732,6 +733,7 @@ function formatWakeInstant(at: Date): string {
 }
 
 export interface StartRunInput {
+  stepOverrides?: StepOverrides;
   task: string;
   /** The cockpit device that started this task (telemetry only, `x-cezar-sid`). */
   deviceSid?: string;
@@ -1464,6 +1466,12 @@ export class RunManager {
     input: StartRunInput,
     group?: { groupId: string; variant: string },
   ): RunRecord {
+    const workflowSourceDef = workflow;
+    if (input.stepOverrides) {
+      const overridden = applyStepOverrides(workflow, input.stepOverrides);
+      if ('error' in overridden) throw new Error(overridden.error);
+      workflow = overridden;
+    }
     // Sanitize at the manager boundary so CLI runs, workflows, variants, and
     // direct callers cannot bypass the HTTP policy.
     const effectiveInput = {
@@ -1509,7 +1517,10 @@ export class RunManager {
     });
     // Persist the full definition so a queued run survives a restart (#367) —
     // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
-    this.store.updateRun(run.id, { workflowDef: workflow });
+    this.store.updateRun(run.id, {
+      workflowDef: workflow,
+      ...(input.stepOverrides ? { workflowSourceDef, stepOverrides: input.stepOverrides } : {}),
+    });
     // A pull-request head run (spec 2026-10-06-agentic-e2e-checks Phase 3): the fetched sha is
     // recorded as the fork point BEFORE the run is queued, so `execute` — and a restart that
     // revives the queued run — forks from it through the "recorded fork point wins" rule rather
@@ -2068,16 +2079,40 @@ export class RunManager {
    * run that already started a step (a re-queue from inside `execute`) keeps what it has.
    */
   private refreshQueuedWorkflow(runId: string, snapshot: WorkflowDef, catalog: readonly WorkflowDef[]): WorkflowDef {
-    const current = newerCatalogWorkflow(snapshot, catalog);
+    const record = this.store.getRun(runId);
+    const current = newerCatalogWorkflow(record?.workflowSourceDef ?? snapshot, catalog);
     if (!current) return snapshot;
     const steps = current.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) }));
     if (!this.store.replacePendingSteps(runId, steps)) return snapshot;
-    this.store.updateRun(runId, { workflowDef: current });
+    const overrides = record?.stepOverrides;
+    let effective = current;
+    const skipped: string[] = [];
+    if (overrides) {
+      const agents = new Set(current.graph
+        ? current.graph.nodes.filter((n) => n.type === 'agent').map((n) => n.id)
+        : current.steps.filter((s) => !s.command).map((s) => s.id));
+      const applicable = Object.fromEntries(Object.entries(overrides).filter(([id]) => {
+        if (agents.has(id)) return true;
+        skipped.push(id);
+        return false;
+      }));
+      const overridden = applyStepOverrides(current, applicable);
+      if ('error' in overridden) throw new Error(overridden.error);
+      effective = overridden;
+    }
+    this.store.updateRun(runId, {
+      workflowDef: effective,
+      ...(overrides ? { workflowSourceDef: current } : {}),
+    });
+    for (const id of skipped) this.store.appendEvent(runId, {
+      type: 'lifecycle',
+      message: `stepOverrides: skipped "${id}" — no longer an agent step of workflow "${current.name}"`,
+    });
     this.store.appendEvent(runId, {
       type: 'lifecycle',
       message: `workflow "${current.name}" changed while the task was queued — starting with the current version`,
     });
-    return current;
+    return effective;
   }
 
   /** The persisted definition when it looks sane, else the catalog by name. */

@@ -200,8 +200,7 @@ export function toOpencodeMcp(servers: readonly PrivateMcpServer[]): Record<stri
 }
 
 /**
- * The `OPENCODE_CONFIG_CONTENT` value for a run: the private servers merged into any inline
- * config the host already passes, so an existing value is extended rather than clobbered.
+ * Autonomous permissions and private MCP for a run, preserving the host's other inline settings.
  */
 export function opencodeConfigContent(servers: readonly PrivateMcpServer[], existing?: string): string {
   let base: Record<string, unknown> = {};
@@ -214,7 +213,16 @@ export function opencodeConfigContent(servers: readonly PrivateMcpServer[], exis
     }
   }
   const baseMcp = base.mcp && typeof base.mcp === 'object' && !Array.isArray(base.mcp) ? base.mcp : {};
-  return JSON.stringify({ ...base, mcp: { ...baseMcp, ...toOpencodeMcp(servers) } });
+  const basePermission = base.permission && typeof base.permission === 'object' && !Array.isArray(base.permission)
+    ? base.permission : {};
+  // OpenCode deep-merges config and normalizes scalar "allow" to { '*': 'allow' }.
+  // Explicit keys replace inherited pattern maps that would otherwise keep asking (#475).
+  const permission = Object.fromEntries([
+    '*', 'read', 'edit', 'glob', 'grep', 'list', 'bash', 'task', 'external_directory',
+    'todowrite', 'question', 'webfetch', 'websearch', 'lsp', 'doom_loop', 'skill',
+    ...Object.keys(basePermission),
+  ].map((key) => [key, 'allow']));
+  return JSON.stringify({ ...base, permission, mcp: { ...baseMcp, ...toOpencodeMcp(servers) } });
 }
 
 /** What an ACP agent advertised in `initialize` → `agentCapabilities.mcpCapabilities`. */

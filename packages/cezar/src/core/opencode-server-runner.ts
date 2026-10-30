@@ -37,6 +37,7 @@ export interface OpencodeRunnerOptions {
 }
 
 const SERVER_START_TIMEOUT_MS = 30_000;
+export const PERMISSION_REPLY_TIMEOUT_MS = 10_000;
 
 /** Grace between the teardown SIGTERM and the SIGKILL that follows it. */
 export const KILL_GRACE_MS = 4_000;
@@ -64,8 +65,8 @@ export const TURN_IDLE_GRACE_MS = 5_000;
  * /session` and does not read `spec.sessionId`; resuming a server-side session
  * id is not implemented.
  *
- * Auth = the host's opencode config/logins. The agent runs autonomously
- * (auto-approved permissions); OpenCode has no per-tool allowlist, so
+ * Auth = the host's opencode config/logins. The runner injects allow permissions
+ * and answers residual permission requests for autonomous execution (#475).
  * `spec.allowedTools` is ignored. `spec.model` is `provider/model`.
  */
 export class OpencodeServerRunner implements AgentRunner {
@@ -127,6 +128,7 @@ class OpencodeSession implements AgentSession {
     this.emit({ type: 'text', text });
   });
   private readonly toolsSeen = new Set<string>();
+  private readonly permissionsInFlight = new Set<string>();
   /** messageID → role. Parts carry no role; only assistant parts are surfaced
    *  (the user's own message also streams as parts over the same SSE feed). */
   private readonly msgRole = new Map<string, string>();
@@ -171,11 +173,8 @@ class OpencodeSession implements AgentSession {
     const port = 40000 + Math.floor(Math.random() * 20000);
     try {
       const env = buildChildEnv({ backend: 'opencode', extraEnv: spec.env });
-      // Private MCP servers (spec 2026-10-07-private-project-mcp): OpenCode loads
-      // OPENCODE_CONFIG_CONTENT after the project config, so these are added and win on a clash.
-      if (spec.mcpServers?.length) {
-        env.OPENCODE_CONFIG_CONTENT = opencodeConfigContent(spec.mcpServers, env.OPENCODE_CONFIG_CONTENT);
-      }
+      // Inline config overrides project settings: autonomy must also work without private MCP.
+      env.OPENCODE_CONFIG_CONTENT = opencodeConfigContent(spec.mcpServers ?? [], env.OPENCODE_CONFIG_CONTENT);
       const [file, argv] = disclaimedCommand(bin, ['serve', '--hostname', '127.0.0.1', '--port', String(port)], env);
       this.child = nodeSpawn(file, argv, { cwd: spec.cwd, env });
     } catch (err) {
@@ -554,7 +553,9 @@ class OpencodeSession implements AgentSession {
   private handleEvent(evt: OpencodeEvent): void {
     const type = evt.type ?? '';
     const props = evt.properties ?? {};
-    if (type === 'message.updated' || type === 'message.created' || type === 'message.completed') {
+    if (type === 'permission.asked' || type === 'permission.updated') {
+      void this.approvePermission(type, props);
+    } else if (type === 'message.updated' || type === 'message.created' || type === 'message.completed') {
       const info = (props.info as Record<string, unknown>) ?? props;
       const mid = stringField(info, 'id');
       const role = stringField(info, 'role');
@@ -569,6 +570,34 @@ class OpencodeSession implements AgentSession {
       // own scope, exactly as the v2 mapper reads it.
       const sid = stringField(props, 'sessionID');
       if (sid === undefined || sid === this.sessionId) this.finishTurn(true);
+    }
+  }
+
+  private async approvePermission(type: string, props: Record<string, unknown>): Promise<void> {
+    const id = stringField(props, 'id');
+    const sid = stringField(props, 'sessionID');
+    const name = stringField(props, 'permission') ?? stringField(props, 'type') ?? 'unknown';
+    if (id && this.permissionsInFlight.has(id)) return;
+    this.emit({ type: 'note', message: `opencode: ${type} ${id ?? '(missing id)'} (${name}) — approving automatically` });
+    try {
+      if (!id || !sid) throw new Error('permission request is missing id or sessionID');
+      this.permissionsInFlight.add(id);
+      // Per-agent rules can still ask after the global config; reply without blocking SSE.
+      const path = type === 'permission.asked'
+        ? `/permission/${encodeURIComponent(id)}/reply`
+        : `/session/${encodeURIComponent(sid)}/permissions/${encodeURIComponent(id)}`;
+      const body = type === 'permission.asked' ? { reply: 'once' } : { response: 'once' };
+      await this.http('POST', path, body, AbortSignal.any([
+        this.sse.signal, AbortSignal.timeout(PERMISSION_REPLY_TIMEOUT_MS),
+      ]));
+      this.emit({ type: 'note', message: `opencode: permission ${id} approved automatically` });
+    } catch (err) {
+      if (!this.serverOpen) return;
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit({ type: 'error', message: `opencode: permission approval failed: ${message}` });
+      this.interrupt();
+    } finally {
+      if (id) this.permissionsInFlight.delete(id);
     }
   }
 
@@ -650,9 +679,10 @@ class OpencodeSession implements AgentSession {
     method: string,
     path: string,
     body: unknown,
+    signal?: AbortSignal,
   ): Promise<Record<string, unknown>> {
     if (!this.baseUrl) throw new Error('opencode server not ready');
-    const res = await opencodeRequest(`${this.baseUrl}${path}`, { method, body });
+    const res = await opencodeRequest(`${this.baseUrl}${path}`, { method, body, signal });
     if (res.status < 200 || res.status >= 300) {
       throw new Error(`${method} ${path} → ${res.status} ${res.body.slice(0, 200)}`);
     }

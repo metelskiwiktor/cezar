@@ -4434,6 +4434,7 @@ export function createApp(deps: ServerDeps) {
         workflow = workflows.find((w) => w.name === parsed.data.workflow);
         if (!workflow) return c.json({ error: `unknown workflow: ${parsed.data.workflow}` }, 404);
       }
+      const workflowSourceDef = workflow;
       if (parsed.data.stepOverrides) {
         // Before the provider check below, so a step moved onto another runner is checked for it.
         const overridden = applyStepOverrides(workflow, parsed.data.stepOverrides);
@@ -4471,6 +4472,7 @@ export function createApp(deps: ServerDeps) {
       const images = parsed.data.images?.map((image) => toPastedContent(image));
       const input = {
         task: parsed.data.task,
+        ...(parsed.data.stepOverrides ? { stepOverrides: parsed.data.stepOverrides } : {}),
         model: parsed.data.model,
         runner: parsed.data.runner,
         agentProfile: parsed.data.agentProfile,
@@ -4491,13 +4493,13 @@ export function createApp(deps: ServerDeps) {
         deviceSid: deviceSid(c.req.header('x-cezar-sid')),
       };
       if (variants > 1) {
-        const runs = manager.startVariants(workflow, input, variants);
+        const runs = manager.startVariants(workflowSourceDef, input, variants);
         // The entry points at the first variant — the thread the composer navigates to.
         const first = runs[0];
         if (parsed.data.todoId && first) await noteTodoStarted(dataDir, parsed.data.todoId, first.id);
         return c.json({ runs }, 201);
       }
-      const run = manager.startRun(workflow, input);
+      const run = manager.startRun(workflowSourceDef, input);
       if (parsed.data.todoId) await noteTodoStarted(dataDir, parsed.data.todoId, run.id);
       return c.json(run, 201);
     })

@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { AgentEvent } from './agent-runner.ts';
 import type { UiEvent } from './ui-events.ts';
@@ -24,6 +24,20 @@ import {
   type OpencodeUiMapping,
 } from './opencode-ui-mapper.ts';
 import { OpencodeServerRunner } from './opencode-server-runner.ts';
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    spawn: (...args: Parameters<typeof actual.spawn>) => {
+      // Windows cannot execute the mock server's .mjs shebang.
+      if (String(args[0]).endsWith('mock-opencode-serve.mjs')) {
+        return actual.spawn(process.execPath, [String(args[0]), ...(args[1] as string[])], args[2]);
+      }
+      return actual.spawn(...args);
+    },
+  };
+});
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = join(HERE, '__fixtures__', 'opencode');
