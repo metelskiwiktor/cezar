@@ -249,11 +249,14 @@ function parseOpenCodeStatus(result: ProviderCommandResult): ProviderConnectionS
   if (storedSummaries.length !== 1) return null;
   const storedCount = Number(storedSummaries[0]);
   if (!Number.isSafeInteger(storedCount)) return null;
+  // Stored credentials suffice even when the optional Environment section is incomplete.
+  if (storedCount > 0) return 'connected';
 
   const environmentSummaries = lines
     .map((line) => line.match(/^[^a-z0-9]*(\d+)\s+environment\s+variables?$/)?.[1])
     .filter((count): count is string => count !== undefined);
-  const hasEnvironmentBlock = lines.some((line) => /^[^a-z0-9]*environment$/.test(line));
+  // Windows uses the literal ASCII `T` for this border; it is not box-drawing punctuation.
+  const hasEnvironmentBlock = lines.some((line) => /^(?:[^a-z0-9]*|t\s+)environment$/.test(line));
   if (environmentSummaries.length > 1) return null;
   if (hasEnvironmentBlock !== (environmentSummaries.length === 1)) return null;
   const environmentCount = environmentSummaries.length === 1
@@ -261,7 +264,7 @@ function parseOpenCodeStatus(result: ProviderCommandResult): ProviderConnectionS
     : 0;
   if (!Number.isSafeInteger(environmentCount)) return null;
 
-  return storedCount > 0 || environmentCount > 0 ? 'connected' : 'disconnected';
+  return environmentCount > 0 ? 'connected' : 'disconnected';
 }
 
 /**

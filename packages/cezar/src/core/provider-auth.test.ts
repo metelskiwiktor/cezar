@@ -389,6 +389,53 @@ describe('provider auth parsers', () => {
     await expect(statuses(service)).resolves.toMatchObject({ opencode: { status: 'disconnected' } });
   });
 
+  it('recognizes the reported Windows OpenCode excerpt as connected', async () => {
+    const stdout = [
+      'T  Credentials ~\\.local\\share\\opencode\\auth.json',
+      '|',
+      '•  OpenRouter api',
+      '|',
+      '—  1 credentials',
+      'T  Environment',
+    ].join('\r\n');
+    const service = new ProviderAuthService({
+      runCommand: runner((executable) => executable === 'opencode'
+        ? { stdout, stderr: '', exitCode: 0 }
+        : { stdout: 'unrecognized', stderr: '', exitCode: 0 }),
+    });
+
+    await expect(statuses(service)).resolves.toMatchObject({ opencode: { status: 'connected' } });
+  });
+
+  it.each([
+    [1, 0, 'connected'],
+    [2, 0, 'connected'],
+    [0, 0, 'disconnected'],
+    [0, 1, 'connected'],
+    [1, 2, 'connected'],
+  ])('recognizes Windows OpenCode with %i credentials and %i environment variables as %s', async (stored, environment, status) => {
+    const stdout = [
+      'T  Credentials ~\\.local\\share\\opencode\\auth.json',
+      '|',
+      ...Array.from({ length: stored }, () => '•  OpenRouter api'),
+      '|',
+      `—  ${stored} credentials`,
+      '',
+      '\u001B[90mT  Environment\u001B[0m',
+      '|',
+      ...Array.from({ length: environment }, () => '•  Example EXAMPLE_API_KEY'),
+      '|',
+      `—  ${environment} environment variables`,
+    ].join('\r\n');
+    const service = new ProviderAuthService({
+      runCommand: runner((executable) => executable === 'opencode'
+        ? { stdout, stderr: '', exitCode: 0 }
+        : { stdout: 'unrecognized', stderr: '', exitCode: 0 }),
+    });
+
+    await expect(statuses(service)).resolves.toMatchObject({ opencode: { status } });
+  });
+
   it.each([
     'OpenCode Go  OpenCode Go                 stored',
     [
@@ -500,6 +547,15 @@ describe('provider auth parsers', () => {
         '┌  Environment',
         '└  environment variables: many',
       ].join('\n'),
+    ],
+    [
+      'a Windows environment block without a summary',
+      [
+        'T  Credentials ~\\.local\\share\\opencode\\auth.json',
+        '—  0 credentials',
+        'T  Environment',
+        '•  Example EXAMPLE_API_KEY',
+      ].join('\r\n'),
     ],
     [
       'an environment summary without its block',
