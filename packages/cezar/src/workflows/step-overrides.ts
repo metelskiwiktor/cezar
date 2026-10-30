@@ -1,22 +1,7 @@
-import { z } from 'zod';
-import { RUNNER_IDS } from '../core/agent-runner.ts';
 import { graphToSteps } from './graph.ts';
 import type { WorkflowDef } from './types.ts';
-
-/**
- * Per-step runner/model for ONE task (`POST /runs` `stepOverrides`, spec 2026-10-28-step-overrides).
- * A step pinned in the workflow (`runner:`/`model:` on the node) used to win over anything the
- * task asked for, so a workflow could run on one set of agents only. An override wins over the pin.
- */
-export const stepOverrideSchema = z
-  .object({
-    runner: z.enum(RUNNER_IDS).optional(),
-    model: z.string().trim().min(1).max(200).optional(),
-  })
-  .strict()
-  .refine((o) => o.runner !== undefined || o.model !== undefined, { message: 'name a runner, a model, or both' });
-export const stepOverridesSchema = z.record(z.string().min(1).max(80), stepOverrideSchema);
-export type StepOverrides = z.infer<typeof stepOverridesSchema>;
+import type { StepOverrides } from '@open-mercato/cezar-contract';
+export { stepOverrideSchema, stepOverridesSchema, type StepOverrides } from '@open-mercato/cezar-contract';
 
 /**
  * The workflow with the overrides written onto its agent steps — the run persists this def

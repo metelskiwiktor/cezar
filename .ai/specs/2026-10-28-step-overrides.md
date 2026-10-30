@@ -18,6 +18,11 @@ one of the two per entry. `applyStepOverrides` (`packages/cezar/src/workflows/st
 writes them onto the workflow's agent nodes (or v1 steps) before the provider check, and the run
 persists that def as `workflowDef`, so a resumed, continued or restarted run keeps them.
 
+The run also stores optional `stepOverrides` and the unmodified `workflowSourceDef`. At dequeue,
+catalog changes are compared with that source snapshot, then overrides are reapplied before the
+effective definition is saved and executed. Overrides for removed or non-agent steps are skipped
+with a lifecycle event. Legacy records without these fields retain their previous behavior.
+
 - Order: override > the workflow's pin > the task's runner/model > config defaults.
 - A new runner without a model drops the pinned model (it named the old runner's model).
 - An id that is not an agent step of the workflow is a 400; nothing starts.

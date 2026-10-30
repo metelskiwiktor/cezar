@@ -3,12 +3,31 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RunStore } from '../runs/store.ts';
 import { WorkspaceSemaphore } from '../workspace/semaphore.ts';
 import { loadWorkflows, newerCatalogWorkflow } from './load.ts';
+import { applyStepOverrides, type StepOverrides } from './step-overrides.ts';
 import { RunManager } from './run.ts';
 import { QUICK_TASK_WORKFLOW, type WorkflowDef } from './types.ts';
+
+// CEZ_DRY_RUN only mocks Claude. Keep Codex launches offline too, while recording the
+// actual runner/model selected by the engine at dequeue.
+const launches = vi.hoisted(() => [] as Array<{ runner: string; model?: string }>);
+vi.mock('../core/runner-factory.ts', async (original) => {
+  const actual = await original<typeof import('../core/runner-factory.ts')>();
+  const { ClaudeCliRunner } = await import('../core/claude-cli-runner.ts');
+  return { ...actual, createRunner: (backend: Parameters<typeof actual.createRunner>[0]) => {
+    if (backend !== 'codex') return actual.createRunner(backend);
+    const mock = new ClaudeCliRunner();
+    return { backend: 'codex' as const, run: mock.run.bind(mock), interrupt: mock.interrupt.bind(mock),
+      startSession: (...args: Parameters<typeof mock.startSession>) => {
+        launches.push({ runner: 'codex', model: args[0].model });
+        return mock.startSession(...args);
+      },
+    };
+  } };
+});
 
 const run = promisify(execFile);
 const GIT_ID = ['-c', 'user.name=test', '-c', 'user.email=test@local'];
@@ -39,6 +58,7 @@ describe('a queued run re-resolves its workflow at dequeue (#1078)', () => {
   beforeEach(async () => {
     repoRoot = mkdtempSync(join(tmpdir(), 'cez-1078-'));
     process.env.CEZ_DRY_RUN = '1';
+    launches.length = 0;
     await run('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
     writeFileSync(join(repoRoot, 'a.txt'), 'one\n');
     await run('git', ['add', '-A'], { cwd: repoRoot });
@@ -67,14 +87,14 @@ describe('a queued run re-resolves its workflow at dequeue (#1078)', () => {
 
   /** Occupy the only slot with a run that has already STARTED, then queue the run under test
    *  behind it — so an edit made afterwards can only reach the queued one. */
-  const queueBehindOne = async (workflow: WorkflowDef, task: string): Promise<{ first: string; queued: string }> => {
+  const queueBehindOne = async (workflow: WorkflowDef, task: string, stepOverrides?: StepOverrides): Promise<{ first: string; queued: string }> => {
     const first = manager.startRun(workflow, { task: 'mock:done occupy the slot', worktree: false });
     const deadline = Date.now() + 20_000;
     while (store.getRun(first.id)?.status === 'queued') {
       if (Date.now() > deadline) throw new Error('first run never started');
       await new Promise((r) => setTimeout(r, 20));
     }
-    const queued = manager.startRun(workflow, { task, worktree: false });
+    const queued = manager.startRun(workflow, { task, worktree: false, stepOverrides });
     expect(store.getRun(queued.id)?.status).toBe('queued');
     return { first: first.id, queued: queued.id };
   };
@@ -91,6 +111,38 @@ describe('a queued run re-resolves its workflow at dequeue (#1078)', () => {
   /** How many sessions the mock backend saw for the added step. */
   const wrapupSessions = (): number =>
     readFileSync(join(repoRoot, 'notes.md'), 'utf8').split('\n').filter((line) => line.includes('WRAPUP-STEP')).length;
+
+  it.each([false, true])('preserves runner/model overrides at dequeue (file changed: %s)', async (changed) => {
+    const pins = '    runner: claude\n    model: sonnet\n';
+    writeFileSync(workflowFile(), ONE_STEP + pins);
+    const stepOverrides = { task: { runner: 'codex' as const, model: 'gpt-test' } };
+    const { queued: id } = await queueBehindOne(await demo(), 'mock:done OVERRIDDEN', stepOverrides);
+    if (changed) writeFileSync(workflowFile(), ONE_STEP + pins + TWO_STEPS.slice(ONE_STEP.length));
+
+    await settle(id);
+
+    const record = store.getRun(id)!;
+    expect(record.status).not.toBe('failed');
+    expect(record.workflowDef?.steps[0]).toMatchObject(stepOverrides.task);
+    expect(record.stepOverrides).toEqual(stepOverrides);
+    expect(record.workflowSourceDef?.steps[0]?.runner).toBe('claude');
+    expect(launches).toContainEqual({ runner: 'codex', model: 'gpt-test' });
+    expect(record.steps[0]).toMatchObject({ backend: 'codex', status: 'done' });
+    expect(record.steps.map((s) => s.id)).toEqual(changed ? ['task', 'wrapup'] : ['task']);
+    expect(store.readEvents(id).some((e) => String(e.message ?? '').includes('changed while the task was queued'))).toBe(changed);
+  }, 60_000);
+
+  it('skips and logs an override for a removed step', async () => {
+    writeFileSync(workflowFile(), TWO_STEPS);
+    const { queued: id } = await queueBehindOne(await demo(), 'mock:done REMOVED', {
+      task: { runner: 'codex', model: 'gpt-test' }, wrapup: { runner: 'codex' },
+    });
+    writeFileSync(workflowFile(), ONE_STEP);
+    await settle(id);
+    expect(store.getRun(id)?.workflowDef?.steps[0]).toMatchObject({ runner: 'codex', model: 'gpt-test' });
+    expect(store.getRun(id)?.steps.map((s) => s.id)).toEqual(['task']);
+    expect(store.readEvents(id).some((e) => String(e.message ?? '').includes('skipped "wrapup"'))).toBe(true);
+  }, 60_000);
 
   it('runs a step added to the workflow file while the run was queued', async () => {
     const { first, queued: id } = await queueBehindOne(await demo(), 'mock:done QUEUED-RUN');
@@ -144,7 +196,7 @@ describe('a queued run re-resolves its workflow at dequeue (#1078)', () => {
     expect(wrapupSessions()).toBe(0);
   }, 60_000);
 
-  it('refreshes a run recovered after a restart, whose snapshot came from runs.json', async () => {
+  it.each([false, true])('refreshes a run recovered from runs.json (overrides: %s)', async (withOverrides) => {
     // A run left `queued` by the previous process, its definition persisted the way startRun does.
     const stale = await demo();
     const { id } = store.createRun({
@@ -154,7 +206,13 @@ describe('a queued run re-resolves its workflow at dequeue (#1078)', () => {
       worktree: false,
       steps: [{ id: 'task', name: 'Do the task', kind: 'agent' }],
     });
-    store.updateRun(id, { workflowDef: stale });
+    const stepOverrides = { task: { runner: 'codex' as const, model: 'gpt-test' } };
+    const effective = applyStepOverrides(stale, stepOverrides);
+    if ('error' in effective) throw new Error(effective.error);
+    store.updateRun(id, {
+      workflowDef: withOverrides ? effective : stale,
+      ...(withOverrides ? { workflowSourceDef: stale, stepOverrides } : {}),
+    });
     writeFileSync(workflowFile(), TWO_STEPS);
 
     // Restart the way the product does: flush `runs.json`, drop this process's store and manager,
@@ -172,6 +230,11 @@ describe('a queued run re-resolves its workflow at dequeue (#1078)', () => {
 
     expect(store.getRun(id)?.steps.map((s) => s.id)).toEqual(['task', 'wrapup']);
     expect(wrapupSessions()).toBe(1);
+    if (withOverrides) {
+      expect(store.getRun(id)?.stepOverrides).toEqual(stepOverrides);
+      expect(store.getRun(id)?.workflowDef?.steps[0]).toMatchObject(stepOverrides.task);
+      expect(store.getRun(id)?.steps[0]?.backend).toBe('codex');
+    }
     const persisted = JSON.parse(readFileSync(join(repoRoot, '.ai/cezar', 'runs.json'), 'utf8')) as unknown;
     const rows = (Array.isArray(persisted) ? persisted : (persisted as { runs: unknown[] }).runs) as Array<{
       id: string;

@@ -10,6 +10,14 @@ import { workflowDefSchema, workflowStepDefSchema } from './workflows.ts';
 import { dispatchIntentSchema, dispatchSchema } from './dispatch.ts';
 import { trackerAssociationSchema, trackerAutomationEventSchema } from './tracker.ts';
 
+/** Per-task pins, shared by HTTP validation and persisted run records. */
+export const stepOverrideSchema = z.object({
+  runner: runnerSchema.optional(),
+  model: z.string().trim().min(1).max(200).optional(),
+}).strict().refine((o) => o.runner !== undefined || o.model !== undefined, { message: 'name a runner, a model, or both' });
+export const stepOverridesSchema = z.record(z.string().min(1).max(80), stepOverrideSchema);
+export type StepOverrides = z.infer<typeof stepOverridesSchema>;
+
 /** Machine-owned PR provenance, pinned before the first workflow step. Never accepted as input. */
 export const prForkBaseSchema = z.object({
   sha: z.string().regex(/^[0-9a-f]{40}$/),
@@ -375,6 +383,9 @@ export const runRecordSchema = z.object({
    * like every other key.
    */
   workflowDef: workflowDefSchema.optional(),
+  /** Unmodified catalog snapshot, used only to detect file changes while queued. */
+  workflowSourceDef: workflowDefSchema.optional(),
+  stepOverrides: stepOverridesSchema.optional(),
   /** A graph workflow's walk so far: loop counters and the edges taken, in order
    *  (`<node>.<port>-><target>`). Absent on v1 runs. */
   graphState: z
