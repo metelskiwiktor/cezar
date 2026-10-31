@@ -628,6 +628,21 @@ cezar is not married to one vendor. Every agent step runs through a single
 > and OpenCode auto-approve every permission (they ignore `allowedTools`). Treat
 > them as previews and expect rough edges.
 
+**OpenCode's noninteractive contract.** `opencode serve` is driven only through its
+local HTTP API and SSE event stream — cezar never speaks to it over stdin. The child's
+stdin is closed immediately after spawn, so the server sees EOF instead of an idle writer
+that outlives the session; a run must never wait for console input. Autonomy comes from
+the inline `OPENCODE_CONFIG_CONTENT` config, which sets every permission cezar knows
+(`*`, `read`, `edit`, `bash`, `external_directory`, …) to `allow` while preserving the
+host's model, provider and MCP settings; a per-agent permission request that still arrives
+is approved once automatically, and a failed approval stops the run. `allowedTools` is
+ignored. Existing bounds, unchanged: the server must report its URL within 30 s of spawn,
+a permission reply waits at most 10 s, a turn with no `session.idle` closes after a 5 s
+quiet window (re-armed by every message frame), the run wall clock defaults to 30 min
+(a per-step timeout overrides it), and teardown sends SIGTERM then SIGKILL 4 s later.
+Continue starts a fresh server and session — resuming a server-side session id is not
+implemented.
+
 On startup cezar probes which CLIs are installed and the cockpit only offers
 the backends it found — install any one of the five and you're operational.
 

@@ -24,6 +24,21 @@
 // `MOCK_NO_EVENT_BUS=1` in the environment makes `GET /event` 404 instead, for
 // the no-event-bus fallback.
 import { createServer } from 'node:http';
+import { writeFileSync } from 'node:fs';
+
+// The runner closes this process's stdin right after spawn — `serve` is
+// noninteractive. Record the EOF so the runner test can prove it reached the
+// child, optionally through a file (the test does not know our bound port).
+let stdinClosed = false;
+const noteStdinClosed = () => {
+  if (stdinClosed) return;
+  stdinClosed = true;
+  const out = process.env.MOCK_STDIN_EOF_FILE;
+  if (out) writeFileSync(out, 'eof');
+};
+process.stdin.on('end', noteStdinClosed);
+process.stdin.on('close', noteStdinClosed);
+process.stdin.resume();
 
 const args = process.argv.slice(2);
 const arg = (flag, fallback) => {

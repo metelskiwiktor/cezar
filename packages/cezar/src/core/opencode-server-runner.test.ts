@@ -1,5 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -11,6 +13,21 @@ import {
   PERMISSION_REPLY_TIMEOUT_MS,
   TURN_IDLE_GRACE_MS,
 } from './opencode-server-runner.ts';
+
+const mockBin = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'opencode', 'mock-opencode-serve.mjs');
+
+function silentChild(): ChildProcessWithoutNullStreams {
+  return Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    exitCode: null,
+    signalCode: null,
+    killed: false,
+    pid: 5151,
+    kill: () => true,
+  }) as unknown as ChildProcessWithoutNullStreams;
+}
 
 const spawnHook = vi.hoisted(() => ({ override: null as null | ((...args: unknown[]) => unknown) }));
 
@@ -158,19 +175,6 @@ describe('SIGTERM→SIGKILL escalation for an opencode server that survives SIGT
 });
 
 describe('opencode serve startup', () => {
-  function silentChild(): ChildProcessWithoutNullStreams {
-    return Object.assign(new EventEmitter(), {
-      stdin: new PassThrough(),
-      stdout: new PassThrough(),
-      stderr: new PassThrough(),
-      exitCode: null,
-      signalCode: null,
-      killed: false,
-      pid: 5151,
-      kill: () => true,
-    }) as unknown as ChildProcessWithoutNullStreams;
-  }
-
   afterEach(() => {
     vi.useRealTimers();
     spawnHook.override = null;
@@ -254,8 +258,6 @@ describe('opencode serve startup', () => {
  * which is the only thing the runner can react to.
  */
 describe('#897 a turn that outlives its prompt POST', () => {
-  const mockBin = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'opencode', 'mock-opencode-serve.mjs');
-
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -460,4 +462,60 @@ describe('#897 a turn that outlives its prompt POST', () => {
     expect(types(events).filter((t) => t === 'turn-end')).toHaveLength(1);
     expect(Date.now() - started).toBeLessThan(TURN_IDLE_GRACE_MS);
   }, 30_000);
+});
+
+/**
+ * `opencode serve` is driven entirely over HTTP+SSE; stdin is not part of the
+ * protocol. A piped-but-open stdin would stay a live writer for the whole
+ * session, so the runner closes it at spawn and the child must see EOF.
+ */
+describe('noninteractive contract: stdin is closed at spawn', () => {
+  async function waitForFile(path: string, timeoutMs = 10_000): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        return readFileSync(path, 'utf8');
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    throw new Error(`${path} was not written within ${timeoutMs}ms`);
+  }
+
+  it('the mock server observes EOF on stdin while the session is live', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cez-opencode-stdin-'));
+    const eofFile = join(dir, 'eof');
+    try {
+      const session = new OpencodeServerRunner({ bin: mockBin, timeoutMs: 30_000 }).startSession(
+        { userPrompt: 'check the tree', cwd: process.cwd(), env: { MOCK_STDIN_EOF_FILE: eofFile } },
+        undefined,
+        { autoEndAfterFirstTurn: true },
+      );
+      expect(await waitForFile(eofFile)).toBe('eof');
+      await session.result;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('ends stdin synchronously and swallows its error when the spawn fails', () => {
+    const fake = silentChild();
+    spawnHook.override = () => fake;
+    vi.useFakeTimers();
+    try {
+      const session = new OpencodeServerRunner({ bin: 'opencode', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it', cwd: process.cwd(),
+      });
+      void session.result.catch(() => undefined);
+
+      expect(fake.stdin.writableEnded).toBe(true);
+      // A failed spawn (ENOENT) can surface on stdin; without a listener this
+      // emit throws as an unhandled 'error'.
+      expect(() => fake.stdin.emit('error', Object.assign(new Error('spawn opencode ENOENT'), { code: 'ENOENT' }))).not.toThrow();
+      session.end();
+    } finally {
+      vi.useRealTimers();
+      spawnHook.override = null;
+    }
+  });
 });
