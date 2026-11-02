@@ -8,6 +8,7 @@ import {
   skillsToSteps,
   stepsIssue,
   workflowFileSchema,
+  workflowStepSchema,
   type WorkflowStepDef,
 } from '../../src/workflows/types.js';
 
@@ -171,4 +172,30 @@ test('a retryOn of 0 is a load-time error, not a silent no-op', () => {
   const ok = workflowFileSchema.safeParse(file([1]));
   assert.equal(ok.success, true);
   assert.deepEqual(ok.success && ok.data.steps?.[1]?.onFail, { retry: 'implement', max: 2, retryOn: [1] });
+});
+
+test('workflowStepSchema accepts optional timeoutMs up to 4 hours', () => {
+  const stepWithTimeout = { id: 'implement', prompt: '{{task}}', timeoutMs: 3_600_000 };
+  const parsed = workflowStepSchema.parse(stepWithTimeout);
+  assert.equal(parsed.timeoutMs, 3_600_000);
+
+  const stepMax = workflowStepSchema.parse({ id: 'implement', prompt: '{{task}}', timeoutMs: 14_400_000 });
+  assert.equal(stepMax.timeoutMs, 14_400_000);
+
+  const stepOmitted = workflowStepSchema.parse({ id: 'implement', prompt: '{{task}}' });
+  assert.equal(stepOmitted.timeoutMs, undefined);
+
+  const fileParsed = workflowFileSchema.parse({
+    name: 'with-timeout',
+    steps: [stepWithTimeout],
+  });
+  assert.equal(fileParsed.steps?.[0]?.timeoutMs, 3_600_000);
+});
+
+test('workflowStepSchema rejects invalid timeoutMs values', () => {
+  assert.equal(workflowStepSchema.safeParse({ id: 'x', prompt: 'p', timeoutMs: 0 }).success, false);
+  assert.equal(workflowStepSchema.safeParse({ id: 'x', prompt: 'p', timeoutMs: -100 }).success, false);
+  assert.equal(workflowStepSchema.safeParse({ id: 'x', prompt: 'p', timeoutMs: 1000.5 }).success, false);
+  assert.equal(workflowStepSchema.safeParse({ id: 'x', prompt: 'p', timeoutMs: 14_400_001 }).success, false);
+  assert.equal(workflowStepSchema.safeParse({ id: 'x', prompt: 'p', timeoutMs: '3600000' }).success, false);
 });

@@ -384,7 +384,7 @@ whose counter never resets within a run, so every run is finite.
 | --- | --- | --- |
 | `start` / `end` | `next` / — (`status: success\|failed`) | — |
 | `loop` (`max`) | `repeat`, `exhausted` | `iteration`, `max` |
-| `agent` (`prompt`, `skill`, `runner`, `model`, `session.continue`, `verdicts`; after a fork also `review`, `budgetUsd`) | `done`, `failed` — or one port per verdict | `summary`, `verdict`, `costUsd` (a fork branch: `runId`, `status`, `summary`) |
+| `agent` (`prompt`, `skill`, `runner`, `model`, `timeoutMs?`, `session.continue`, `verdicts`; after a fork also `review`, `budgetUsd`) | `done`, `failed` — or one port per verdict | `summary`, `verdict`, `costUsd` (a fork branch: `runId`, `status`, `summary`) |
 | `check` (`command`) | `pass`, `fail` | `exitCode`, `output` |
 | `gate.human` (`message`, `timeoutMs?`) | `approve`, `reject` (+`timeout`) | `comment` |
 | `ask-user` (`question`, `options?`, `timeoutMs?`) | `answered` (+`timeout`) | `answer` |
@@ -443,6 +443,10 @@ whose counter never resets within a run, so every run is finite.
     changes stay fatal.
 
   Retro Lite is a separate process with its own semantics and is not part of any of them.
+- **Agent step timeout.** An agent node's optional `timeoutMs` (positive integer, up to 4 h)
+  limits the step's wall clock before SIGTERM → SIGKILL. Omitted, it falls back to the runner's
+  default (30 min; 60 min for Claude). In interactive tail steps, the wall clock is disabled (0)
+  in favor of the idle timer.
 - **Restarts** resume a walk parked at a gate, question, CI wait or subtask (or mid-check)
   at that node; an interrupted agent node keeps the usual Continue path.
 - **Verdicts.** An agent with `verdicts` ends its turn with `CEZ:VERDICT <name>`; the

@@ -45,6 +45,8 @@ export const workflowStepSchema = z
     bashAllowlist: z.array(z.string()).optional(),
     /** Marks the step as an automated review step (read-only execution, file modifications blocked). */
     review: z.boolean().optional(),
+    /** Wall-clock limit for this agent step before SIGTERM → SIGKILL (ms); up to 4 h. Defaults to the runner's default. */
+    timeoutMs: z.number().int().positive().max(4 * 60 * 60_000).optional(),
     // check step
     command: z.string().optional(),
     onFail: z

@@ -32,6 +32,8 @@ export const workflowStepDefSchema = z
     runner: runnerSchema.optional(),
     allowedTools: z.array(z.string()).optional(),
     bashAllowlist: z.array(z.string()).optional(),
+    /** Wall-clock limit for this agent step before SIGTERM → SIGKILL (ms); up to 4 h. Defaults to the runner's default. */
+    timeoutMs: z.number().int().positive().max(4 * 60 * 60_000).optional(),
     // check step
     command: z.string().optional(),
     onFail: z
@@ -107,6 +109,8 @@ export const workflowGraphNodeSchema = z.discriminatedUnion('type', [
     session: z.object({ continue: nodeId }).optional(),
     review: z.boolean().optional(),
     budgetUsd: z.number().positive().optional(),
+    /** Wall-clock limit for this agent step before SIGTERM → SIGKILL (ms); up to 4 h. Defaults to the runner's default. */
+    timeoutMs: z.number().int().positive().max(4 * 60 * 60_000).optional(),
   }),
   z.object({
     ...graphNodeBase,

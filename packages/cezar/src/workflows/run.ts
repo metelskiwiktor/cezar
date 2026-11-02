@@ -6630,7 +6630,7 @@ export class RunManager {
           // strand the run — both close the session, and a park whose session
           // closed unanswered settles as `failed` with a Continue button (see
           // the `askPark` branch in `execute`), never as a run stuck `waiting`.
-          timeoutMs: interactive ? 0 : undefined,
+          timeoutMs: interactive ? 0 : step.timeoutMs,
         },
         onEvent,
         {
