@@ -2336,6 +2336,13 @@ export class RunManager {
     try {
       do {
         this.pumpAgain = false;
+        // Slot-release broadcasts also reach empty queues. Reconciliation above
+        // still runs, but there is no capacity decision requiring git. Spawning
+        // it here races terminal repository cleanup on Windows (cwd EBUSY).
+        if (!this.queue.length) {
+          this.forceNextPump = false;
+          break;
+        }
         const repo = await getRepoInfo(this.repoRoot);
         const maxParallel = this.semaphore.maxParallel();
         // Per-project ceiling (spec 2026-07-22-per-project-concurrency): this
