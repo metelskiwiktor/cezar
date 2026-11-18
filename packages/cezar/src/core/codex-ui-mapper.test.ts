@@ -795,7 +795,7 @@ describe('CodexAppServerRunner v2 wiring (against the bundled mock app-server)',
 
     // v2 rides alongside: session.started exactly once and first (the
     // thread/started notification and the thread/start result path dedup).
-    expect(v2[0]).toEqual({ type: 'session.started', sessionId: 'th_mock_1', backend: 'codex' });
+    expect(v2[0]).toEqual({ type: 'session.started', sessionId: 'th_mock_1', backend: 'codex', model: 'gpt-mock-1' });
     expect(v2.filter((e) => e.type === 'session.started')).toHaveLength(1);
     expect(v2.some((e) => e.type === 'turn.started' && e.turnId === 'turn_mock_1')).toBe(true);
     expect(v2).toContainEqual({ type: 'item.delta', itemId: 'item_c1', field: 'output', delta: ' M src/example.ts\n' });
