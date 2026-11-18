@@ -7,10 +7,12 @@ import {
   forkShape,
   globMatch,
   graphIssues,
+  graphNodeSchema,
   graphRailSteps,
   graphToSteps,
   isTerminalAgent,
   loopBodyIds,
+  nodeToStep,
   parseVerdict,
   portsOfNode,
   renderNodeRefs,
@@ -405,5 +407,24 @@ describe('fork / join shape', () => {
     const issues = graphIssues(g).join('\n');
     expect(issues).toMatch(/only to an agent right after a fork/);
     expect(issues).toMatch(/join node "j" has no fork/);
+  });
+});
+
+describe('graphNodeSchema agent timeoutMs and nodeToStep', () => {
+  it('accepts timeoutMs up to 4 hours and nodeToStep preserves it', () => {
+    const node = { id: 'work', type: 'agent' as const, prompt: '{{task}}', timeoutMs: 3_600_000 };
+    expect(graphNodeSchema.safeParse(node).success).toBe(true);
+    expect(nodeToStep(node)).toEqual({
+      id: 'work',
+      prompt: '{{task}}',
+      timeoutMs: 3_600_000,
+    });
+  });
+
+  it('rejects invalid timeoutMs on agent node', () => {
+    expect(graphNodeSchema.safeParse({ id: 'work', type: 'agent', prompt: '{{task}}', timeoutMs: 0 }).success).toBe(false);
+    expect(graphNodeSchema.safeParse({ id: 'work', type: 'agent', prompt: '{{task}}', timeoutMs: -1 }).success).toBe(false);
+    expect(graphNodeSchema.safeParse({ id: 'work', type: 'agent', prompt: '{{task}}', timeoutMs: 14_400_001 }).success).toBe(false);
+    expect(graphNodeSchema.safeParse({ id: 'work', type: 'agent', prompt: '{{task}}', timeoutMs: 1.5 }).success).toBe(false);
   });
 });

@@ -45,6 +45,8 @@ export const workflowStepSchema = z
     runner: z.enum(RUNNER_IDS).optional(),
     allowedTools: z.array(z.string()).optional(),
     bashAllowlist: z.array(z.string()).optional(),
+    /** Wall-clock limit for this agent step before SIGTERM → SIGKILL (ms); up to 4 h. Defaults to the runner's default. */
+    timeoutMs: z.number().int().positive().max(4 * 60 * 60_000).optional(),
     // check step
     command: z.string().optional(),
     onFail: z
@@ -149,7 +151,7 @@ export function skillStackOf(steps: WorkflowStepDef[]): string[] | null {
     if (stepKind(s) !== 'agent' || !s.skill) return null;
     if (s.prompt !== undefined && s.prompt !== '{{task}}') return null;
     if (s.name !== undefined && s.name !== s.skill) return null;
-    if (s.model || s.reasoningEffort || s.runner || s.allowedTools || s.bashAllowlist || s.onFail) return null;
+    if (s.model || s.reasoningEffort || s.runner || s.allowedTools || s.bashAllowlist || s.timeoutMs || s.onFail) return null;
     skills.push(s.skill);
   }
   return skills.length ? skills : null;
