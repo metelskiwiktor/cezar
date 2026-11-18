@@ -428,6 +428,11 @@ class OpencodeSession implements AgentSession {
     } catch (err) {
       throw wrapSpawnError(err, this.bin);
     }
+    // `serve` speaks HTTP+SSE only and never reads stdin; an open pipe would
+    // outlive the session and tell the child a writer may still speak. EOF is
+    // the noninteractive contract. The error sink covers a failed spawn.
+    child.stdin.on('error', () => undefined);
+    child.stdin.end();
     this.child = child;
     this.serverPort = port;
     trackServer(child, port);

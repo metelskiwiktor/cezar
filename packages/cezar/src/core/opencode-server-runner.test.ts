@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -1112,4 +1112,75 @@ describe('#1896 an image a read tool returns as an attachment', () => {
       { type: 'image', itemId: 'prt_img', mediaType: 'image/png', data: 'iVBORw0KGgo=' },
     ]);
   }, 30_000);
+});
+
+/**
+ * `opencode serve` is driven entirely over HTTP+SSE; stdin is not part of the
+ * protocol. A piped-but-open stdin would stay a live writer for the whole
+ * session, so the runner closes it at spawn and the child must see EOF.
+ */
+describe('noninteractive contract: stdin is closed at spawn', () => {
+  const mockBin = join(dirname(fileURLToPath(import.meta.url)), '__fixtures__', 'opencode', 'mock-opencode-serve.mjs');
+
+  function silentChild(): ChildProcessWithoutNullStreams {
+    return Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null,
+      signalCode: null,
+      killed: false,
+      pid: 5151,
+      kill: () => true,
+    }) as unknown as ChildProcessWithoutNullStreams;
+  }
+
+  async function waitForFile(path: string, timeoutMs = 10_000): Promise<string> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        return readFileSync(path, 'utf8');
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    }
+    throw new Error(`${path} was not written within ${timeoutMs}ms`);
+  }
+
+  it('the mock server observes EOF on stdin while the session is live', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cez-opencode-stdin-'));
+    const eofFile = join(dir, 'eof');
+    try {
+      const session = new OpencodeServerRunner({ bin: mockBin, timeoutMs: 30_000 }).startSession(
+        { userPrompt: 'check the tree', cwd: process.cwd(), env: { MOCK_STDIN_EOF_FILE: eofFile } },
+        undefined,
+        { autoEndAfterFirstTurn: true },
+      );
+      expect(await waitForFile(eofFile)).toBe('eof');
+      await session.result;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('ends stdin synchronously and swallows its error when the spawn fails', () => {
+    const fake = silentChild();
+    spawnHook.override = () => fake;
+    vi.useFakeTimers();
+    try {
+      const session = new OpencodeServerRunner({ bin: 'opencode', timeoutMs: 0 }).startSession({
+        userPrompt: 'do it', cwd: process.cwd(),
+      });
+      void session.result.catch(() => undefined);
+
+      expect(fake.stdin.writableEnded).toBe(true);
+      // A failed spawn (ENOENT) can surface on stdin; without a listener this
+      // emit throws as an unhandled 'error'.
+      expect(() => fake.stdin.emit('error', Object.assign(new Error('spawn opencode ENOENT'), { code: 'ENOENT' }))).not.toThrow();
+      session.end();
+    } finally {
+      vi.useRealTimers();
+      spawnHook.override = null;
+    }
+  });
 });
