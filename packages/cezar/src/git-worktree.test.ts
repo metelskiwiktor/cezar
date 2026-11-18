@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -10,6 +10,7 @@ import {
   createWorktree,
   parseShortstat,
   pruneOrphans,
+  removeWorktree,
   resolveBaseRef,
   uniqueBranchName,
   worktreeChangedPaths,
@@ -194,6 +195,26 @@ describe('createWorktree recovery (real git)', () => {
       'managed worktree path already exists and could not be repaired',
     );
     expect(readFileSync(marker, 'utf8')).toBe('do not delete\n');
+  });
+});
+
+describe('removeWorktree (real git)', () => {
+  it('leaves the target of a linked node_modules alone (a junction on Windows)', async () => {
+    const repo = await fixtureRepo('cez-worktree-junction-');
+    const shared = join(repo, 'shared-modules');
+    mkdirSync(join(shared, 'pkg', '.bin'), { recursive: true });
+    writeFileSync(join(shared, 'pkg', 'index.js'), 'kept\n');
+    writeFileSync(join(shared, 'pkg', '.bin', 'tool.cmd'), 'kept\n');
+    const wt = await createWorktree(repo, '44444444-4444-4444-8444-444444444444', 'main');
+    mkdirSync(join(wt.path, 'nested'));
+    symlinkSync(shared, join(wt.path, 'node_modules'), 'junction');
+    symlinkSync(shared, join(wt.path, 'nested', 'node_modules'), 'junction');
+
+    await removeWorktree(repo, wt.path);
+
+    expect(existsSync(wt.path)).toBe(false);
+    expect(readFileSync(join(shared, 'pkg', 'index.js'), 'utf8')).toBe('kept\n');
+    expect(readFileSync(join(shared, 'pkg', '.bin', 'tool.cmd'), 'utf8')).toBe('kept\n');
   });
 });
 
