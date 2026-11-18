@@ -296,7 +296,7 @@ import {
   readWorktreePath,
   repoIndexContains,
 } from './git-changes.ts';
-import { gatedSkillsRepos, loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
+import { gatedSkillsRepos, loadConfig, resolveTaskRunner, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { findConfigFile } from '../agent-config/catalog.ts';
 import { readConfigFile, statConfigPath, writeConfigFile } from '../agent-config/files.ts';
 import { type AgentModelDefaults, readAgentModelDefaults } from '../agent-config/models.ts';
@@ -5232,7 +5232,7 @@ export function createApp(deps: ServerDeps) {
         if ('error' in overridden) return c.json({ error: overridden.error }, 400);
         workflow = overridden;
       }
-      const fallback = parsed.data.runner ?? (await loadConfig(repoRoot)).defaultRunner;
+      const fallback = resolveTaskRunner(await loadConfig(repoRoot), workflow.name, parsed.data.runner);
       const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), {
         repoRoot,
         profileFor: (provider) => (provider === fallback ? parsed.data.agentProfile : undefined),
@@ -5898,7 +5898,7 @@ export function createApp(deps: ServerDeps) {
       const body = c.req.valid('json');
       if (agentModelsLocked(repoRoot) && body.model?.trim()) return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       const workflow = (await loadWorkflows(repoRoot)).workflows.find((w) => w.name === ASSESS_IMPACT_WORKFLOW.name) ?? ASSESS_IMPACT_WORKFLOW;
-      const fallback = body.runner ?? (await loadConfig(repoRoot)).defaultRunner;
+      const fallback = resolveTaskRunner(await loadConfig(repoRoot), workflow.name, body.runner);
       const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), {
         repoRoot,
         profileFor: (provider) => (provider === fallback ? body.agentProfile : undefined),
@@ -6714,7 +6714,7 @@ export function createApp(deps: ServerDeps) {
           workflow = workflows.find((w) => w.name === 'quick-task') ?? QUICK_TASK_WORKFLOW;
         }
 
-        const fallback = parsed.data?.runner ?? (await loadConfig(repoRoot)).defaultRunner;
+        const fallback = resolveTaskRunner(await loadConfig(repoRoot), workflow.name, parsed.data?.runner);
         const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), { repoRoot });
         if (blocked) return c.json({ error: blocked }, 409);
 
@@ -7139,7 +7139,7 @@ export function createApp(deps: ServerDeps) {
       }
       const workflow = e2eSetupWorkflow(e2eCredentialsAmong(await checkSecretNames(project)));
       const blocked = await providerActionError(
-        providersRequiredByWorkflow(workflow, (await loadConfig(project.root)).defaultRunner),
+        providersRequiredByWorkflow(workflow, resolveTaskRunner(await loadConfig(project.root), workflow.name)),
         { repoRoot: project.root },
       );
       if (blocked) return c.json({ error: blocked }, 409);
@@ -7820,6 +7820,8 @@ export function createApp(deps: ServerDeps) {
             ...(config.defaultModels ?? {}),
           },
       modelsLocked,
+      ...(config.workflowModels !== undefined ? { workflowModels: config.workflowModels } : {}),
+      ...(config.workflowRunners !== undefined ? { workflowRunners: config.workflowRunners } : {}),
       maxParallel: config.maxParallel,
       memoryLimitMb: config.memoryLimitMb ?? null,
       // Count-based worktree retention (#483): keep the last N finished worktrees
@@ -7860,7 +7862,9 @@ export function createApp(deps: ServerDeps) {
       // policy refuses it on exactly the same terms as a preset.
       if (
         agentModelsLocked(repoRoot) &&
-        (parsed.data.defaultModels !== undefined || parsed.data.defaultModelsAuto !== undefined)
+        (parsed.data.defaultModels !== undefined ||
+          parsed.data.defaultModelsAuto !== undefined ||
+          parsed.data.workflowModels !== undefined)
       ) {
         return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       }
@@ -7895,6 +7899,14 @@ export function createApp(deps: ServerDeps) {
             else raw.baseBranch = parsed.data.baseBranch;
           }
           if (parsed.data.defaultRunner !== undefined) raw.defaultRunner = parsed.data.defaultRunner;
+          if (parsed.data.workflowModels !== undefined) {
+            if (parsed.data.workflowModels === null) delete raw.workflowModels;
+            else raw.workflowModels = parsed.data.workflowModels;
+          }
+          if (parsed.data.workflowRunners !== undefined) {
+            if (parsed.data.workflowRunners === null) delete raw.workflowRunners;
+            else raw.workflowRunners = parsed.data.workflowRunners;
+          }
           if (parsed.data.systemPrompt !== undefined) {
             // '' and null both clear: an emptied textarea means "no extra prompt".
             if (parsed.data.systemPrompt === null || parsed.data.systemPrompt === '') {

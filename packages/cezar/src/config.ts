@@ -1,8 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { perRunner } from '@open-mercato/cezar-contract';
-import { worktreeLifecycleConfigSchema } from '@open-mercato/cezar-contract';
+import { perRunner, workflowModelsSchema, workflowRunnersSchema, worktreeLifecycleConfigSchema } from '@open-mercato/cezar-contract';
 import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.ts';
 import { RUNNER_IDS } from './core/agent-runner.ts';
 
@@ -59,6 +58,9 @@ export const configSchema = z.object({
    * the preselected default. Also the runner the chain planner uses.
    */
   defaultRunner: z.enum(RUNNER_IDS).default('claude'),
+  /** Workflow defaults apply only to their runner; explicit task choices still win. */
+  workflowModels: workflowModelsSchema.optional().catch(undefined),
+  workflowRunners: workflowRunnersSchema.optional().catch(undefined),
   /** Model for the chain planner (spec 008) — cheap but reliable at JSON. */
   plannerModel: z.string().min(1).default('sonnet'),
   /** Model for the task namer (spec 2026-07-17-task-auto-naming) — the cheapest
@@ -157,6 +159,24 @@ export const configSchema = z.object({
 });
 
 export type CezConfig = z.infer<typeof configSchema>;
+
+export function resolveTaskRunner(config: CezConfig, workflow: string, explicit?: (typeof RUNNER_IDS)[number]) {
+  return explicit ?? config.workflowRunners?.[workflow] ?? config.defaultRunner;
+}
+
+export function resolveTaskModel(
+  config: CezConfig,
+  workflow: string,
+  runner: (typeof RUNNER_IDS)[number],
+  explicit: string | undefined,
+): string | undefined {
+  return (
+    explicit ??
+    config.workflowModels?.[workflow]?.[runner] ??
+    config.defaultModels?.[runner as keyof NonNullable<CezConfig['defaultModels']>] ??
+    (config.defaultModelsAuto?.[runner as keyof NonNullable<CezConfig['defaultModelsAuto']>] ? '' : undefined)
+  );
+}
 
 /**
  * Fold the machine-wide agent defaults under a repo's own config (spec 2026-07-29-agent-profiles).

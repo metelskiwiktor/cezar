@@ -418,6 +418,10 @@ export type SetWorkspaceUiStateInput = z.infer<typeof setWorkspaceUiStateInputSc
  *  server's own `defaultModels` object (src/config.ts). */
 export const runnerModelsSchema = perRunner(z.string().optional());
 export type RunnerModels = z.infer<typeof runnerModelsSchema>;
+export const workflowModelsSchema = z.record(z.string().min(1).max(80), runnerModelsSchema);
+export type WorkflowModels = z.infer<typeof workflowModelsSchema>;
+export const workflowRunnersSchema = z.record(z.string().min(1).max(80), runnerSchema);
+export type WorkflowRunners = z.infer<typeof workflowRunnersSchema>;
 
 /** `GET /api/v1/config` — every Settings → Agents knob in one read. */
 export const configResponseSchema = z.object({
@@ -430,6 +434,8 @@ export const configResponseSchema = z.object({
    *  task branches stay `cez/<id8>`. */
   branchNaming: z.string().nullable(),
   defaultModels: runnerModelsSchema,
+  workflowModels: workflowModelsSchema.optional(),
+  workflowRunners: workflowRunnersSchema.optional(),
   /** True when native coding-agent settings are authoritative and model picks are read-only. */
   modelsLocked: z.boolean(),
   /** How many tasks run at once (1–16). */
@@ -471,6 +477,9 @@ export type SetConfigResponse = z.infer<typeof setConfigResponseSchema>;
  * another runner's preset.
  */
 export const setConfigInputSchema = z.object({
+  /** Replaces the workflow defaults map; null removes it. */
+  workflowModels: workflowModelsSchema.nullable().optional(),
+  workflowRunners: workflowRunnersSchema.nullable().optional(),
   worktreeLifecycle: worktreeLifecycleConfigSchema.nullable().optional(),
   worktreeLifecycleRevision: z.string().nullable().optional(),
   baseBranch: z.string().trim().min(1).max(200).nullable().optional(),

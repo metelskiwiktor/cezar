@@ -76,7 +76,7 @@ import { getTeamSkillsCached, materializeSkillDir, waitForTeamSkills } from '../
 import { provisionSkills } from '../skills-provision.ts';
 import { seedAgentConfigLocalLayer } from '../agent-config/seed.ts';
 import { readAgentModelProvider } from '../agent-config/models.ts';
-import { loadConfig, resolveWorktreeRetention, type CezConfig } from '../config.ts';
+import { loadConfig, resolveTaskModel, resolveTaskRunner, resolveWorktreeRetention, type CezConfig } from '../config.ts';
 import { isLifecycleConfigTracked } from '../worktree-lifecycle/config.ts';
 import { generateCommitMessage } from './commit-message.ts';
 import { hasUnlanded, landInPlace, landingPromptPart, READ_ONLY_PROMPT, READ_ONLY_TOOLS, type LandResult } from './landing.ts';
@@ -2390,10 +2390,22 @@ export class RunManager {
         const anyHold = holds.deadline.size > 0 || holds.inFlight.size > 0;
         // Only pay for the config read when something is actually held: a queued record may name
         // no runner, and then the account it would use is the configured default.
-        const defaultRunner = anyHold ? (await loadConfig(this.repoRoot)).defaultRunner : undefined;
+        const runnerConfig = anyHold ? await loadConfig(this.repoRoot) : undefined;
         const startable = (id: string): boolean => {
           const queued = this.store.getRun(id);
-          if (queued && anyHold && accountHeldFor(queued, holds, defaultRunner ?? 'claude', this.askingAccounts(), this.pendingJobs.get(id)?.workflow)) return false;
+          if (
+            queued &&
+            runnerConfig &&
+            accountHeldFor(
+              queued,
+              holds,
+              resolveTaskRunner(runnerConfig, queued.workflow),
+              this.askingAccounts(),
+              this.pendingJobs.get(id)?.workflow,
+            )
+          ) {
+            return false;
+          }
           // "Start now" goes over `maxParallel` on purpose, but a non-git root still runs one at a time.
           if (this.startNowRequested.has(id)) return repo !== null || this.busySlots() < 1;
           return capacity();
@@ -4655,9 +4667,9 @@ export class RunManager {
     const holds = this.semaphore.accountHolds();
     const run = this.store.getRun(runId);
     if (run && (holds.deadline.size > 0 || holds.inFlight.size > 0)) {
-      const { defaultRunner } = await loadConfig(this.repoRoot);
+      const config = await loadConfig(this.repoRoot);
       await this.refreshAccounts();
-      if (accountHeldFor(run, this.semaphore.accountHolds(), defaultRunner ?? 'claude', this.askingAccounts(), this.pendingJobs.get(runId)?.workflow)) return 'held';
+      if (accountHeldFor(run, this.semaphore.accountHolds(), resolveTaskRunner(config, run.workflow), this.askingAccounts(), this.pendingJobs.get(runId)?.workflow)) return 'held';
     }
     // The config read above awaited — the run may have started or been cancelled meanwhile.
     if (!this.queue.includes(runId)) return 'not-queued';
@@ -6019,9 +6031,21 @@ export class RunManager {
       // The step that owns the session keeps its own model across Continue, auto-resume and
       // restart recovery (#1488); every path lands here, so this is the one place to resolve it.
       const modelsLocked = agentModelsLocked(this.repoRoot);
+      const explicitContinueModel = record?.steps.find((s) => s.id === stepId)?.model;
+      const continuationModel = modelsLocked
+        ? undefined
+        : explicitContinueModel === ''
+          ? ''
+          : resolveContinuationModel(record, stepId, sessionId, continueBackend);
+      const sameSessionExplicitAuto =
+        sessionId !== undefined &&
+        explicitContinueModel === undefined &&
+        record?.steps.some((s) => s.sessionId === sessionId && s.id !== stepId && s.model === '');
       const turnModel = modelsLocked
         ? undefined
-        : resolveContinuationModel(record, stepId, sessionId, continueBackend);
+        : continuationModel !== undefined || explicitContinueModel === '' || sameSessionExplicitAuto
+          ? continuationModel
+          : resolveTaskModel(await loadConfig(this.repoRoot), record?.workflow ?? '', continueBackend, undefined);
       const normalized = normalizeModelForBackend(
         continueBackend,
         turnModel,
@@ -6305,7 +6329,10 @@ export class RunManager {
     // Resolve the agent backend for this run: the task choice (GUI) wins over
     // the config default. Per-step `runner` can still override it below.
     const config = await loadConfig(this.repoRoot);
-    const taskBackend: RunnerId = input.runner ?? config.defaultRunner;
+    const taskBackend: RunnerId = resolveTaskRunner(config, workflow.name, input.runner);
+    const taskModel = agentModelsLocked(this.repoRoot)
+      ? undefined
+      : resolveTaskModel(config, workflow.name, taskBackend, input.model);
     const effortIssue = agentModelsLocked(this.repoRoot)
       ? undefined
       : reasoningEffortIssue(workflow, taskBackend, input.reasoningEffort);
@@ -6365,7 +6392,7 @@ export class RunManager {
     try {
       const normalized = normalizeModelForBackend(
         taskBackend,
-        agentModelsLocked(this.repoRoot) ? undefined : input.model,
+        taskModel,
         { configuredProvider: await configuredModelProvider(taskBackend, this.repoRoot) },
       );
       modelIdentity = normalized ? formatModelIdentity(normalized.identity) : undefined;
@@ -6377,6 +6404,7 @@ export class RunManager {
       status: 'running',
       startedAt: resumeStep ? original?.startedAt : new Date().toISOString(),
       runner: taskBackend,
+      model: taskModel,
       systemPrompt: extraSystemPrompt,
       modelIdentity,
     });
@@ -8282,7 +8310,15 @@ export class RunManager {
       const normalized = normalizeModelForBackend(
         stepBackend,
         // The task's model was picked for the task's runner; a step on another runner gets its own default.
-        agentModelsLocked(this.repoRoot) ? undefined : step.model ?? (stepBackend === taskBackend ? input.model : undefined),
+        agentModelsLocked(this.repoRoot)
+          ? undefined
+          : step.model ??
+            resolveTaskModel(
+              await loadConfig(this.repoRoot),
+              this.store.getRun(runId)?.workflow ?? '',
+              stepBackend,
+              stepBackend === taskBackend ? input.model : undefined,
+            ),
         { configuredProvider: await configuredModelProvider(stepBackend, state.cwd) },
       );
       backendModel = normalized?.backendModel;
