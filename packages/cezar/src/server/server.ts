@@ -183,6 +183,7 @@ import { currentUsage, currentTimedUsage, onUsage } from '../core/process-usage.
 import { DashboardReader } from '../workspace/dashboard.ts';
 import { dashboardRoutes } from './dashboard.ts';
 import { WORKFLOWS_DIR, loadWorkflows } from '../workflows/load.ts';
+import { applyStepOverrides } from '../workflows/step-overrides.ts';
 import {
   NODE_CATALOG,
   graphIssues,
@@ -5205,7 +5206,8 @@ export function createApp(deps: ServerDeps) {
     .post('/runs', jsonZodValidator(createRunInputSchema), async (c) => {
       const { root: repoRoot, dataDir, manager } = c.get('project');
       const parsed = { data: c.req.valid('json') };
-      if (agentModelsLocked(repoRoot) && (parsed.data.model?.trim() || parsed.data.reasoningEffort?.trim())) {
+      const overridesModel = Object.values(parsed.data.stepOverrides ?? {}).some((o) => o.model);
+      if (agentModelsLocked(repoRoot) && (parsed.data.model?.trim() || parsed.data.reasoningEffort?.trim() || overridesModel)) {
         return c.json({ error: AGENT_MODELS_LOCKED_ERROR }, 409);
       }
       let workflow: WorkflowDef | undefined;
@@ -5222,6 +5224,13 @@ export function createApp(deps: ServerDeps) {
         const { workflows } = await loadWorkflows(repoRoot);
         workflow = workflows.find((w) => w.name === parsed.data.workflow);
         if (!workflow) return c.json({ error: `unknown workflow: ${parsed.data.workflow}` }, 404);
+      }
+      const workflowSourceDef = workflow;
+      if (parsed.data.stepOverrides) {
+        // Before the provider check below, so a step moved onto another runner is checked for it.
+        const overridden = applyStepOverrides(workflow, parsed.data.stepOverrides);
+        if ('error' in overridden) return c.json({ error: overridden.error }, 400);
+        workflow = overridden;
       }
       const fallback = parsed.data.runner ?? (await loadConfig(repoRoot)).defaultRunner;
       const blocked = await providerActionError(providersRequiredByWorkflow(workflow, fallback), {
@@ -5255,6 +5264,7 @@ export function createApp(deps: ServerDeps) {
       if (typeof images === 'string') return c.json({ error: images }, 400);
       const input = {
         task: parsed.data.task,
+        ...(parsed.data.stepOverrides ? { stepOverrides: parsed.data.stepOverrides } : {}),
         model: parsed.data.model,
         reasoningEffort: parsed.data.reasoningEffort,
         runner: parsed.data.runner,
@@ -5277,13 +5287,13 @@ export function createApp(deps: ServerDeps) {
         deviceSid: deviceSid(c.req.header('x-cezar-sid')),
       };
       if (variants > 1) {
-        const runs = manager.startVariants(workflow, input, variants);
+        const runs = manager.startVariants(workflowSourceDef, input, variants);
         // The entry points at the first variant — the thread the composer navigates to.
         const first = runs[0];
         if (parsed.data.todoId && first) await noteTodoStarted(dataDir, parsed.data.todoId, first.id);
         return c.json({ runs }, 201);
       }
-      const run = manager.startRun(workflow, input);
+      const run = manager.startRun(workflowSourceDef, input);
       if (parsed.data.todoId) await noteTodoStarted(dataDir, parsed.data.todoId, run.id);
       return c.json(run, 201);
     })

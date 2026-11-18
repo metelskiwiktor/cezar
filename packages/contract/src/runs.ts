@@ -45,6 +45,17 @@ import { trackerAssociationSchema, trackerAutomationEventSchema } from './tracke
 
 // ---- the record --------------------------------------------------------------------------
 
+/** Per-task pins, shared by HTTP validation and persisted run records. */
+export const stepOverrideSchema = z
+  .object({
+    runner: runnerSchema.optional(),
+    model: z.string().trim().min(1).max(200).optional(),
+  })
+  .strict()
+  .refine((o) => o.runner !== undefined || o.model !== undefined, { message: 'name a runner, a model, or both' });
+export const stepOverridesSchema = z.record(z.string().min(1).max(80), stepOverrideSchema);
+export type StepOverrides = z.infer<typeof stepOverridesSchema>;
+
 /** One authoritative PR association; optional for compatibility with older run records. */
 export const runPrRefSchema = z.object({
   number: z.number().int().positive(),
@@ -468,6 +479,9 @@ export const runRecordSchema = z.object({
    * like every other key.
    */
   workflowDef: workflowDefSchema.optional(),
+  /** Unmodified catalog snapshot, used only to detect file changes while queued. */
+  workflowSourceDef: workflowDefSchema.optional(),
+  stepOverrides: stepOverridesSchema.optional(),
   /** A graph workflow's walk so far: loop counters and the edges taken, in order
    *  (`<node>.<port>-><target>`). Absent on v1 runs. */
   graphState: z
@@ -1247,6 +1261,8 @@ export const createRunInputBaseSchema = z
     model: z.string().optional(),
     reasoningEffort: reasoningEffortSchema.optional(),
     runner: runnerSchema.optional(),
+    /** Runner/model per agent step id, winning over the workflow's own pins (spec 2026-10-28-step-overrides). */
+    stepOverrides: stepOverridesSchema.optional(),
     /** Agent account for this task (spec 2026-07-29-agent-profiles). Omit to follow the
      *  project's own selection; an id that no longer exists is a 400, not a silent default. */
     agentProfile: z.string().max(64).optional(),

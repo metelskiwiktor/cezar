@@ -38,7 +38,7 @@ import { workflowDefSchema } from '../workflows/types.ts';
 // A contract VALUE, like `workspaceUiStateSchema` in `workspace/migrations.ts`: the persisted
 // `dispatch` object and its wire half are literally the same schema, so they cannot drift.
 import type { RunArtifact, RunArtifactVersion } from '@open-mercato/cezar-contract';
-import { dispatchSchema, runSubjectSchema, trackerAssociationSchema, trackerAutomationEventSchema, webhookAttentionRequestSchema, webhookCompletionReasonSchema, worktreeLifecycleProjectionSchema } from '@open-mercato/cezar-contract';
+import { dispatchSchema, runSubjectSchema, stepOverridesSchema, trackerAssociationSchema, trackerAutomationEventSchema, webhookAttentionRequestSchema, webhookCompletionReasonSchema, worktreeLifecycleProjectionSchema } from '@open-mercato/cezar-contract';
 
 import { RUNNER_IDS } from '../core/agent-runner.ts';
 
@@ -541,6 +541,9 @@ export const runRecordSchema = z.object({
    *  `workflowStepSchema` only with that in mind: a narrowing here silently eats
    *  queued runs rather than degrading them. */
   workflowDef: workflowDefSchema.optional().catch(undefined),
+  /** Unmodified catalog snapshot for queue refresh comparisons; absent on legacy records. */
+  workflowSourceDef: workflowDefSchema.optional().catch(undefined),
+  stepOverrides: stepOverridesSchema.optional().catch(undefined),
   /** Where a graph workflow's walk has been (spec 2026-09-30-workflow-node-editor, phase 3):
    *  per-loop counters and every edge taken, in order, as `<node>.<port>-><target>` (`to` empty
    *  when an unwired port ended the run). Written by `executeGraph` for the task view's live

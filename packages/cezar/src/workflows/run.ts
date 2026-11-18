@@ -1,3 +1,4 @@
+import { applyStepOverrides, type StepOverrides } from './step-overrides.ts';
 import { readOnlyEnv } from '../core/read-only-env.ts';
 import { AgentUsageHolds } from '../workspace/agent-usage-holds.ts';
 import { completionReason } from './completion-reason.ts';
@@ -1040,6 +1041,8 @@ export interface StartRunInput {
   reasoningEffort?: string;
   /** Agent backend chosen for this task (GUI). Unset = the config default. */
   runner?: RunnerId;
+  /** Runner/model per agent step id (spec 2026-10-28-step-overrides). */
+  stepOverrides?: StepOverrides;
   /** Agent account for this task (spec 2026-07-29-agent-profiles), applying to steps that run
    *  on `runner`. Unset = the project's own selection. Persisted on the record so the choice
    *  survives into resume and Continue, and so the thread can say which account did the work. */
@@ -2008,6 +2011,12 @@ export class RunManager {
     input: StartRunInput,
     group?: { groupId: string; variant: string },
   ): RunRecord {
+    const workflowSourceDef = workflow;
+    if (input.stepOverrides) {
+      const overridden = applyStepOverrides(workflow, input.stepOverrides);
+      if ('error' in overridden) throw new Error(overridden.error);
+      workflow = overridden;
+    }
     if (input.readOnly && !group) {
       input = { ...input, worktree: false, newBranch: undefined, dispatchIntent: undefined, forkRef: undefined };
     }
@@ -2057,7 +2066,10 @@ export class RunManager {
     });
     // Persist the full definition so a queued run survives a restart (#367) —
     // ad-hoc "(planned)" chains exist nowhere else to re-resolve from.
-    this.store.updateRun(run.id, { workflowDef: workflow });
+    this.store.updateRun(run.id, {
+      workflowDef: workflow,
+      ...(input.stepOverrides ? { workflowSourceDef, stepOverrides: input.stepOverrides } : {}),
+    });
     // On the record, not only the input: restart recovery rebuilds the run from it.
     if (run.worktree === false && input.newBranch) {
       this.store.updateRun(run.id, { inPlaceBranch: true, ...(input.branch ? { branch: input.branch } : {}) });
@@ -2747,18 +2759,50 @@ export class RunManager {
    * run that already started a step (a re-queue from inside `execute`) keeps what it has.
    */
   private refreshQueuedWorkflow(runId: string, snapshot: WorkflowDef, catalog: readonly WorkflowDef[]): WorkflowDef {
+    const record = this.store.getRun(runId);
     // Scheduled tasks were confirmed against this exact workflow and account binding.
-    if (this.store.getRun(runId)?.deferredBinding) return snapshot;
-    const current = newerCatalogWorkflow(snapshot, catalog);
+    if (record?.deferredBinding) return snapshot;
+    const current = newerCatalogWorkflow(record?.workflowSourceDef ?? snapshot, catalog);
     if (!current) return snapshot;
-    const steps = current.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) }));
+    const steps = current.graph
+      ? graphRailSteps(current.graph)
+      : current.steps.map((s) => ({ id: s.id, name: s.name ?? s.id, kind: stepKind(s) }));
     if (!this.store.replacePendingSteps(runId, steps)) return snapshot;
-    this.store.updateRun(runId, { workflowDef: current });
+    const overrides = record?.stepOverrides;
+    let effective = current;
+    const skipped: string[] = [];
+    if (overrides) {
+      const agents = new Set(
+        current.graph
+          ? current.graph.nodes.filter((n) => n.type === 'agent').map((n) => n.id)
+          : current.steps.filter((s) => !s.command).map((s) => s.id),
+      );
+      const applicable = Object.fromEntries(
+        Object.entries(overrides).filter(([id]) => {
+          if (agents.has(id)) return true;
+          skipped.push(id);
+          return false;
+        }),
+      );
+      const overridden = applyStepOverrides(current, applicable);
+      if ('error' in overridden) throw new Error(overridden.error);
+      effective = overridden;
+    }
+    this.store.updateRun(runId, {
+      workflowDef: effective,
+      ...(overrides ? { workflowSourceDef: current } : {}),
+    });
+    for (const id of skipped) {
+      this.store.appendEvent(runId, {
+        type: 'lifecycle',
+        message: `stepOverrides: skipped "${id}" — no longer an agent step of workflow "${current.name}"`,
+      });
+    }
     this.store.appendEvent(runId, {
       type: 'lifecycle',
       message: `workflow "${current.name}" changed while the task was queued — starting with the current version`,
     });
-    return current;
+    return effective;
   }
 
   /** The persisted definition when it looks sane, else the catalog by name. */
