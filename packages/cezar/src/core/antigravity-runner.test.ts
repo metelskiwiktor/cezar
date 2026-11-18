@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentEvent } from './agent-runner.ts';
 import type { UiEvent } from './ui-events.ts';
-import { AntigravityRunner, antigravityUserFrame, buildAntigravityArgs } from './antigravity-runner.ts';
+import {
+  ANTIGRAVITY_READ_ONLY_PROMPT,
+  AntigravityRunner,
+  antigravityUserFrame,
+  buildAntigravityArgs,
+  isReadOnlyAllowedTools,
+} from './antigravity-runner.ts';
 import { createRunner } from './runner-factory.ts';
 import { buildChildEnv } from './agent-env.ts';
 import { parseAntigravityModelsOutput } from './antigravity-model-catalog.ts';
@@ -76,6 +82,35 @@ describe('Antigravity runner', () => {
 
   it('frames a stdin turn the way agy 1.4.0 reads it', () => {
     expect(antigravityUserFrame('hi\n"there"')).toBe('{"event":"user","message":{"content":"hi\\n\\"there\\""}}\n');
+  });
+
+  it('detects read-only allowedTools and appends a read-only directive to the opening prompt', async () => {
+    expect(isReadOnlyAllowedTools(undefined)).toBe(false);
+    expect(isReadOnlyAllowedTools([])).toBe(false);
+    expect(isReadOnlyAllowedTools(['Read', 'Glob', 'Grep'])).toBe(true);
+    expect(isReadOnlyAllowedTools(['Read', 'Edit'])).toBe(false);
+    expect(isReadOnlyAllowedTools(['Read', 'Bash(git status)'])).toBe(false);
+
+    const bin = await script(echoAgy('JSON.stringify({ content, argv })'));
+    const ro = await new AntigravityRunner({ bin }).run({
+      cwd: tmpdir(),
+      userPrompt: 'review PR',
+      systemPrompt: 'base rules',
+      allowedTools: ['Read', 'Glob', 'Grep'],
+    });
+    const parsedRo = JSON.parse(ro.text) as { content: string; argv: string[] };
+    expect(parsedRo.content).toContain('base rules');
+    expect(parsedRo.content).toContain(ANTIGRAVITY_READ_ONLY_PROMPT);
+    expect(parsedRo.content).toContain('review PR');
+    expect(parsedRo.argv).toContain('--dangerously-skip-permissions');
+
+    const rw = await new AntigravityRunner({ bin }).run({
+      cwd: tmpdir(),
+      userPrompt: 'edit code',
+      allowedTools: ['Read', 'Edit', 'Bash'],
+    });
+    const parsedRw = JSON.parse(rw.text) as { content: string };
+    expect(parsedRw.content).not.toContain(ANTIGRAVITY_READ_ONLY_PROMPT);
   });
 
   it('runs the bundled dry-run mock with no real CLI and emits both protocols', async () => {

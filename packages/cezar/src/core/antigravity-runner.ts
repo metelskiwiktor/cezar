@@ -22,6 +22,30 @@ const DEFAULT_TIMEOUT_MS = 30 * 60_000;
 const KILL_GRACE_MS = 10_000;
 const AUTO_END_DELAY_MS = 250;
 
+const MUTATING_TOOLS = new Set([
+  'bash',
+  'write',
+  'edit',
+  'multiedit',
+  'write_to_file',
+  'replace_file_content',
+  'multi_replace_file_content',
+  'sed_file',
+  'notebook_edit',
+  'notebookedit',
+]);
+
+export const ANTIGRAVITY_READ_ONLY_PROMPT =
+  'READ-ONLY MODE: Only inspect and read files (e.g., Read, Glob, Grep). Do NOT create, edit, delete, or modify any files, and do NOT run any commands that change state.';
+
+export function isReadOnlyAllowedTools(allowedTools?: readonly string[]): boolean {
+  if (!allowedTools || allowedTools.length === 0) return false;
+  return !allowedTools.some((tool) => {
+    const normalized = tool.trim().toLowerCase();
+    return MUTATING_TOOLS.has(normalized) || normalized.startsWith('bash(');
+  });
+}
+
 export const resolveAntigravityBin = (bin?: string): string => bin || process.env.CEZ_AGY_BIN || 'agy';
 /** Path to the bundled mock (`scripts/mock-antigravity.mjs`), for CEZ_DRY_RUN=1. */
 export const mockAntigravityPath = (): string =>
@@ -199,7 +223,9 @@ export class AntigravityRunner implements AgentRunner {
       hard.unref?.();
     };
 
-    sendMessage([...(spec.images ?? []), { type: 'text', text: prependSystemPrompt(spec.systemPrompt, spec.userPrompt) }]);
+    const readOnlyPrompt = isReadOnlyAllowedTools(spec.allowedTools) ? ANTIGRAVITY_READ_ONLY_PROMPT : undefined;
+    const openingSystemPrompt = [spec.systemPrompt?.trim(), readOnlyPrompt].filter(Boolean).join('\n\n') || undefined;
+    sendMessage([...(spec.images ?? []), { type: 'text', text: prependSystemPrompt(openingSystemPrompt, spec.userPrompt) }]);
 
     const limitMs = spec.timeoutMs ?? this.timeoutMs;
     const deadline = armInactivityDeadline(limitMs, () => {
