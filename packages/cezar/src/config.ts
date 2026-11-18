@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { perRunner, workflowModelsSchema, workflowRunnersSchema, worktreeLifecycleConfigSchema } from '@open-mercato/cezar-contract';
+import { perRunner, runnerSchema, workflowModelsSchema, workflowRunnersSchema, worktreeLifecycleConfigSchema } from '@open-mercato/cezar-contract';
 import { loadWorkspaceConfig, type WorkspaceConfig } from './workspace/config.ts';
 import { RUNNER_IDS } from './core/agent-runner.ts';
 
@@ -57,7 +57,7 @@ export const configSchema = z.object({
    * step (workflow). The GUI only offers runners actually installed; this is
    * the preselected default. Also the runner the chain planner uses.
    */
-  defaultRunner: z.enum(RUNNER_IDS).default('claude'),
+  defaultRunner: runnerSchema.default('claude'),
   /** Workflow defaults apply only to their runner; explicit task choices still win. */
   workflowModels: workflowModelsSchema.optional().catch(undefined),
   workflowRunners: workflowRunnersSchema.optional().catch(undefined),
@@ -193,9 +193,13 @@ export function resolveTaskModel(
 function withMachineDefaults(raw: unknown, machine: WorkspaceConfig['agentDefaults']): unknown {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) raw = {};
   const own = raw as Record<string, unknown>;
-  const ownModels = own.defaultModels && typeof own.defaultModels === 'object'
+  let ownModels = own.defaultModels && typeof own.defaultModels === 'object' && !Array.isArray(own.defaultModels)
     ? own.defaultModels as Record<string, unknown>
     : undefined;
+  if (ownModels && Object.prototype.hasOwnProperty.call(ownModels, 'agy')) {
+    const { agy, ...rest } = ownModels;
+    ownModels = rest.antigravity === undefined && agy !== undefined ? { ...rest, antigravity: agy } : rest;
+  }
   const models = { ...machine.models, ...ownModels };
   return {
     ...own,

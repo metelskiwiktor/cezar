@@ -9,9 +9,9 @@ import {
   automationSchedulesSchema,
   automationScheduleIssue,
   automationReportSchema,
+  runnerSchema,
   type AutomationSchedule,
 } from '@open-mercato/cezar-contract';
-import { RUNNER_IDS } from '../core/agent-runner.ts';
 import { workflowStepSchema } from '../workflows/types.ts';
 
 export const automationEventSchema = z.enum([
@@ -51,7 +51,7 @@ export const automationTaskSchema = z
     prompt: z.string().min(1).max(100_000),
     workflow: z.string().trim().min(1).max(200).optional(),
     steps: z.array(workflowStepSchema).min(1).max(100).optional(),
-    runner: z.enum(RUNNER_IDS).optional(),
+    runner: runnerSchema.optional(),
     /** Agent account the launched runs use — `POST /runs`' own `agentProfile`. Omitted = the
      *  project's selection at launch time. */
     agentProfile: z.string().trim().min(1).max(64).optional(),

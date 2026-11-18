@@ -13,7 +13,8 @@ import { z } from 'zod';
 import lockfile from 'proper-lockfile';
 import { agentFallbackPolicyPath, assertCezarHomeWriteIsSandboxed } from '../paths.ts';
 import { atomicWriteJsonSync } from './config.ts';
-import { PROVIDER_IDS, type ProviderId } from '../core/provider-auth.ts';
+import { runnerSchema } from '@open-mercato/cezar-contract';
+import { type ProviderId } from '../core/provider-auth.ts';
 import { DEFAULT_AGENT_ACCOUNT_ID, loadAgentAccounts, type AgentAccountStore } from './agent-accounts.ts';
 
 export type AgentFallbackCandidate = { provider: ProviderId; profileId: string; model?: string };
@@ -23,7 +24,7 @@ export type AgentFallbackPolicy = {
 };
 
 const candidateSchema = z.object({
-  provider: z.enum(PROVIDER_IDS),
+  provider: runnerSchema,
   profileId: z.string().min(1).max(64).default(DEFAULT_AGENT_ACCOUNT_ID),
   model: z.string().min(1).max(200).optional(),
 }).passthrough();

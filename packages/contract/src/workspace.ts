@@ -640,8 +640,17 @@ export type ReasoningEffortOption = z.infer<typeof reasoningEffortOptionSchema>;
  * 400s, so the client compiles against exactly what the route accepts. One definition, used by
  * the route's query validator and by the cockpit's picker.
  */
-export const modelDiscoveryRunnerSchema = z.enum(['claude', 'codex', 'opencode', 'cursor', 'junie', 'antigravity', 'kimi']);
-export type ModelDiscoveryRunner = z.infer<typeof modelDiscoveryRunnerSchema>;
+const modelDiscoveryRunnerEnum = z.enum(['claude', 'codex', 'opencode', 'cursor', 'junie', 'antigravity', 'kimi']);
+export type ModelDiscoveryRunner = z.infer<typeof modelDiscoveryRunnerEnum>;
+export const modelDiscoveryRunnerSchema = Object.assign(
+  z
+    .enum([...modelDiscoveryRunnerEnum.options, 'agy'])
+    .transform((id): ModelDiscoveryRunner => (id === 'agy' ? 'antigravity' : id)),
+  { options: modelDiscoveryRunnerEnum.options, enum: modelDiscoveryRunnerEnum.enum },
+) as unknown as z.ZodType<ModelDiscoveryRunner, ModelDiscoveryRunner> & {
+  options: typeof modelDiscoveryRunnerEnum.options;
+  enum: typeof modelDiscoveryRunnerEnum.enum;
+};
 export const MODEL_DISCOVERY_RUNNERS: readonly ModelDiscoveryRunner[] =
   modelDiscoveryRunnerSchema.options;
 

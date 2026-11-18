@@ -1,8 +1,30 @@
 import { z } from 'zod';
 
-/** The agent backends a run can be dispatched to. */
-export const runnerSchema = z.enum(['claude', 'codex', 'opencode', 'cursor', 'pi', 'junie', 'copilot', 'omp', 'antigravity', 'gemini', 'kimi']);
-export type Runner = z.infer<typeof runnerSchema>;
+const runnerEnumSchema = z.enum([
+  'claude',
+  'codex',
+  'opencode',
+  'cursor',
+  'pi',
+  'junie',
+  'copilot',
+  'omp',
+  'antigravity',
+  'gemini',
+  'kimi',
+]);
+export type Runner = z.infer<typeof runnerEnumSchema>;
+
+/** The agent backends a run can be dispatched to; normalizes legacy `'agy'` to `'antigravity'`. */
+export const runnerSchema = Object.assign(
+  z
+    .enum([...runnerEnumSchema.options, 'agy'])
+    .transform((id): Runner => (id === 'agy' ? 'antigravity' : id)),
+  { options: runnerEnumSchema.options, enum: runnerEnumSchema.enum },
+) as unknown as z.ZodType<Runner, Runner> & {
+  options: typeof runnerEnumSchema.options;
+  enum: typeof runnerEnumSchema.enum;
+};
 
 /** Git facts about the project root, or `null` when it is not a repository. */
 export const repoInfoSchema = z.object({

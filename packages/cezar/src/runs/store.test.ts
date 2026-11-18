@@ -4,6 +4,7 @@ import { threadId } from 'node:worker_threads';
 import { hostname, tmpdir, uptime } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { runRecordSchema as contractRunRecordSchema } from '@open-mercato/cezar-contract';
 import { readRunIndexFromDisk } from './run-index.ts';
 import { reconcileLoadedRun, RunStore } from './store.ts';
 
@@ -2341,6 +2342,99 @@ describe('RunStore — the legacy `claude-cli` runner id (#547)', () => {
       'utf8',
     );
     expect(RunStore.open(dataDir).getRun('legacy-1')).toBeUndefined();
+  });
+});
+
+describe('RunStore — the legacy `agy` runner id (CEZR-1)', () => {
+  let dataDir: string;
+
+  beforeEach(() => {
+    dataDir = mkdtempSync(join(tmpdir(), 'cez-store-agy-'));
+  });
+
+  afterEach(() => {
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  const legacyAgyRecord = {
+    ...LEGACY_RUN,
+    runner: 'agy',
+    steps: [
+      {
+        id: 'task',
+        name: 'Do the task',
+        kind: 'agent' as const,
+        status: 'done' as const,
+        iterations: 1,
+        tokensUsed: 0,
+        sessionId: 'agy-sess-1',
+        backend: 'agy',
+      },
+    ],
+    stepOverrides: {
+      task: { runner: 'agy', model: 'gemini-3.8-flash-high' },
+    },
+    workflowDef: {
+      name: 'custom-agy',
+      source: 'file' as const,
+      steps: [
+        { id: 'task', name: 'Do the task', prompt: '{{task}}', runner: 'agy' },
+      ],
+      graph: {
+        nodes: [
+          { id: 'start', type: 'start' as const },
+          { id: 'agent1', type: 'agent' as const, prompt: '{{task}}', runner: 'agy' },
+          { id: 'disp1', type: 'dispatch' as const, prompt: 'subtask', runner: 'agy' },
+          { id: 'wf1', type: 'workflow' as const, workflow: 'quick-task', runner: 'agy' },
+          { id: 'end', type: 'end' as const, status: 'success' as const },
+        ],
+        edges: [
+          { from: 'start', to: 'agent1' },
+          { from: 'agent1', to: 'disp1' },
+          { from: 'disp1', to: 'wf1' },
+          { from: 'wf1', to: 'end' },
+        ],
+      },
+    },
+  };
+
+  it('loads a record with `agy` in runner, steps[].backend, stepOverrides and workflowDef and folds all to `antigravity`', () => {
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([legacyAgyRecord]), 'utf8');
+
+    const store = RunStore.open(dataDir);
+    const run = store.getRun('legacy-1');
+    expect(run?.runner).toBe('antigravity');
+    expect(run?.steps[0]?.backend).toBe('antigravity');
+    expect(run?.stepOverrides?.task?.runner).toBe('antigravity');
+    expect(run?.workflowDef?.steps[0]?.runner).toBe('antigravity');
+    expect(run?.workflowDef?.graph?.nodes[1]).toMatchObject({ id: 'agent1', runner: 'antigravity' });
+    expect(run?.workflowDef?.graph?.nodes[2]).toMatchObject({ id: 'disp1', runner: 'antigravity' });
+    expect(run?.workflowDef?.graph?.nodes[3]).toMatchObject({ id: 'wf1', runner: 'antigravity' });
+
+    const contractParsed = contractRunRecordSchema.parse(legacyAgyRecord);
+    expect(contractParsed.runner).toBe('antigravity');
+    expect(contractParsed.steps[0]?.backend).toBe('antigravity');
+    expect(contractParsed.stepOverrides?.task?.runner).toBe('antigravity');
+    expect(contractParsed.workflowDef?.steps[0]?.runner).toBe('antigravity');
+    expect(contractParsed.workflowDef?.graph?.nodes[1]).toMatchObject({ id: 'agent1', runner: 'antigravity' });
+    expect(contractParsed.workflowDef?.graph?.nodes[2]).toMatchObject({ id: 'disp1', runner: 'antigravity' });
+    expect(contractParsed.workflowDef?.graph?.nodes[3]).toMatchObject({ id: 'wf1', runner: 'antigravity' });
+  });
+
+  it('rewrites folded `agy` ids as `antigravity` on save and never persists `agy`', () => {
+    writeFileSync(join(dataDir, 'runs.json'), JSON.stringify([legacyAgyRecord]), 'utf8');
+
+    const store = RunStore.open(dataDir);
+    store.updateRun('legacy-1', { title: 'updated' });
+    store.flush();
+
+    const onDisk = readFileSync(join(dataDir, 'runs.json'), 'utf8');
+    expect(onDisk).not.toContain('"agy"');
+    const saved = JSON.parse(onDisk)[0];
+    expect(saved.runner).toBe('antigravity');
+    expect(saved.steps[0].backend).toBe('antigravity');
+    expect(saved.workflowDef.steps[0].runner).toBe('antigravity');
+    expect(saved.workflowDef.graph.nodes[1].runner).toBe('antigravity');
   });
 });
 

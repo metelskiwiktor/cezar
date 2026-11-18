@@ -1,6 +1,5 @@
 import { z } from 'zod';
-import { stepSecretsSchema } from '@open-mercato/cezar-contract';
-import { RUNNER_IDS } from '../core/agent-runner.ts';
+import { runnerSchema, stepSecretsSchema } from '@open-mercato/cezar-contract';
 import type { WorkflowStepDef } from './types.ts';
 
 /**
@@ -57,7 +56,7 @@ export const graphNodeSchema = z.discriminatedUnion('type', [
     prompt: z.string().optional(),
     skill: z.string().optional(),
     model: z.string().optional(),
-    runner: z.enum(RUNNER_IDS).optional(),
+    runner: runnerSchema.optional(),
     allowedTools: z.array(z.string()).optional(),
     bashAllowlist: z.array(z.string()).optional(),
     /** Author-declared outcomes (D10/D17). The agent picks one by ending its turn with
@@ -98,7 +97,7 @@ export const graphNodeSchema = z.discriminatedUnion('type', [
     ...nodeBase,
     type: z.literal('dispatch'),
     prompt: z.string().min(1),
-    runner: z.enum(RUNNER_IDS).optional(),
+    runner: runnerSchema.optional(),
     model: z.string().optional(),
     budgetUsd: z.number().positive().optional(),
   }),
@@ -127,7 +126,7 @@ export const graphNodeSchema = z.discriminatedUnion('type', [
     type: z.literal('workflow'),
     workflow: z.string().min(1),
     prompt: z.string().optional(),
-    runner: z.enum(RUNNER_IDS).optional(),
+    runner: runnerSchema.optional(),
     budgetUsd: z.number().positive().optional(),
   }),
   /** Branch on data: the task's diff, its changed paths, another node's output, the base branch. */

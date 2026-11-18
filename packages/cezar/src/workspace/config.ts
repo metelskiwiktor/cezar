@@ -6,7 +6,7 @@ import { readFileWithRetry, renameSyncWithRetry, renameWithRetry } from '../fs-r
 // Contract VALUES, like `workspaceUiStateSchema` in workspace/migrations.ts: the tag bounds this
 // file must not `.catch` away are the same constants the PATCH route validates against, so they
 // are imported rather than repeated.
-import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH, perRunner } from '@open-mercato/cezar-contract';
+import { PROJECT_TAGS_MAX, PROJECT_TAG_MAX_LENGTH, perRunner, runnerSchema } from '@open-mercato/cezar-contract';
 import { PROVIDER_IDS, type ProviderId } from '../core/provider-auth.ts';
 import { assertCezarHomeWriteIsSandboxed, isAbsolutePath, workspaceConfigPath } from '../paths.ts';
 
@@ -150,7 +150,7 @@ const composerDefaultsSchema = z
  */
 const agentDefaultsSchema = z
   .object({
-    runner: z.enum(PROVIDER_IDS).optional().catch(undefined),
+    runner: runnerSchema.optional().catch(undefined),
     models: perRunner(z.string().trim().min(1).max(200).optional().catch(undefined))
       .passthrough()
       .optional()
@@ -163,8 +163,6 @@ const workspacePathSchema = (envName: 'CEZ_BROWSE_ROOT' | 'CEZ_PROJECTS_DIR', fa
   return z.string().min(1).max(4096).default(defaultValue).catch(defaultValue);
 };
 
-const providerIdSet = new Set<string>(PROVIDER_IDS);
-
 const disabledProvidersSchema = z
   .array(z.unknown())
   .default(() => [])
@@ -172,8 +170,8 @@ const disabledProvidersSchema = z
   .transform((values): ProviderId[] => {
     const seen = new Set<ProviderId>();
     for (const value of values) {
-      if (typeof value !== 'string' || !providerIdSet.has(value)) continue;
-      seen.add(value as ProviderId);
+      const parsed = runnerSchema.safeParse(value);
+      if (parsed.success) seen.add(parsed.data);
     }
     return PROVIDER_IDS.filter((provider) => seen.has(provider));
   });

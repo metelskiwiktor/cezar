@@ -86,8 +86,12 @@ const usageCounterSchema = z.number().finite().nonnegative();
  * should be able to ASK for the legacy spelling.
  */
 const storedRunnerSchema = z
-  .enum([...RUNNER_IDS, 'claude-cli'])
-  .transform((id) => (id === 'claude-cli' ? ('claude' as const) : id));
+  .enum([...RUNNER_IDS, 'claude-cli', 'agy'])
+  .transform((id): RunnerId => {
+    if (id === 'claude-cli') return 'claude';
+    if (id === 'agy') return 'antigravity';
+    return id;
+  });
 
 const stepStateSchema = z.object({
   id: z.string(),

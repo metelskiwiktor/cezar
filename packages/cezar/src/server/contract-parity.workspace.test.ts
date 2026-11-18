@@ -2,7 +2,14 @@ import type { InferRequestType, InferResponseType } from 'hono/client';
 import { hc } from 'hono/client';
 import type { JSONParsed, JSONValue } from 'hono/utils/types';
 import { describe, expect, it } from 'vitest';
-import { runnerSchema, workspaceConfigResponseSchema as workspaceConfigResponseValue } from '@open-mercato/cezar-contract';
+import {
+  modelDiscoveryRunnerSchema,
+  perRunner,
+  runnerSchema,
+  workflowModelsSchema,
+  workflowRunnersSchema,
+  workspaceConfigResponseSchema as workspaceConfigResponseValue,
+} from '@open-mercato/cezar-contract';
 import type { z } from 'zod';
 import type { brandingLogoUploadSchema } from './server.ts';
 import type {
@@ -349,5 +356,25 @@ describe('src/contract projects/workspace schemas match the routes exactly', () 
     // The `models` keys are spelled by hand, so a new runner would otherwise drift it silently (#1234).
     const models = workspaceConfigResponseValue.shape.agentDefaults.shape.models.unwrap();
     expect(Object.keys(models.shape).sort()).toEqual([...runnerSchema.options].sort());
+  });
+
+  it('normalizes legacy `agy` runner ids and per-runner keys to `antigravity` without exposing `agy` in options', () => {
+    expect(runnerSchema.options).not.toContain('agy');
+    expect(runnerSchema.enum).not.toHaveProperty('agy');
+    expect(runnerSchema.parse('agy')).toBe('antigravity');
+    expect(modelDiscoveryRunnerSchema.parse('agy')).toBe('antigravity');
+    expect(workflowRunnersSchema.parse({ wf: 'agy' })).toEqual({ wf: 'antigravity' });
+    expect(workflowModelsSchema.parse({ wf: { agy: 'gemini-3.8-flash-high' } })).toEqual({
+      wf: { antigravity: 'gemini-3.8-flash-high' },
+    });
+    expect(perRunner(workspaceConfigResponseValue.shape.agentDefaults.shape.runner).parse({ agy: 'agy' })).toEqual({
+      antigravity: 'antigravity',
+    });
+    expect(
+      perRunner(workspaceConfigResponseValue.shape.agentDefaults.shape.runner).parse({
+        agy: 'claude',
+        antigravity: 'antigravity',
+      }),
+    ).toEqual({ antigravity: 'antigravity' });
   });
 });

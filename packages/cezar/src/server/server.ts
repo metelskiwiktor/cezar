@@ -142,6 +142,7 @@ import {
   modelDiscoveryRunnerSchema,
   openProjectInSchema,
   perRunner,
+  runnerSchema,
   startTodoInputSchema,
   registerProjectInputSchema,
   updateProjectInputSchema,
@@ -595,7 +596,7 @@ type ProjectApiEnv = { Variables: { project: ProjectContext } };
 const projectIdSchema = z.union([z.literal('default'), z.string().regex(PROJECT_ID_RE)]);
 
 const providerConnectSchema = z.object({
-  provider: z.enum(PROVIDER_IDS),
+  provider: runnerSchema,
   /** Which agent account to sign in (spec 2026-07-29-agent-profiles). Absent = the discovered
    *  default, which is what every pre-profiles client sends. Without this, "Connect" on a second
    *  Claude account would open a login for the FIRST one and report success. */
@@ -606,7 +607,7 @@ const providerConnectSchema = z.object({
  *  src/workspace/config.ts exactly, so a value these accept can never be degraded away by the
  *  next load's `.catch`. The id is allocated server-side and is never a request field. */
 const createAgentProfileSchema = z.object({
-  provider: z.enum(PROVIDER_IDS),
+  provider: runnerSchema,
   label: z.string().trim().max(200).optional(),
   configDir: z.string().trim().min(1).max(4096),
 }).strict();
@@ -630,7 +631,7 @@ const updateAgentProfileSchema = z.object({
 const selectAgentProfileSchema = z.object({
   /** `null` targets the machine-wide default rather than one repo. */
   projectId: z.string().min(1).max(64).nullable(),
-  provider: z.enum(PROVIDER_IDS),
+  provider: runnerSchema,
   profileId: z.string().max(64).nullable(),
 }).strict();
 
@@ -659,7 +660,7 @@ function allocateAgentProfileId(source: string, taken: Iterable<string>): string
 /** In-flight `POST /runs/:id/pr` publishes, keyed by data dir + run id. */
 const prPublishes = new Map<string, Promise<{ outcome: DraftPrOutcome; branch: string }>>();
 
-const providerParamSchema = z.enum(PROVIDER_IDS);
+const providerParamSchema = runnerSchema;
 const providerEnabledSchema = z.object({ enabled: z.boolean() }).strict();
 const providerRetrySchema = z.object({
   authFailureId: z.string().min(1).max(128),
@@ -1155,7 +1156,7 @@ const continueSchema = continueInputSchema;
 // absent so it never touches `task`.
 const startTodoSchema = z
   .object({
-    runner: z.enum(RUNNER_IDS).optional(),
+    runner: runnerSchema.optional(),
     model: z.string().max(200).optional(),
     prompt: z
       .string()
@@ -9328,8 +9329,8 @@ const RESUME_COMMANDS: Record<RunnerId, (sessionId: string) => string | null> = 
 
 export function resumeCommand(runner: string | undefined, sessionId: string): string | null {
   if (!isSafeSessionId(sessionId)) return null;
-  // A record from before runners existed, or the legacy spelling, is a Claude session.
-  const id = runner === undefined || runner === 'claude-cli' ? 'claude' : runner;
+  // A record from before runners existed, or a legacy spelling, folds to the canonical runner.
+  const id = runner === undefined || runner === 'claude-cli' ? 'claude' : runner === 'agy' ? 'antigravity' : runner;
   // A runner id this version does not know (a downgraded record) has no recipe here.
   if (!(RUNNER_IDS as readonly string[]).includes(id)) return null;
   return RESUME_COMMANDS[id as RunnerId](sessionId);

@@ -1,6 +1,5 @@
 import { z } from 'zod';
-import { stepSecretsSchema } from '@open-mercato/cezar-contract';
-import { RUNNER_IDS } from '../core/agent-runner.ts';
+import { runnerSchema, stepSecretsSchema } from '@open-mercato/cezar-contract';
 import { workflowGraphSchema } from './graph.ts';
 
 /**
@@ -35,14 +34,9 @@ export const workflowStepSchema = z
     reasoningEffort: z.string().trim().min(1).max(64).optional(),
     /** Per-step agent backend override (falls back to the task / config default).
      *
-     *  Deliberately NOT widened to the legacy `claude-cli` the way the run store's
-     *  `runner`/`backend` were (#547). This enum validates two things a user AUTHORS —
-     *  workflow YAML, and the inline chain on `POST /runs` — so the selectable set is the
-     *  right one, and rejecting `claude-cli` here is a loud load-time error rather than
-     *  data loss. It also gates the persisted `workflowDef` (`runs/store.ts`), but nothing
-     *  has ever been able to write the legacy id THERE either, because this same enum was
-     *  the only way in: there is no legacy shape to keep parseable. */
-    runner: z.enum(RUNNER_IDS).optional(),
+     *  Uses `runnerSchema` so legacy `'agy'` folds to `'antigravity'`, while still
+     *  deliberately NOT widened to `'claude-cli'` the way `storedRunnerSchema` is. */
+    runner: runnerSchema.optional(),
     allowedTools: z.array(z.string()).optional(),
     bashAllowlist: z.array(z.string()).optional(),
     /** Wall-clock limit for this agent step before SIGTERM → SIGKILL (ms); up to 4 h. Defaults to the runner's default. */

@@ -438,4 +438,21 @@ describe('loadConfig machine-wide agent defaults', () => {
     expect(config.defaultRunner).toBe('claude');
     expect(config.systemPrompt).toBe('be brief');
   });
+
+  it('normalizes legacy `agy` runner ids and per-runner model keys to `antigravity`', async () => {
+    writeMachine({ runner: 'agy', models: { agy: 'gemini-machine' } });
+    writeRepo({
+      defaultRunner: 'agy',
+      workflowRunners: { 'quick-task': 'agy' },
+      defaultModels: { agy: 'gemini-repo' },
+      workflowModels: { 'quick-task': { agy: 'gemini-wf' } },
+    });
+    const config = await loadConfig(repoRoot);
+    expect(config.defaultRunner).toBe('antigravity');
+    expect(config.workflowRunners).toEqual({ 'quick-task': 'antigravity' });
+    expect(config.defaultModels).toEqual({ antigravity: 'gemini-repo' });
+    expect(config.workflowModels).toEqual({ 'quick-task': { antigravity: 'gemini-wf' } });
+    expect('agy' in (config.defaultModels ?? {})).toBe(false);
+    expect('agy' in (config.workflowModels?.['quick-task'] ?? {})).toBe(false);
+  });
 });
